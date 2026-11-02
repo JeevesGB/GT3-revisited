@@ -471,6 +471,8 @@ Writer Session::settings_msg() const {
     w.u8_(settings_.category);
     w.u8_(settings_.drive);
     w.u8_(settings_.aspiration);
+    w.u8_(settings_.ai_opponents);
+    w.u32_(settings_.ai_seed ? settings_.ai_seed : 1);
     return w;
 }
 
@@ -1542,6 +1544,12 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
             s.category = r.u8_();
             s.drive = r.u8_();
             s.aspiration = r.u8_();
+        }
+        if (r.remaining() >= 5) { // AI opponents (older hosts: none)
+            s.ai_opponents = r.u8_();
+            s.ai_seed = r.u32_();
+            if (!s.ai_seed) s.ai_seed = 1;
+            if (s.ai_opponents > u8(kMaxPlayers - 1)) s.ai_opponents = u8(kMaxPlayers - 1);
         }
         if (!r.ok()) break;
         settings_ = s;

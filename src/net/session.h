@@ -58,6 +58,10 @@ struct Settings {
     // category (1 production, 2 race and rally), the drivetrain (1 FF, 2 FR, 3 4WD, 4 MR, 5 RR)
     // and the aspiration (1 NA, 2 turbo).
     u8 car_class = 0, category = 0, drive = 0, aspiration = 0;
+    // AI opponents the host adds (0 = humans only). Total cars = humans in the Load grid + AI,
+    // clamped to kMaxPlayers. ai_seed makes every client draw the same AI cars.
+    u8 ai_opponents = 0;
+    u32 ai_seed = 1;
 };
 
 // How this player reaches another one.

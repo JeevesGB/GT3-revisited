@@ -50,12 +50,13 @@
 #include <SDL3/SDL_scancode.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <memory>
 #include <set>
-#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -162,11 +163,23 @@ public:
             if (ns.active()) ns.set_ready(false);
         }
         ns.poll();
+        // Host: keep AI count within the remaining slots as players join or leave.
+        if (ns.is_host() && ns.active()) {
+            const int before = ai_opponents_;
+            clamp_ai(ns);
+            if (ai_opponents_ != before) push_settings();
+        }
         update_voice(app, ns);
         while (std::optional<net::Event> e = ns.next_event()) {
             using K = net::Event::Kind;
             switch (e->kind) {
-            case K::Joined: status("Joined. Choose your car and press Ready.", false); break;
+            case K::Joined:
+                status("Joined. Choose your car and press Ready.", false);
+                if (ns.is_host()) {
+                    clamp_ai(ns);
+                    push_settings();
+                }
+                break;
             case K::Rejected:
             case K::Disconnected:
                 if (ns.update_required()) { // the relay server: this game is below its min_online
@@ -345,6 +358,8 @@ private:
         tcs_on_ = menu::flow::option_value(&cfg, "assist_tcs") != "off";
         rules_.allow_mods = cfg.get("online", "mods").value_or("on") != "off";
         ghost_ms_ = u16(num("ghost_ms", "150", 0, 1000));
+        ai_opponents_ = num("ai_opponents", "0", 0, net::kMaxPlayers - 1);
+        ai_seed_ = u32(std::max(1, std::atoi(cfg.get("online", "ai_seed").value_or("1").c_str())));
         rules_.stock_only = cfg.get("online", "stock_only").value_or("off") == "on";
         rules_.max_ps = num("max_ps", "0", 0, 2000);
         rules_.car_class = num("car_class", "0", 0, game::kArcadeClasses);
@@ -626,6 +641,8 @@ private:
         cfg.set("options", "assist_tcs", tcs_on_ ? "on" : "off");
         cfg.set("online", "mods", rules_.allow_mods ? "on" : "off");
         cfg.set("online", "ghost_ms", std::to_string(ghost_ms_));
+        cfg.set("online", "ai_opponents", std::to_string(ai_opponents_));
+        cfg.set("online", "ai_seed", std::to_string(ai_seed_ ? ai_seed_ : 1));
         cfg.set("online", "stock_only", rules_.stock_only ? "on" : "off");
         cfg.set("online", "max_ps", std::to_string(rules_.max_ps));
         cfg.set("online", "car_class", std::to_string(rules_.car_class));
@@ -946,7 +963,22 @@ private:
 
     // --- lobby page ---
 
-    enum Row { kCourse, kLaps, kGhost, kRules, kCar, kColour, kGearbox, kAsm, kTcs, kGo, kKick, kLeave, kRows };
+    enum Row {
+        kCourse,
+        kLaps,
+        kGhost,
+        kAi,
+        kRules,
+        kCar,
+        kColour,
+        kGearbox,
+        kAsm,
+        kTcs,
+        kGo,
+        kKick,
+        kLeave,
+        kRows
+    };
     static constexpr float kRowY = 130, kRowH = 15;
     enum LobbyFooter { kFootLeave };
 
@@ -1037,7 +1069,20 @@ private:
     static constexpr int kGhostSteps = int(sizeof(kGhostMs) / sizeof(kGhostMs[0]));
     static std::string ghost_text(u16 ms) { return ms ? "above " + std::to_string(ms) + " ms round trip" : "never (always contact)"; }
 
+    // Max AI the host may add: kMaxPlayers minus current human roster (at least 0).
+    int ai_cap(const net::Session& ns) const {
+        const int humans = std::max(1, int(ns.players().size()));
+        return std::max(0, net::kMaxPlayers - humans);
+    }
+
+    void clamp_ai(const net::Session& ns) {
+        const int cap = ai_cap(ns);
+        if (ai_opponents_ > cap) ai_opponents_ = cap;
+    }
+
     void push_settings() {
+        net::Session& ns = net::online();
+        clamp_ai(ns);
         net::Settings st;
         st.course = course_label();
         st.laps = laps_;
@@ -1047,7 +1092,9 @@ private:
         st.max_ps = u16(rules_.max_ps);
         st.car_class = u8(rules_.car_class), st.category = u8(rules_.category);
         st.drive = u8(rules_.drive), st.aspiration = u8(rules_.aspiration);
-        net::online().set_settings(st);
+        st.ai_opponents = u8(ai_opponents_);
+        st.ai_seed = ai_seed_ ? ai_seed_ : 1;
+        ns.set_settings(st);
         if (page_ == Page::Cars && app_) {
             assign_classes();
             car_picker_.refresh(*app_);
@@ -1117,6 +1164,16 @@ private:
             for (int j = 0; j < kGhostSteps; ++j)
                 if (kGhostMs[j] == ghost_ms_) k = j;
             ghost_ms_ = kGhostMs[std::clamp(k + (h > 0 ? 1 : -1), 0, kGhostSteps - 1)];
+            push_settings();
+            break;
+        }
+        case kAi: {
+            if (!ns.is_host() || !h) break;
+            const int cap = ai_cap(ns);
+            ai_opponents_ = std::clamp(ai_opponents_ + (h > 0 ? 1 : -1), 0, cap);
+            // New seed when the count changes so a re-roll of the field is possible by nudging left/right.
+            ai_seed_ = u32(std::chrono::steady_clock::now().time_since_epoch().count() & 0xffffffffu);
+            if (!ai_seed_) ai_seed_ = 1;
             push_settings();
             break;
         }
@@ -1315,6 +1372,21 @@ private:
         row(kLaps, "Laps", std::to_string(host ? laps_ : ns.laps()), host, host);
         u16 gms = host ? ghost_ms_ : ns.settings().ghost_ping_ms;
         row(kGhost, "Ghost cars", ghost_text(gms), host, host);
+        {
+            // AI fill empty grid slots up to kMaxPlayers (e.g. 3 humans → at most 3 AI).
+            const int cap = ai_cap(ns);
+            const int ai = host ? std::min(ai_opponents_, cap) : int(ns.settings().ai_opponents);
+            const int humans = std::max(1, int(ns.players().size()));
+            std::string val = std::to_string(ai);
+            if (cap <= 0)
+                val = "0 (lobby full)";
+            else
+                val += " / " + std::to_string(cap) + " max (" + std::to_string(humans) + "+" + std::to_string(ai) +
+                       " cars)";
+            // Host can always focus the row; arrows only when slots remain or AI can be reduced.
+            row(kAi, "AI opponents", val, host, host && (cap > 0 || ai > 0), 0,
+                host ? "(Left/Right: CPU cars in the race; total players+AI ≤ 6)" : "(set by the host)");
+        }
         row(kRules, "Car rules", game::car_rules_summary(rules_of(ns)), true, false, 0,
             host ? "(Cross: set the rules)" : "(Cross: see the rules)");
         std::string problem = ns.joined() ? rule_problem(ns) : "";
@@ -1738,6 +1810,8 @@ private:
     std::map<std::string, Download> downloading_; // by package hash
     game::CarRules rules_; // the host's rules (as set here; without dirt_course)
     u16 ghost_ms_ = 150;
+    int ai_opponents_ = 0; // host: AI cars added to the race (humans + AI ≤ kMaxPlayers)
+    u32 ai_seed_ = 1;      // shared draw seed so every client picks the same AI cars
     int kick_sel_ = 0;
     bool kick_armed_ = false;
     std::string status_;
