@@ -377,6 +377,29 @@ void RaceScreen::update_drive(App& app, double dt) {
     const MenuInput& m = app.menu();
     if (online_ && !online_update(app, dt)) return;
 
+    // H: extra HUD cycles off → compact → full. Persists to [hud] extra.
+    {
+        int nkeys = 0;
+        const bool* keys = SDL_GetKeyboardState(&nkeys);
+        static bool h_was = false, n_was = false;
+        const bool h = nkeys > SDL_SCANCODE_H && keys[SDL_SCANCODE_H];
+        const bool n = nkeys > SDL_SCANCODE_N && keys[SDL_SCANCODE_N];
+        if (h && !h_was) {
+            extra_hud_ = (extra_hud_ + 1) % 3;
+            app.config().set("hud", "extra", std::to_string(extra_hud_));
+            app.save_config();
+            toast(extra_hud_ == 0 ? "Extra HUD off (H)" : extra_hud_ == 1 ? "Extra HUD compact (H)" : "Extra HUD full (H)");
+        }
+        if (n && !n_was) {
+            nameplates_on_ = !nameplates_on_;
+            app.config().set("hud", "names", nameplates_on_ ? "on" : "off");
+            app.save_config();
+            toast(nameplates_on_ ? "Nameplates on (N)" : "Nameplates off (N)");
+        }
+        h_was = h;
+        n_was = n;
+    }
+
     // F1: toggle semi-transparent coloured road-surface overlay (tarmac / kerb / dirt / ...).
     // Available in offline and online races (including while paused online, where the sim continues).
     if (course_scene_) {

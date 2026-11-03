@@ -94,6 +94,13 @@ public:
     void split(int point, long long split_ms); // the current lap's split time
     void lap_done(long long lap_ms);            // kept, with its split times, when faster
     long long best_lap() const { return best_lap_; }
+    // Current-lap and best split times (ms); < 0 = not set. Point 0..2 are course splits, 3 is the line.
+    long long cur_split(int point) const {
+        return point >= 0 && point < kPoints ? cur_[size_t(point)] : -1;
+    }
+    long long best_split(int point) const {
+        return point >= 0 && point < kPoints ? best_[size_t(point)] : -1;
+    }
 
 private:
     std::array<long long, kPoints> best_{}, cur_{};

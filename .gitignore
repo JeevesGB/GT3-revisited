@@ -25,7 +25,6 @@ __pycache__/
 .cache/
 compile_commands.json
 dist/
-data/courses/
 .vs 
 CMakeSettings.json
 # Signing keys

@@ -64,6 +64,10 @@ public:
     // True when we are currently allowed to send (not muted, and open-mic or PTT held).
     bool transmitting() const { return active_ && !muted_ && (open_mic_ || talking_); }
 
+    // Recent activity for UI (speaker icon): true for ~0.4 s after a real sent/received frame.
+    bool local_speaking() const;
+    bool remote_speaking(u8 player) const;
+
     // Drain encoded frames produced while transmitting (call after input / each frame).
     std::vector<VoiceFrame> take_outgoing();
 
@@ -94,6 +98,10 @@ private:
     float vad_threshold_ = 0.012f; // slightly sensitive so quieter speech still opens the mic
     int vad_hangover_frames_ = 0;
     static constexpr int kVadHangover = 20; // ~400 ms after last loud frame
+    static constexpr double kSpeakHold = 0.40; // seconds the UI icon stays up after activity
+    double last_tx_time_ = -1e9;
+    std::array<double, kVoiceMaxPlayers> last_rx_time_{};
+    static double steady_now();
 
     SDL_AudioStream* capture_ = nullptr;
     SDL_AudioStream* playback_ = nullptr;

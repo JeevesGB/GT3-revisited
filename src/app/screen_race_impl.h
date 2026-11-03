@@ -847,6 +847,8 @@ private:
     } net_;
     // Proximity voice (online only; push-to-talk V). Created when the race loads.
     std::unique_ptr<net::VoiceChat> voice_;
+    int extra_hud_ = 0;         // 0 off, 1 compact, 2 full — H cycles; [hud] extra
+    bool nameplates_on_ = true; // N toggles; [hud] names
     // 2P battle (split screen): player 2 drives the field's second car with pad 2.
     bool two_player_ = false;
     OpponentEngines opp_engines_;

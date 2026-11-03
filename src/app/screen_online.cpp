@@ -1302,9 +1302,23 @@ private:
         ui.text(24, 30, "PLAYERS", colors::kDim);
         float y = 44;
         const game::GtData* gd = gt_data();
+        // Speaker icon when that player is transmitting (reference: slate cone + arcs).
+        auto draw_speaking_icon = [&](float x, float y0) {
+            const Color c{0x8A, 0x9E, 0xAE, 0xFF};
+            ui.fill(x, y0 + 4, 3, 6, c);
+            ui.fill(x + 3, y0 + 2, 2, 10, c);
+            ui.fill(x + 5, y0 + 1, 2, 12, c);
+            ui.fill(x + 9, y0 + 5, 1, 4, c);
+            ui.fill(x + 11, y0 + 3, 1, 8, c);
+            ui.fill(x + 13, y0 + 1, 1, 12, c);
+        };
         for (const net::Player& p : ns.players()) {
             bool me = int(p.id) == ns.my_id();
-            ui.text(24, y, Ui::clip(p.name, 110), me ? colors::kAccent : colors::kText);
+            ui.text(24, y, Ui::clip(p.name, 100), me ? colors::kAccent : colors::kText);
+            const bool speaking =
+                voice_ && voice_->active() &&
+                (me ? voice_->local_speaking() : voice_->remote_speaking(p.id));
+            if (speaking) draw_speaking_icon(122, y - 2);
             std::string car = p.car;
             for (const Entry& e : cars_)
                 if (e.label == p.car && e.garage < 0 && e.arcade.empty()) car = e.name;
@@ -1330,11 +1344,22 @@ private:
             if (!me) {
                 net::Link l = ns.link(p.id);
                 if (l.known) {
-                    std::string t = std::string(l.direct ? "direct " : l.relay ? "relay " : "via host ") +
-                                    std::to_string(int(l.rtt_ms + 0.5)) + " ms";
                     u16 gms = ns.settings().ghost_ping_ms;
-                    bool ghost = gms && l.rtt_ms > gms;
-                    ui.text(350, y, t, ghost ? colors::kBad : l.direct ? colors::kGood : colors::kDim);
+                    const bool ghost = gms && l.rtt_ms > gms;
+                    const char* kind = l.direct ? "DIR" : l.relay ? "RLY" : "HOST";
+                    Color kc = ghost ? colors::kBad : l.direct ? colors::kGood : colors::kDim;
+                    ui.text(350, y, kind, kc);
+                    ui.text(378, y, std::to_string(int(l.rtt_ms + 0.5)), ghost ? colors::kBad : colors::kText);
+                    ui.text(404, y, "ms", colors::kDim);
+                    const float bar_x = 424.0f, bar_w = 48.0f, bar_h = 6.0f;
+                    ui.fill(bar_x, y + 3, bar_w, bar_h, Color{40, 40, 40, 200});
+                    float fill = float(std::min(300.0, std::max(0.0, l.rtt_ms)) / 300.0);
+                    Color bc = ghost                                      ? colors::kBad
+                               : l.rtt_ms < 80                            ? colors::kGood
+                               : l.rtt_ms < 150                           ? Color{220, 180, 80, 255}
+                                                                          : colors::kBad;
+                    ui.fill(bar_x, y + 3, bar_w * fill, bar_h, bc);
+                    if (ghost) ui.text(478, y, "GHOST", colors::kBad);
                 }
             }
             y += 14;
@@ -1373,19 +1398,9 @@ private:
         u16 gms = host ? ghost_ms_ : ns.settings().ghost_ping_ms;
         row(kGhost, "Ghost cars", ghost_text(gms), host, host);
         {
-            // AI fill empty grid slots up to kMaxPlayers (e.g. 3 humans → at most 3 AI).
-            const int cap = ai_cap(ns);
-            const int ai = host ? std::min(ai_opponents_, cap) : int(ns.settings().ai_opponents);
-            const int humans = std::max(1, int(ns.players().size()));
-            std::string val = std::to_string(ai);
-            if (cap <= 0)
-                val = "0 (lobby full)";
-            else
-                val += " / " + std::to_string(cap) + " max (" + std::to_string(humans) + "+" + std::to_string(ai) +
-                       " cars)";
-            // Host can always focus the row; arrows only when slots remain or AI can be reduced.
-            row(kAi, "AI opponents", val, host, host && (cap > 0 || ai > 0), 0,
-                host ? "(Left/Right: CPU cars in the race; total players+AI ≤ 6)" : "(set by the host)");
+            // Kept in the UI for a future host-authoritative AI; local AI desyncs online humans.
+            row(kAi, "AI opponents", "off (sync)", false, false, 0,
+                "(not available online yet — local AI desyncs players)");
         }
         row(kRules, "Car rules", game::car_rules_summary(rules_of(ns)), true, false, 0,
             host ? "(Cross: set the rules)" : "(Cross: see the rules)");

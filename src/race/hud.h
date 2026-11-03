@@ -130,6 +130,32 @@ struct HudData {
     std::vector<EventDisplay::Message> events;
     bool event_icon = false;
     float event_icon_dx = 0, event_icon_dy = 0;
+
+    // Extra HUD (optional): 0 off, 1 compact, 2 full (H cycles; [hud] extra=0/1/2).
+    int extra_hud = 0;
+    float gap_ahead_m = -1.0f;
+    float gap_behind_m = -1.0f;
+    float gap_leader_m = -1.0f;
+    float gap_ahead_s = -1.0f;
+    float gap_behind_s = -1.0f;
+    float gap_leader_s = -1.0f;
+    float delta_best_s = 0.0f;
+    bool have_delta_best = false;
+    std::string ahead_name;
+    bool ahead_ghosted = false;
+    // Sector deltas vs session best (seconds).
+    float sector_delta_s[3] = {0, 0, 0};
+    bool sector_delta_on[3] = {false, false, false};
+    // Same-maker rival ahead (when different from overall ahead).
+    float gap_class_m = -1.0f, gap_class_s = -1.0f;
+    std::string class_ahead_name;
+    struct Nameplate {
+        float x = 0, y = 0;
+        std::string text;
+        bool player = false;
+        bool ghosted = false;
+    };
+    std::vector<Nameplate> nameplates;
 };
 
 class Hud {

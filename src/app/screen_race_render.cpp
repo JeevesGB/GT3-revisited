@@ -5,6 +5,8 @@
 
 #include "app/screen_race_impl.h"
 
+#include <cstring>
+
 namespace gt3r::race_screen {
 
 // The car reflection map (GT3 renders the course around the focus car into a 256x256
@@ -507,6 +509,122 @@ HudData RaceScreen::hud_data(int player) {
         for (char c : title_name_) d.intro_title += c >= 'a' && c <= 'z' ? char(c - 'a' + 'A') : c;
         d.title_alpha = title_clock_.alpha();
     }
+    // Extra HUD: gaps, leader, class rival, sector deltas, nameplates.
+    d.extra_hud = extra_hud_;
+    if (field_ && !p2 && (extra_hud_ > 0 || nameplates_on_)) {
+        const int me = -1;
+        const std::vector<RaceField::Standing> st = field_->standings();
+        int idx = -1;
+        for (size_t i = 0; i < st.size(); ++i)
+            if (st[i].car == me) {
+                idx = int(i);
+                break;
+            }
+        const float spd = std::max(1.0f, float(s.speed_kmh) / 3.6f);
+        auto gap = [&](int other_i, float& metres, float& seconds) {
+            metres = -1.0f;
+            seconds = -1.0f;
+            if (other_i < 0 || other_i >= int(st.size()) || idx < 0) return;
+            metres = float(std::abs(st[size_t(idx)].distance - st[size_t(other_i)].distance));
+            seconds = metres / spd;
+        };
+        auto car_name = [&](int car) -> std::string {
+            if (car == -1) return "You";
+            if (car == -2) return "Player 2";
+            if (car >= 0 && car < field_->opponents()) {
+                if (online_ && car < int(net_.names.size()) && !net_.names[size_t(car)].empty())
+                    return net_.names[size_t(car)];
+                return field_->opponent_label(car);
+            }
+            return {};
+        };
+        auto maker_of = [&](int car) -> std::string {
+            std::string label;
+            if (car == -1) label = car_.label;
+            else if (car >= 0 && car < field_->opponents()) label = field_->opponent_label(car);
+            if (label.empty()) return {};
+            if (const data::Car* c = db_.car(label)) return c->maker;
+            return {};
+        };
+        if (extra_hud_ > 0 && idx > 0) {
+            gap(idx - 1, d.gap_ahead_m, d.gap_ahead_s);
+            const int car = st[size_t(idx - 1)].car;
+            d.ahead_name = car_name(car);
+            if (online_ && car >= 0 && car < int(net_.ghost.size())) d.ahead_ghosted = net_.ghost[size_t(car)];
+        }
+        if (extra_hud_ > 0 && idx >= 0 && idx + 1 < int(st.size())) gap(idx + 1, d.gap_behind_m, d.gap_behind_s);
+        if (extra_hud_ > 0 && idx > 0) gap(0, d.gap_leader_m, d.gap_leader_s);
+        // Same-maker rival ahead (maker is a string id in the car database).
+        if (extra_hud_ > 0 && idx > 0) {
+            const std::string my_m = maker_of(-1);
+            if (!my_m.empty()) {
+                for (int j = idx - 1; j >= 0; --j) {
+                    if (maker_of(st[size_t(j)].car) != my_m) continue;
+                    gap(j, d.gap_class_m, d.gap_class_s);
+                    d.class_ahead_name = car_name(st[size_t(j)].car);
+                    break;
+                }
+            }
+        }
+        if (extra_hud_ > 0 && d.last_lap > 0 && d.best_lap > 0) {
+            d.delta_best_s = float(d.last_lap - d.best_lap);
+            d.have_delta_best = true;
+        }
+        // Sector deltas vs session best (completed splits on the current/best lap).
+        if (extra_hud_ > 0) {
+            for (int p = 0; p < 3; ++p) {
+                const long long cur = best_splits_.cur_split(p);
+                const long long best = best_splits_.best_split(p);
+                if (cur > 0 && best > 0) {
+                    d.sector_delta_s[p] = float(cur - best) / 1000.0f;
+                    d.sector_delta_on[p] = true;
+                }
+            }
+        }
+        // Nameplates: project each standing car into the main view (uses last frame rect).
+        if (nameplates_on_ && !two_player_ && frame_rect_.w > 1 && frame_rect_.h > 1) {
+            const float aspect = frame_rect_.w / frame_rect_.h;
+            const render::Mat4 view = camera_.view();
+            const render::Mat4 proj = camera_.projection(aspect);
+            auto project = [&](float wx, float wy, float wz, float& ox, float& oy) -> bool {
+                const render::Vec3 e = view.transform_point({wx, wy, wz});
+                const float x = proj.at(0, 0) * e.x + proj.at(0, 1) * e.y + proj.at(0, 2) * e.z + proj.at(0, 3);
+                const float y = proj.at(1, 0) * e.x + proj.at(1, 1) * e.y + proj.at(1, 2) * e.z + proj.at(1, 3);
+                const float w = proj.at(3, 0) * e.x + proj.at(3, 1) * e.y + proj.at(3, 2) * e.z + proj.at(3, 3);
+                if (w <= 0.05f) return false;
+                const float ndc_x = x / w, ndc_y = y / w;
+                if (ndc_x < -1.2f || ndc_x > 1.2f || ndc_y < -1.2f || ndc_y > 1.2f) return false;
+                ox = frame_rect_.x + (ndc_x * 0.5f + 0.5f) * frame_rect_.w;
+                oy = frame_rect_.y + (1.0f - (ndc_y * 0.5f + 0.5f)) * frame_rect_.h;
+                return true;
+            };
+            for (const RaceField::Standing& c : st) {
+                if (c.car == -1) continue; // skip self
+                float px = 0, pz = 0, py = 0.8f;
+                if (c.car >= 0 && c.car < field_->opponents()) {
+                    const auto& stt = field_->opponent_state(c.car);
+                    px = stt.position.x;
+                    py = stt.position.y + 0.9f;
+                    pz = stt.position.z;
+                } else if (c.car == -2 && field_->has_second()) {
+                    const auto& stt = field_->second_state();
+                    px = stt.position.x;
+                    py = stt.position.y + 0.9f;
+                    pz = stt.position.z;
+                } else
+                    continue;
+                float sx = 0, sy = 0;
+                if (!project(px, py, pz, sx, sy)) continue;
+                HudData::Nameplate np;
+                np.x = sx;
+                np.y = sy;
+                np.text = car_name(c.car);
+                if (np.text.size() > 16) np.text = np.text.substr(0, 15) + ".";
+                np.ghosted = online_ && c.car >= 0 && c.car < int(net_.ghost.size()) && net_.ghost[size_t(c.car)];
+                d.nameplates.push_back(std::move(np));
+            }
+        }
+    }
     return d;
 }
 
@@ -766,6 +884,113 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
                 hud_.draw(ui.renderer(), d);
             }
             draw_event_icons(app, 0);
+        }
+        // Extra HUD: compact / full (gaps, leader, class, sectors, inputs).
+        if (!split && d.extra_hud > 0 && field_) {
+            const float x = 12.0f, y0 = 120.0f;
+            const bool full = d.extra_hud >= 2;
+            const float panel_h = full ? 148.0f : 48.0f;
+            ui.fill_round(x - 4, y0 - 4, full ? 176.0f : 150.0f, panel_h, 4, Color{0, 0, 0, 140});
+            char line[80];
+            std::snprintf(line, sizeof(line), "P.%d / %d", std::max(1, d.position), std::max(1, d.cars));
+            ui.text(x, y0, line, Color{220, 230, 240, 255});
+            auto fmt_gap = [&](const char* label, float metres, float seconds, float y, const std::string& name,
+                               bool ghosted) {
+                if (metres < 0) {
+                    std::snprintf(line, sizeof(line), "%s  ---", label);
+                    ui.text(x, y, line, Color{160, 165, 170, 220});
+                    return;
+                }
+                if (metres >= 1000.0f)
+                    std::snprintf(line, sizeof(line), "%s %.2fkm %.1fs", label, metres / 1000.0f, std::max(0.0f, seconds));
+                else
+                    std::snprintf(line, sizeof(line), "%s %.0fm %.1fs", label, metres, std::max(0.0f, seconds));
+                ui.text(x, y, line, Color{200, 210, 220, 255});
+                if (!name.empty()) {
+                    std::string n = name.size() > 14 ? name.substr(0, 13) + "." : name;
+                    if (ghosted) n += " (G)";
+                    ui.text(x, y + 12, n, ghosted ? Color{180, 160, 120, 230} : Color{180, 190, 200, 230});
+                }
+            };
+            if (!full) {
+                fmt_gap("AHD", d.gap_ahead_m, d.gap_ahead_s, y0 + 16, d.ahead_name, d.ahead_ghosted);
+            } else {
+                fmt_gap("AHD", d.gap_ahead_m, d.gap_ahead_s, y0 + 14, d.ahead_name, d.ahead_ghosted);
+                const float y_bhd = d.ahead_name.empty() ? y0 + 28.0f : y0 + 40.0f;
+                fmt_gap("BHD", d.gap_behind_m, d.gap_behind_s, y_bhd, {}, false);
+                fmt_gap("LDR", d.gap_leader_m, d.gap_leader_s, y_bhd + 14, {}, false);
+                float y = y_bhd + 30;
+                if (d.have_delta_best) {
+                    std::snprintf(line, sizeof(line), "ΔBEST %+0.3f", d.delta_best_s);
+                    ui.text(x, y, line, d.delta_best_s <= 0 ? Color{120, 220, 140, 255} : Color{230, 140, 120, 255});
+                } else {
+                    ui.text(x, y, "ΔBEST  ---", Color{160, 165, 170, 220});
+                }
+                y += 12;
+                if (d.gap_class_m >= 0 && !d.class_ahead_name.empty()) {
+                    std::snprintf(line, sizeof(line), "CLS %.0fm %s", d.gap_class_m,
+                                  d.class_ahead_name.size() > 10 ? (d.class_ahead_name.substr(0, 9) + ".").c_str()
+                                                                : d.class_ahead_name.c_str());
+                    ui.text(x, y, line, Color{180, 200, 220, 230});
+                    y += 12;
+                }
+                {
+                    char sec[48] = "T ";
+                    bool any = false;
+                    for (int p = 0; p < 3; ++p) {
+                        if (!d.sector_delta_on[p]) continue;
+                        any = true;
+                        char bit[16];
+                        std::snprintf(bit, sizeof(bit), "%+0.2f ", d.sector_delta_s[p]);
+                        std::strncat(sec, bit, sizeof(sec) - std::strlen(sec) - 1);
+                    }
+                    if (any) {
+                        ui.text(x, y, sec, Color{200, 195, 160, 230});
+                        y += 12;
+                    }
+                }
+                // Input bars: throttle (green), brake (red), steer (cyan marker).
+                const float bw = 120.0f, bh = 5.0f;
+                ui.fill(x, y, bw, bh, Color{40, 40, 40, 200});
+                ui.fill(x, y, bw * std::clamp(d.throttle, 0.0f, 1.0f), bh, Color{80, 200, 100, 220});
+                ui.fill(x, y + 7, bw, bh, Color{40, 40, 40, 200});
+                ui.fill(x, y + 7, bw * std::clamp(d.brake, 0.0f, 1.0f), bh, Color{220, 80, 70, 220});
+                ui.fill(x, y + 14, bw, bh, Color{40, 40, 40, 200});
+                const float sx = x + bw * 0.5f + bw * 0.5f * std::clamp(d.steer, -1.0f, 1.0f);
+                ui.fill(sx - 1.5f, y + 14, 3.0f, bh, Color{100, 200, 220, 255});
+                if (d.hint_gear >= 0) {
+                    std::snprintf(line, sizeof(line), "GEAR > %d%s", d.hint_gear, d.hint_blink ? " !" : "");
+                    ui.text(x + 70, y0, line, d.hint_blink ? Color{230, 100, 90, 255} : Color{200, 180, 100, 230});
+                }
+            }
+        }
+        // In-world nameplates (N toggles).
+        if (!split && nameplates_on_ && !d.nameplates.empty()) {
+            for (const HudData::Nameplate& np : d.nameplates) {
+                const float tw = Ui::text_width(np.text) + 6;
+                ui.fill_round(np.x - tw * 0.5f, np.y - 10, tw, 12, 3, Color{0, 0, 0, 140});
+                ui.text(np.x - tw * 0.5f + 3, np.y - 9, np.text,
+                        np.ghosted ? Color{200, 180, 120, 240} : Color{230, 235, 240, 240});
+            }
+        }
+        // F1 surface-overlay colour legend (when the debug road overlay is on).
+        if (!split && course_scene_ && course_scene_->surface_overlay()) {
+            const float lx = 12.0f, ly = 250.0f;
+            ui.fill_round(lx - 4, ly - 4, 130, 78, 4, Color{0, 0, 0, 150});
+            ui.text(lx, ly, "SURFACE (F1)", Color{220, 230, 240, 255});
+            struct Swatch {
+                const char* name;
+                Color c;
+            };
+            const Swatch sw[] = {
+                {"Road", {180, 180, 180, 200}}, {"Kerb", {220, 80, 80, 200}},  {"Dirt", {160, 120, 60, 200}},
+                {"Grass", {80, 160, 70, 200}},  {"Sand", {200, 180, 100, 200}}, {"Other", {120, 120, 200, 200}},
+            };
+            for (int i = 0; i < 6; ++i) {
+                const float yy = ly + 14 + float(i) * 10;
+                ui.fill(lx, yy, 10, 8, sw[i].c);
+                ui.text(lx + 14, yy - 1, sw[i].name, Color{190, 195, 200, 230});
+            }
         }
         if (show_perf_) {
             char line[160];

@@ -260,14 +260,28 @@ public:
         // order.
         int p1 = std::clamp(cfg_.player_slot >= 0 ? cfg_.player_slot : n_opp, 0, slots - 1);
         int p2 = p1 + 1 < slots ? p1 + 1 : p1 - 1;
+        // Online (BattleMP): remote humans also occupy grid slots — never place AI on those or two cars share a slot and
+        // every machine's field diverges.
+        std::vector<bool> taken(size_t(slots), false);
+        taken[size_t(p1)] = true;
+        if (humans_ > 1 && p2 >= 0 && p2 < slots) taken[size_t(p2)] = true;
+        for (const FieldConfig::Remote& r : cfg_.remote)
+            if (r.slot >= 0 && r.slot < slots) taken[size_t(r.slot)] = true;
         std::vector<int> free;
         for (int s = 0; s < slots; ++s)
-            if (s != p1 && !(humans_ > 1 && s == p2)) free.push_back(s);
+            if (!taken[size_t(s)]) free.push_back(s);
+        if (int(opps.size()) > int(free.size())) {
+            LOG_WARN("Race (exact): %zu AI opponents but only %zu free grid slots after humans", opps.size(), free.size());
+            opps.resize(free.size());
+        }
         std::vector<int> place(opps.size());
         for (size_t i = 0; i < place.size(); ++i) place[i] = int(i);
-        if (cfg_.grid_by_power) place = gt_grid_places(figure);
+        if (cfg_.grid_by_power && place.size() == figure.size()) place = gt_grid_places(figure);
         std::vector<int> slot_of(opps.size());
-        for (size_t i = 0; i < place.size(); ++i) slot_of[i] = free[size_t(place[i])];
+        for (size_t i = 0; i < place.size(); ++i) {
+            const int pi = place[i];
+            slot_of[i] = free[size_t(pi >= 0 && pi < int(free.size()) ? pi : int(i))];
+        }
         // A free practice's grid (the pre-race menus after it): a slot for every car, each once.
         if (!cfg_.grid_slots.empty() && humans_ == 1) {
             const std::vector<int>& g = cfg_.grid_slots;

@@ -78,32 +78,10 @@ void RaceScreen::configure_online_field(FieldConfig& cfg) {
     cfg.event.clear();
     net_.player.clear(), net_.paint.clear(), net_.names.clear(), net_.top_speed.clear();
     const std::vector<u8>& grid = ns.grid();
-    const int humans = int(grid.size());
-    // Host-chosen AI fill empty slots up to kMaxPlayers (same seed → every client draws the same cars).
-    const net::Settings& st = ns.settings();
-    int ai_n = int(st.ai_opponents);
-    if (ai_n > net::kMaxPlayers - humans) ai_n = std::max(0, net::kMaxPlayers - humans);
-    if (ai_n > 0) {
-        std::set<std::string> taken;
-        for (u8 id : grid)
-            if (const net::Player* p = ns.player(id)) taken.insert(p->car);
-        std::vector<std::string> pool;
-        for (const data::Car& c : db_.cars()) {
-            if (taken.count(c.label)) continue;
-            if (!race::pool_entry_available(db_, c.label)) continue;
-            pool.push_back(c.label);
-        }
-        if (!pool.empty()) {
-            GameRandom rng(st.ai_seed ? st.ai_seed : 1);
-            std::vector<bool> unavailable(pool.size(), false);
-            for (int idx : race::draw_pool(rng, unavailable, ai_n)) {
-                if (idx >= 0 && idx < int(pool.size())) cfg.opponents.push_back(pool[size_t(idx)]);
-            }
-            cfg.max_opponents = int(cfg.opponents.size());
-            LOG_INFO("Online: %d AI opponent%s (seed %u)", cfg.max_opponents, cfg.max_opponents == 1 ? "" : "s",
-                     unsigned(st.ai_seed));
-        }
-    }
+    // Online AI is not injected. Each peer would simulate its own AI; the exact core is not
+    // lock-step deterministic, so AI contact desyncs human cars. Needs host-authoritative AI.
+    if (ns.settings().ai_opponents > 0)
+        LOG_INFO("Online: AI opponents requested (%u) but disabled for sync", unsigned(ns.settings().ai_opponents));
     for (size_t slot = 0; slot < grid.size(); ++slot) {
         u8 id = grid[slot];
         if (int(id) == ns.my_id()) {

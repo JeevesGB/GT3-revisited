@@ -292,6 +292,11 @@ void RaceScreen::init(App& app) {
     // REPLAY OPTIONS (view mode, target, HUD items, sound; presentation §G).
     replay_settings_ = ReplaySettings::load(app.config());
     replay_se_ = replay_settings_.se;
+    {
+        const int v = std::atoi(app.config().get("hud", "extra").value_or("0").c_str());
+        extra_hud_ = v < 0 ? 0 : v > 2 ? 2 : v;
+        nameplates_on_ = app.config().get("hud", "names").value_or("on") != "off";
+    }
     ghost_on_ = menu::flow::option_value(&app.config(), "ghost") != "off";
     wide_mode_ = menu::flow::option_value(&app.config(), "wide_mode") == "on";
     if (!preset_.event.empty()) race_event_ = preset_.event;

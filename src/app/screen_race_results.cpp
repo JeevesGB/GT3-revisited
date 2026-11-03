@@ -4,6 +4,8 @@
 
 #include "app/screen_race_impl.h"
 
+#include <cstdio>
+
 namespace gt3r::race_screen {
 
 // Game text cut to ASCII (a lead byte becomes '-'), for text drawn with the UTF-8 path.
@@ -38,6 +40,15 @@ std::vector<ResultRow> RaceScreen::result_rows(bool full_names) const {
             r.name = text::encode_game_text(text::utf8_decode(net_.names[size_t(c.car)]), hud_.fonts().jis());
         else r.name = car_display_name(field_->opponent_label(c.car), full_names);
         r.time = result_time_text(i == 0, c.finished, c.time, w.time, std::max(0, w.laps - c.laps));
+        // Interval to the car ahead (finisher times): enriches the gap sheet beyond winner-relative text.
+        if (i > 0 && c.finished && st[i - 1].finished) {
+            const double interval = c.time - st[i - 1].time;
+            if (interval >= 0 && interval < 3600) {
+                char gap[32];
+                std::snprintf(gap, sizeof(gap), "  (+%.3f)", interval);
+                r.time += gap;
+            }
+        }
         r.player = c.car == -1 && !two_player_;
         r.car = c.car;
         rows.push_back(r);

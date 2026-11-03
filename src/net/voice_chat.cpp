@@ -3,6 +3,7 @@
 #include "base/log.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -31,9 +32,25 @@ int16_t mulaw_to_linear(u8 mulaw) {
     return static_cast<int16_t>(sign ? -quant : quant);
 }
 
-VoiceChat::VoiceChat() = default;
+VoiceChat::VoiceChat() {
+    last_rx_time_.fill(-1e9);
+}
 
 VoiceChat::~VoiceChat() { stop(); }
+
+double VoiceChat::steady_now() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
+
+bool VoiceChat::local_speaking() const {
+    return active_ && (steady_now() - last_tx_time_) < kSpeakHold;
+}
+
+bool VoiceChat::remote_speaking(u8 player) const {
+    if (player >= kVoiceMaxPlayers) return false;
+    return active_ && (steady_now() - last_rx_time_[player]) < kSpeakHold;
+}
 
 bool VoiceChat::start() {
     if (active_) return true;
@@ -187,6 +204,7 @@ void VoiceChat::encode_pending() {
                 f.data[static_cast<size_t>(i)] = linear_to_mulaw(static_cast<int16_t>(s * 32767.0f));
             }
             outgoing_.push_back(f);
+            last_tx_time_ = steady_now();
             if (outgoing_.size() > 8) {
                 outgoing_.erase(outgoing_.begin(), outgoing_.begin() + static_cast<std::ptrdiff_t>(outgoing_.size() - 8));
             }
@@ -199,6 +217,7 @@ void VoiceChat::encode_pending() {
 void VoiceChat::push_remote(u8 player, u8 seq, ByteSpan mulaw) {
     if (player >= kVoiceMaxPlayers || mulaw.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
+    last_rx_time_[player] = steady_now();
     Remote& r = remotes_[player];
     r.last_seq = seq;
     for (size_t i = 0; i < mulaw.size(); ++i) {
