@@ -9,6 +9,8 @@
 #include "formats/png_writer.h"
 #include "game/gt_mode_menu.h"
 #include "game/gt_save.h"
+#include "game/save_folder.h"
+#include "platform/document_tree.h"
 #include "platform/aspect.h"
 #include "platform/ios_files.h"
 #include "platform/music_folder.h"
@@ -27,7 +29,7 @@ namespace gt3r {
 namespace {
 
 const SDL_DialogFileFilter kDiscFilters[] = {
-    {"PS2 disc images", "iso"},
+    {"PS2 disc images", "iso;chd"},
     {"All files", "*"},
 };
 
@@ -58,11 +60,22 @@ bool App::init(int argc, char** argv) {
     // In a headset the (invisible) window never has keyboard focus, and SDL drops joystick
     // input without it: the controllers' virtual gamepad and Bluetooth pads alike.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // Nor does Android's screen keyboard open over an immersive app: text is typed on the game's
+    // own (app/text_keyboard.h), so SDL doesn't ask for it.
+    SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
 #endif
     // iOS: the audio session games have (the system's default for apps): silent with the Ring /
     // Silent switch, and other apps' music paused while the game plays. SDL's own default there
     // (Playback, mixed with others) played on with the switch on silent.
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "AVAudioSessionCategorySoloAmbient");
+#ifdef SDL_PLATFORM_WINDOWS
+    // Xbox pads through SDL's RAWINPUT driver, for their impulse triggers, unless [input] xbox_driver = xinput:
+    // SDL takes it as it starts its joysticks, so it is read from the config here.
+    {
+        const std::optional<IniDocument> cfg = IniDocument::load(game::user_data_dir() + "config.ini");
+        SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, InputManager::xbox_rawinput(cfg ? *cfg : IniDocument{}) ? "1" : "0");
+    }
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_SENSOR)) {
         LOG_ERROR("SDL_Init failed: %s", SDL_GetError());
         return false;
@@ -76,12 +89,18 @@ bool App::init(int argc, char** argv) {
     SDL_CreateDirectory(mods_dir().c_str());
     config_path_ = data_dir_ + "config.ini";
     if (auto cfg = IniDocument::load(config_path_)) config_ = std::move(*cfg);
-    // iOS: the remembered disc images and music folder readable again (another install's
-    // folder, picked ones).
-    const bool restored = platform::restore_disc_access(config_, data_dir_);
-    if ((platform::restore_music_access(config_, data_dir_) || restored) && !config_.save(config_path_))
-        LOG_WARN("Could not save %s", config_path_.c_str());
+    // iOS: the remembered disc images, music folder and save folder readable again (another
+    // install's folder, picked ones).
+    bool restored = platform::restore_disc_access(config_, data_dir_);
+    restored = platform::restore_folder_access(config_, "music", "folder", data_dir_) || restored;
+    restored = platform::restore_folder_access(config_, "saves", "folder", data_dir_) || restored;
+    if (restored && !config_.save(config_path_)) LOG_WARN("Could not save %s", config_path_.c_str());
     LOG_INFO("User data: %s", data_dir_.c_str());
+    game::set_save_folder(config_.get("saves", "folder").value_or(""));
+    if (save_folder_chosen()) {
+        LOG_INFO("Save folder: %s", save_folder().c_str());
+        if (!save_folder_reachable()) LOG_WARN("The save folder cannot be reached: %s", save_folder().c_str());
+    }
     set_speed_unit(parse_speed_unit(config_.get("race", "units").value_or(""))); // menus and races
 
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"); // mobile: racing is landscape
@@ -130,6 +149,7 @@ bool App::init(int argc, char** argv) {
     if (auto v = config_.get("video", "vsync")) gpu_opts.vsync = *v != "0";
     if (auto v = config_.get("video", "gpu_debug")) gpu_opts.debug = *v == "1";
     show_fps_ = to_lower(config_.get("video", "show_fps").value_or("off")) == "on";
+    gamma_ = render::parse_gamma(config_.get("video", "gamma").value_or(""));
     // [video] render_scale = auto | 0.5..4.0 (auto: native on desktop, capped on mobile)
     std::optional<float> render_scale = platform::parse_render_scale(config_.get("video", "render_scale").value_or("auto"));
     for (int i = 1; i < argc; ++i) {
@@ -170,7 +190,8 @@ bool App::init(int argc, char** argv) {
 #endif
     if (gpu_) {
         renderer_ = gpu_->renderer2d();
-        if (platform::is_mobile()) gpu_->warm_pipelines(); // ~65 ms each on Mali: not mid-race
+        // ~65 ms each on Mali, up to ~190 ms on a desktop driver without its shader cache: not mid-race
+        gpu_->warm_pipelines();
         // macOS switches a fullscreen window between direct-to-display and composited now and
         // then, and each switch stalls presentation for up to half a second (measured: 0 frames
         // over 40 ms per minute composited vs up to 13 direct). GT3R_DIRECT=1 for comparisons.
@@ -439,6 +460,40 @@ void App::set_show_fps(bool on) {
     save_config();
 }
 
+bool App::gamma_available() const {
+#if GT3R_XR
+    if (xr_) return false; // the headset shows the canvases as they are
+#endif
+    return gpu_ != nullptr;
+}
+
+void App::set_gamma(float g) {
+    gamma_ = std::clamp(g, render::kGammaMin, render::kGammaMax);
+    if (render::gamma_changes(gamma_)) {
+        char text[16];
+        std::snprintf(text, sizeof(text), "%.2f", double(gamma_));
+        config_.set("video", "gamma", text);
+    } else {
+        gamma_ = 1.0f;
+        config_.remove("video", "gamma");
+    }
+    save_config();
+}
+
+// [video] gamma: from the window, the frame goes into the pass's target (render/gamma_pass.h),
+// which ends it over the window just before the present. At 1 the pass and its targets go.
+void App::begin_gamma_frame() {
+    gamma_frame_ = false;
+    if (!gamma_available() || !render::gamma_changes(gamma_)) {
+        gamma_pass_.reset();
+        return;
+    }
+    if (!gamma_pass_) gamma_pass_ = std::make_unique<render::GammaPass>(*gpu_);
+    int pw = 0, ph = 0;
+    SDL_GetRenderOutputSize(renderer_, &pw, &ph);
+    gamma_frame_ = gamma_pass_->begin(pw, ph);
+}
+
 // [video] show_fps: the frames drawn per second in a corner of the window (of a phone's safe
 // area: clear of its cutout and rounded corners; in VR, of the virtual screen), at the size of
 // 640x360 UI text whatever the screen's layout, over everything. Top left, clear of the race HUD
@@ -485,6 +540,10 @@ void App::set_aspect(platform::Aspect a) {
 
 bool App::full_car_detail() const {
     return to_lower(config_.get("video", "full_car_detail").value_or(platform::is_mobile() ? "off" : "on")) == "on";
+}
+
+bool App::showroom_wheels() const {
+    return to_lower(config_.get("video", "showroom_wheels").value_or(platform::is_mobile() ? "off" : "on")) == "on";
 }
 
 bool App::dynamic_resolution() const {
@@ -635,6 +694,7 @@ SDL_AppResult App::iterate() {
 #endif
     double dt = frame_s;
     last_ticks_ = now;
+    idle_cursor(now);
     ++fps_frames_, fps_time_ += frame_s;
     if (fps_time_ >= 0.5) fps_shown_ = fps_frames_ / fps_time_, fps_frames_ = 0, fps_time_ = 0;
     if (dt > 0.1) dt = 0.1;
@@ -701,6 +761,7 @@ SDL_AppResult App::iterate() {
 #endif
     const Screen* shown = screens_.empty() ? nullptr : screens_.back().get(); // (after this frame's changes)
     layout_ui(shown && shown->adaptive_ui(), shown && shown->follows_aspect());
+    begin_gamma_frame();
     ui_->clear();
     Uint64 h_r0 = SDL_GetTicksNS();
     if (!screens_.empty()) screens_.back()->render(*this, *ui_);
@@ -739,6 +800,12 @@ SDL_AppResult App::iterate() {
         const char* f = SDL_getenv("GT3R_SHOT_COUNT");
         return f && *f ? std::max(1, std::atoi(f)) : 1;
     }();
+    // GT3R_SHOT_GAMMA=1: --shot and F12 read the window after the gamma pass, as shown (checks).
+    static const bool shot_gamma = [] {
+        const char* f = SDL_getenv("GT3R_SHOT_GAMMA");
+        return f && *f == '1';
+    }();
+    if (gamma_frame_ && shot_gamma) gamma_pass_->end(gamma_), gamma_frame_ = false;
     if (!auto_shot_path_.empty() && frame_ >= shot_frame && frame_ < shot_frame + shot_count) {
         std::string path = auto_shot_path_;
         if (shot_count > 1) {
@@ -755,6 +822,7 @@ SDL_AppResult App::iterate() {
         SDL_CreateDirectory(dir.c_str());
         save_screenshot(dir + "/gt3r-" + std::to_string(SDL_GetTicks()) + ".png");
     }
+    if (gamma_frame_) gamma_pass_->end(gamma_); // (after the screenshots: they keep GT3's colours)
     const Uint64 present_start = SDL_GetTicksNS();
     SDL_RenderPresent(renderer_);
     if (gpu_) gpu_->frame_presented();
@@ -801,11 +869,28 @@ SDL_AppResult App::iterate() {
     return quit_ ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;
 }
 
+void App::idle_cursor(Uint64 now) {
+    if (platform::is_mobile() || cursor_hidden_) return; // phones and tablets: no cursor
+    if (mouse_used_ns_ == 0) mouse_used_ns_ = now;
+    if (now - mouse_used_ns_ < 2'000'000'000) return; // 2 s
+    SDL_HideCursor();
+    cursor_hidden_ = true;
+}
+
 SDL_AppResult App::event(const SDL_Event& e) {
     if (e.type == SDL_EVENT_QUIT) return SDL_APP_SUCCESS;
     // Android may end a backgrounded app without a quit.
     if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND || e.type == SDL_EVENT_TERMINATING) remember_race_scale();
     input_->handle_event(e);
+    // The real mouse (not SDL's mouse made from a touch) brings the cursor back.
+    const bool mouse_used = (e.type == SDL_EVENT_MOUSE_MOTION && e.motion.which != SDL_TOUCH_MOUSEID) ||
+                            ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+                             e.button.which != SDL_TOUCH_MOUSEID) ||
+                            (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.which != SDL_TOUCH_MOUSEID);
+    if (mouse_used) {
+        mouse_used_ns_ = SDL_GetTicksNS();
+        if (cursor_hidden_) SDL_ShowCursor(), cursor_hidden_ = false;
+    }
     if (audio_ && (e.type == SDL_EVENT_AUDIO_DEVICE_ADDED || e.type == SDL_EVENT_AUDIO_DEVICE_REMOVED)) audio_->device_event(e);
     if (e.type == SDL_EVENT_DROP_FILE && e.drop.data && (screens_.empty() || !screens_.back()->takes_dropped_file(e.drop.data)))
         set_dialog_result(e.drop.data);
@@ -1100,7 +1185,8 @@ void App::set_xr_settings(const xr::Settings& s) {
 }
 
 // The right controller points at the virtual screen (menus, movies; not while racing in 3D):
-// a dot follows it and the trigger clicks, as mouse events in UI coordinates.
+// a dot follows it and the trigger clicks, as mouse events (of kXrPointerMouse, ui.h) in UI
+// coordinates.
 void App::xr_pointer() {
     // Already in UI coordinates: routed like App::event's pointer events after their conversion.
     auto dispatch = [this](const SDL_Event& e) {
@@ -1115,10 +1201,13 @@ void App::xr_pointer() {
             SDL_Event e{};
             e.type = SDL_EVENT_MOUSE_BUTTON_UP;
             e.button.button = SDL_BUTTON_LEFT;
+            e.button.which = kXrPointerMouse;
             e.button.x = xr_pointer_x_, e.button.y = xr_pointer_y_;
             dispatch(e);
         }
         xr_pointer_on_ = xr_pointer_down_ = false;
+        xr_->set_a_clicks(false);
+        ui_->set_pointer(false, 0, 0);
         return;
     }
     // Canvas pixels -> UI units through the canvas's logical presentation (layout_ui).
@@ -1137,6 +1226,7 @@ void App::xr_pointer() {
     if (!xr_pointer_on_ || x != xr_pointer_x_ || y != xr_pointer_y_) {
         SDL_Event e{};
         e.type = SDL_EVENT_MOUSE_MOTION;
+        e.motion.which = kXrPointerMouse;
         e.motion.x = x, e.motion.y = y;
         e.motion.xrel = xr_pointer_on_ ? x - xr_pointer_x_ : 0;
         e.motion.yrel = xr_pointer_on_ ? y - xr_pointer_y_ : 0;
@@ -1149,12 +1239,19 @@ void App::xr_pointer() {
         SDL_Event e{};
         e.type = pressed ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
         e.button.button = SDL_BUTTON_LEFT;
+        e.button.which = kXrPointerMouse;
         e.button.down = pressed;
         e.button.clicks = 1;
         e.button.x = x, e.button.y = y;
         dispatch(e);
         xr_pointer_down_ = pressed;
     }
+    // A clicks what the page would take a click on (as last drawn); buttons and tabs under the
+    // pointer highlight.
+    const bool clickable = updates().dialog_open() ? updates().dialog_clickable(x, y)
+                                                   : !screens_.empty() && screens_.back()->clickable(x, y);
+    xr_->set_a_clicks(clickable);
+    ui_->set_pointer(true, x, y);
 }
 #endif
 
@@ -1179,6 +1276,46 @@ void App::follow_music_folder(bool rescan) {
     if (!music_.set_folder(music_access_ ? folder : std::string()) && rescan) music_.rescan();
 }
 
+std::string App::save_folder() const { return game::save_folder(); }
+
+bool App::save_folder_chosen() const { return game::save_folder_chosen(); }
+
+bool App::set_save_folder(const std::string& path, game::SaveFolderCopy* copied) {
+    // The user data folder picked in a picker (Android's and iOS's show it) is the default.
+    const bool own = path.empty() || game::same_save_folder(path, data_dir_);
+    const std::string from = save_folder(), to = own ? data_dir_ : path;
+    if (copied) *copied = {};
+    if (game::same_save_folder(from, to)) return true;
+    const game::SaveFolderCopy c = game::copy_save_folder(from, to);
+    if (copied) *copied = c;
+    if (!c.ok) {
+        LOG_WARN("Save folder: could not copy the saves and replays into %s: %s", to.c_str(), SDL_GetError());
+        return false;
+    }
+    LOG_INFO("Save folder: %s (%d saves, %d replays copied in)", to.c_str(), c.saves, c.replays);
+#if defined(SDL_PLATFORM_ANDROID)
+    // The access to a picked folder the game leaves.
+    if (const std::string old = platform::document_tree_of(from); !old.empty() && old != platform::document_tree_of(to))
+        platform::forget_document_tree(old);
+#endif
+    if (own) config_.remove("saves", "folder");
+    else config_.set("saves", "folder", path);
+    save_config();
+    game::set_save_folder(own ? std::string() : path);
+    game::close_gt_mode(); // its session and save library are the other folder's
+    return true;
+}
+
+bool App::save_folder_reachable() const {
+    if (!save_folder_chosen()) return true;
+    const std::string dir = save_folder();
+#if defined(SDL_PLATFORM_ANDROID)
+    if (const std::string tree = platform::document_tree_of(dir); !tree.empty())
+        return platform::document_tree_access(tree) && host_is_directory(tree);
+#endif
+    return host_is_directory(dir);
+}
+
 bool App::show_song() const { return to_lower(config_.get("music", "show_song").value_or("on")) != "off"; }
 
 void App::shutdown() {
@@ -1195,6 +1332,7 @@ void App::shutdown() {
 #if GT3R_XR
     xr_.reset(); // its canvases and swapchains before the renderer and the device
 #endif
+    gamma_pass_.reset();
     if (gpu_) gpu_.reset(); // destroys the 2D renderer too
     else if (renderer_) SDL_DestroyRenderer(renderer_);
     renderer_ = nullptr;

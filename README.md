@@ -4,7 +4,7 @@ An open-source reimplementation of the *Gran Turismo 3 A-Spec* engine for
 modern platforms: **Windows, macOS, Linux, Android, iOS and Meta Quest (VR)**.
 
 GT3 Revisited contains **no game data or assets**. It needs a
-disc image (`.iso`) that you made from your own copy of the game. At runtime
+disc image (`.iso` or `.chd`) that you made from your own copy of the game. At runtime
 it reads the image directly and decodes the assets. Nothing is extracted to
 disk or redistributed.
 
@@ -95,8 +95,8 @@ of the steps above.
 
 You need a disc image of *Gran Turismo 3 A-Spec*. The NTSC-U releases
 (SCUS-97102 and the PBPX-95503 bundle disc) are verified; other regions are
-untested ([COMPATIBILITY](docs/COMPATIBILITY.md)). Only `.iso` images are
-read.
+untested ([COMPATIBILITY](docs/COMPATIBILITY.md)). Use a `.iso` image or a `.chd`
+created from it with `chdman createdvd`.
 
 ```bash
 gt3r                                  # first run asks for your disc image
@@ -105,7 +105,7 @@ gt3r                                  # first run asks for your disc image
 gt3r "/path/to/Gran Turismo 3.iso"    # or pass it directly
 ```
 
-You can also drag the `.iso` onto the window. On Android and the Quest, choose
+You can also drag the `.iso` or `.chd` onto the window. On Android and the Quest, choose
 **Open disc image** and pick the file ([android/README.md](android/README.md)). On
 iOS, **Open disc image** shows the Files app's picker: the image can be anywhere it
 reaches (On My iPhone, a network share, another app's folder) and is read where it
@@ -151,13 +151,14 @@ Settings, saves, replays, mods and screenshots live in:
   **Open folder** goes there); a copy of the disc image can go there too
 
 If a `portable.ini` file sits next to the executable, all user data is kept
-beside it instead.
+beside it instead. Saves and replays can go in another folder of your choice
+([Saves](#saves)).
 
 | In the folder | |
 |---|---|
 | `config.ini` | settings (below) |
-| `saves/` | GT Mode saves (below) |
-| `replays/` | saved replays (`.gt3replay`), listed by the Replay Theater and Time trial |
+| `saves/` | GT Mode saves (below), unless Settings chooses another save folder |
+| `replays/` | saved replays (`.gt3replay`), listed by the Replay Theater and Time trial; in the save folder too |
 | `mods/` | installed mods ([MODDING](docs/MODDING.md)) |
 | `music/` | your own race music (below), unless Settings chooses another folder |
 | `music_playlist.txt` | your songs' playlist (their order and check marks) |
@@ -189,6 +190,7 @@ are only there:
 | `[app] start` | `game` / `hub` | start with the game, or in Developer options |
 | `[video] fullscreen` | `on` / `off` | desktop window mode (F11) |
 | `[video] aspect` | `16:9` / `4:3` / `fill` | the game's picture: 16:9 (default), 4:3 like on a 4:3 TV, or the whole screen (races use its full width; menus and movies stay 4:3) |
+| `[video] gamma` | `0.5`..`2.0` | the whole picture lighter (higher) or darker (lower) in its shadows and middle tones, black and white unchanged; default `1`, GT3's colors (Settings → Display → Gamma, with a row to reset it). Screenshots keep GT3's colors |
 | `[video] vsync` | `1` / `0` | wait for the display refresh |
 | `[video] limit_60fps` | `on` / `off` | on 120 Hz and faster displays, draw about 60 frames a second (every Nth refresh) |
 | `[video] show_fps` | `on` / `off` | the frame rate in a corner of the screen (default off) |
@@ -197,6 +199,8 @@ are only there:
 | `[video] render_scale` | `auto`, `0.5`..`4.0` | 3D resolution vs. the screen; above `1.0` the 3D views render larger and are scaled down (supersampling), up to 16384 pixels a side |
 | `[video] dynamic_resolution` | `on` / `off` | lower the 3D resolution (to 50% at most) when the GPU can't keep up and raise it while it keeps up, up to `render_scale`; with `auto`, up to the screen's full resolution (at most 1440 lines), starting where the last race ended (kept in `dynamic_start`). Default on for phones and tablets |
 | `[video] full_car_detail` | `on` / `off` | every car in full detail at any distance; `off`: distant cars switch to GT3's simpler models. Default on, off for phones and tablets |
+| `[video] showroom_wheels` | `on` / `off` | close cars in races get the car menus' detailed rims and tires; `off`: GT3's race wheels. Default on, off for phones and tablets |
+| `[video] heat_haze` | `on` / `off` | GT3's heat shimmer over some trackside camera shots in replays, on some courses. Default off |
 | `[video] gpu` | `auto` / `gles` / `gles_driver` / `0` | the 3D renderer: `auto` = SDL_GPU (Vulkan, Metal), or OpenGL ES where the GPU has no Vulkan (Windows, Linux); `gles` = OpenGL ES first; `gles_driver` = the same on Windows with the graphics driver's OpenGL ES rather than ANGLE; `0` = 2D-only (restart required). Settings offers only the kinds of OpenGL ES that open on the computer |
 | `[video] original_res` | `on` / `off` | *(file)* races at the PS2's 640×448 in a 4:3 frame |
 | `[video] original_filter` | `nearest` / `bilinear` | *(file)* upscaling filter for `original_res` |
@@ -205,6 +209,7 @@ are only there:
 | `[audio] music_volume`, `sfx_volume` | `0.0`..`1.0` | |
 | `[audio] surround_cue` | `on` / `off` | GT3's rear-channel phase cue for Pro Logic decoders |
 | `[music] folder` | path | your music folder (absent: the user data folder's `music/`; Settings → Audio) |
+| `[saves] folder` | path | the save folder for `saves/` and `replays/` (absent: the user data folder; Settings → Disc & saves). On Android, a folder picked there (not a path) |
 | `[music] show_song` | `on` / `off` | the race song on the pause screen, with L1 / R1 to skip (default on) |
 | `[music] next_race` | `same` / `next` | same (default): a race, restart or replay starts with the song the last one ended on, from its start; next: a new song every time, as GT3 does (Settings → Audio → Next race starts with) |
 | `[music] race_song` | text | the race song playing last (`disc:` or `yours:` and its id), for `next_race = same` |
@@ -231,6 +236,15 @@ day, credits, cars and completion, and let you start a new game, save under a
 new name or over a save, rename, copy and delete. The game being played
 autosaves after every race and continues at the next launch. A save that
 cannot be read (damaged, or from a newer version) is never written over.
+
+**Settings → Disc & saves → Save folder** keeps the saves and replays in another
+folder, for example one that Syncthing, Nextcloud or a cloud drive keeps the
+same on your phone and tablet. On Android it can be any folder the system's
+folder picker offers. A folder without saves gets a copy of yours; a folder
+that already has saves (from your other device) is used as it is, so that
+device's game continues. The game's own folder keeps its saves, and **Use the
+game's save folder** goes back to them. Play on one device at a time: two
+devices saving the same game at once leave the sync app two copies of it.
 
 **Save editor** (main menu) changes a save of the disc's region: credits,
 prize money, the day, races and wins, the endings seen; the garage (add any car
@@ -483,6 +497,10 @@ original program's code in any form.
   ([third_party/dr_libs](third_party/dr_libs)).
 - [SDL 3](https://libsdl.org) and [zlib](https://zlib.net), zlib License,
   fetched at build time (Windows builds ship `SDL3.dll`).
+- [libchdr](https://github.com/rtissera/libchdr) v0.3.0, BSD 3-Clause, reads
+  `.chd` disc images; it vendors the LZMA SDK (public domain), miniz (MIT) and
+  zstd (BSD 3-Clause). Fetched at build time. Its notices and theirs are in
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), which the Windows, macOS and Linux packages ship.
 - The [Khronos](https://github.com/KhronosGroup/OpenGL-Registry) OpenGL ES 3.0
   headers (`third_party/khronos`), MIT and Apache 2.0, for the OpenGL ES renderer.
 - [ANGLE](https://chromium.googlesource.com/angle/angle), BSD 3-Clause, built

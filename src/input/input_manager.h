@@ -49,14 +49,15 @@ class IniDocument;
 // of its own (built-in handheld controls, touch, a controller without motors). A controller that
 // can rumble always rumbles itself and the phone stays still.
 bool use_phone_vibrator(bool enabled, int player, bool device_rumbles);
-// The DS2 rumble as one motor's strength 0..1: the large motor's level, or the small (on/off)
-// motor's 0.6 when stronger.
+// The rumble as one motor's strength 0..1: the stronger motor's level.
 float phone_vibration_strength(const PadRumble& r);
+// The rumble a DualSense is sent: it plays the small motor (the right grip) much lighter than the large one, so
+// the small motor's level is raised 1.75 times (at most full).
+PadRumble dualsense_rumble(const PadRumble& r);
 
 // The race rumble ([playerN] rumble; race::RumbleModel): "gt3" GT3 original, "modern" ours, "auto"
-// (or anything else) GT3 original on a DualSense, whose motors play GT3's levels as a DualShock 2
-// did, and Modern on every other controller, where GT3's low levels buzz all the time.
-bool gt3_rumble(std::string_view mode, bool dualsense);
+// (the default, or anything else) Modern on every controller.
+bool gt3_rumble(std::string_view mode);
 
 // What a device is to Auto: one SDL identifies as a wheel, a gamepad SDL maps, or any other
 // joystick (flight sticks, but also odd HID devices such as some keyboards, mice and macro pads).
@@ -98,7 +99,8 @@ public:
 
     const PadState& pad(int player) const { return players_[player].state; }
     // The pad a race reads while driving: buttons in GT3's race meaning (race_action_name),
-    // driven by the player's race layout. With the "gt3" layout it is pad() itself.
+    // driven by the player's race layout. With the "gt3" layout it reads pad()'s bindings (its
+    // pedals press from the race's own threshold; the steering curve).
     const PadState& race_pad(int player) const { return players_[player].race_state; }
     // Player 1's pad merged with every connected gamepad read with the pad layout's buttons and
     // the keyboard with its default keys, whatever player 1's controller, bindings or keyboard
@@ -121,22 +123,29 @@ public:
     static bool phone_vibration_available();
     bool phone_vibration() const { return phone_vibration_; }
     void set_phone_vibration(bool on);
-    // [playerN] rumble (auto | modern | gt3), whether the player's device is a DualSense, and
-    // whether their race rumble is GT3 original now (gt3_rumble with the device in use).
+    // [playerN] rumble (auto | modern | gt3), whether the player's device is a DualSense (Modern's mix
+    // for it), and whether their race rumble is GT3 original (gt3_rumble).
     const std::string& rumble_mode(int player) const { return players_[player].rumble_mode; }
     void set_rumble_mode(int player, std::string mode) { players_[player].rumble_mode = std::move(mode); }
     bool dualsense(int player) const;
-    bool gt3_rumble(int player) const { return gt3r::gt3_rumble(players_[player].rumble_mode, dualsense(player)); }
-    // Impulse triggers on Xbox One/Series pads (0..1 each). No-op elsewhere.
-    void set_trigger_rumble(int player, float left, float right);
+    bool gt3_rumble(int player) const { return gt3r::gt3_rumble(players_[player].rumble_mode); }
     // Driving feedback for this frame (call every frame while driving):
-    // DualSense brake-trigger resistance and ABS pulse, Xbox impulse-trigger
-    // ABS pulse, wheel spring + steering force. Effects stop by themselves
-    // ~0.25 s after the last call. See docs/INPUT.md "Force feedback".
+    // DualSense brake-trigger resistance and ABS pulse and throttle-trigger
+    // wheelspin buzz, the same on Xbox impulse triggers, wheel spring + steering force. Effects stop by
+    // themselves ~0.25 s after the last call, or at once with stop_force_feedback. See docs/INPUT.md "Force
+    // feedback".
     void set_force_feedback(int player, const ForceFeedbackState& state);
+    void stop_force_feedback(int player) { players_[player].ffb_age = 1e9; }
     const ForceFeedbackConfig& ffb_config() const { return ffb_.config(); }
     void set_ffb_config(const ForceFeedbackConfig& c) { ffb_.configure(c); }
 
+    // [input] xbox_driver (Windows): "rawinput", the default, reads Xbox pads through SDL's RAWINPUT driver,
+    // which plays their impulse triggers (through Windows.Gaming.Input, once a button was pressed); "xinput"
+    // through XInput, which has no trigger motors. SDL takes it at start: App::init reads xbox_rawinput(cfg)
+    // before SDL_Init; a change applies after a restart.
+    static bool xbox_rawinput(const IniDocument& cfg);
+    bool xbox_rawinput() const { return xbox_rawinput_; }
+    void set_xbox_rawinput(bool on) { xbox_rawinput_ = on; }
     // [input] background (desktop, off by default): controllers, wheels and joysticks keep
     // driving the game while none of its windows has the focus (another window in front, as on
     // a second monitor). SDL drops their input otherwise; the keyboard and mouse need the window
@@ -162,7 +171,9 @@ public:
     void use_custom(int player, bool race);
     // Edits (PlayerBindings::bind): the source's own set takes it, the other keeps its bindings.
     // Saved to [playerN.bindings] (the pad's), [playerN.wheel.bindings], [playerN.keyboard.bindings].
-    bool bind(int player, const PadTarget& target, const InputSource& source, bool replace); // PlayerBindings::bind
+    // `rest`: where a captured axis rested (CapturedInput), so a pedal reads over its whole travel.
+    bool bind(int player, const PadTarget& target, const InputSource& source, bool replace,
+              float rest = 0.0f); // PlayerBindings::bind
     void clear_target(int player, const PadTarget& target, BindingSet set);
     // Race controls (see make_race_preset), one layout per player for whichever kind is in use.
     // Editing a race binding makes that set's race bindings custom ([playerN.race] ...); under
@@ -172,12 +183,24 @@ public:
     bool race_uses_menu_pad(int player) const { return players_[player].race_reads_menu; }
     bool is_race_custom(int player) const;
     const Profile& race_profile(int player) const; // the effective one (gt3: the menu profile)
-    bool bind_race(int player, const PadTarget& target, const InputSource& source, bool replace);
+    bool bind_race(int player, const PadTarget& target, const InputSource& source, bool replace, float rest = 0.0f);
     void clear_race_target(int player, const PadTarget& target, BindingSet set);
     std::string device_name(int player) const; // "Keyboard" (or "No device") without one
     // Races steer with GT3's wheel path: the device Steer (LX) is bound to is a wheel (a tagged
     // binding's device, otherwise the Controller's kind).
     bool wheel_steering(int player) const;
+    // [playerN] steering_curve / wheel_steering_curve: the race's steering is curved_steering(x,
+    // curve) (1: as far as the player steers; above 1 finer near the centre, below 1 quicker off it;
+    // full lock stays at the end). A wheel (wheel_steering) has its own; these get and set the one
+    // in use.
+    static constexpr float kSteeringCurveMin = 0.1f, kSteeringCurveMax = 2.5f;
+    float steering_curve(int player) const { return steering_curve(players_[player]); }
+    void set_steering_curve(int player, float curve);
+    // |x|^curve eased at the centre, sign kept: ((|x| + 0.1)^curve - 0.1^curve) / (1.1^curve -
+    // 0.1^curve). A plain power below 1 starts infinitely steep: a wheel's least movement off the
+    // centre swung the steering, and its force feedback with it (it oscillated at rest, issue 134).
+    // Here the centre is at most ~3.7 times linear (curve 0.1).
+    static float curved_steering(float x, float curve);
     // [playerN] controller: "auto" (pick_auto_device), part of a device name (any device,
     // whatever its type), or kKeyboardOnly. Reassigns devices.
     static constexpr const char* kKeyboardOnly = "keyboard";
@@ -237,7 +260,13 @@ public:
         chord_inputs_.clear();
     }
     bool capturing() const { return capturing_; }
-    std::optional<InputSource> poll_capture();
+    // The input poll_capture() returns, and where an axis rested before it moved (-1..1; 0 for
+    // anything else).
+    struct CapturedInput {
+        InputSource source;
+        float rest = 0.0f;
+    };
+    std::optional<CapturedInput> poll_capture();
 
 private:
     struct Device {
@@ -247,7 +276,7 @@ private:
         std::string name;
         bool has_accel = false;
         bool wheel = false; // SDL identifies it as a wheel (Auto takes it first)
-        bool dualsense = false; // a PlayStation 5 controller (the Auto rumble's GT3 original)
+        bool dualsense = false; // a PlayStation 5 controller (Modern rumble's mix for it, dualsense_rumble)
         std::string serial, path; // for device tags (DeviceId); empty when not reported
     };
     struct Player {
@@ -255,14 +284,15 @@ private:
         std::string wheel_device; // [playerN] wheel_device: a named device that is a wheel (0.3 preset = wheel)
         bool keyboard = true;
         std::string rumble_mode = "auto"; // [playerN] rumble
+        float steering_curve = 1.0f, wheel_steering_curve = 1.0f; // [playerN]
         SDL_JoystickID device = 0; // 0 = none
         DeviceKind kind = DeviceKind::Keyboard; // of `device` (assign_devices)
         PlayerBindings bindings;
         Profile menu, race; // in use: both sets for `kind` together (refresh)
-        bool race_reads_menu = false; // "gt3" with nothing custom: the race reads `state`
+        bool race_reads_menu = false; // "gt3" with nothing custom: the race reads the menu profile
         PadState state;
         std::vector<float> ramp_values; // parallel to the menu profile's bindings
-        std::vector<float> race_ramps;  // parallel to the race profile's bindings
+        std::vector<float> race_ramps;  // parallel to the race pad's bindings
         PadState race_state;
         PadRumble rumble;
         float tilt = 0.0f;
@@ -285,21 +315,26 @@ private:
     std::string tag_of(SDL_JoystickID id) const;
     std::string capture_tag(SDL_JoystickID id) const; // empty for the capturing player's Controller
     const Device* tagged_steering(const Player& p) const; // a tagged wheel Steer is bound to
+    bool wheel_source(const Player& p, const InputSource& source) const; // a wheel's axis
+    bool wheel_steering(const Player& p) const;
+    float steering_curve(const Player& p) const;
     // The source's value, or nothing when it can't be read: its device, axis, button or hat
     // isn't connected, or it is a key (or mouse button) and `keyboard` is off.
     std::optional<float> read_source(const Player& p, const Device* dev, bool keyboard, const InputSource& src) const;
     void refresh(Player& p); // menu, race and race_reads_menu after a change of kind or bindings
     void evaluate(Player& p, double dt);
-    // `keyboard`: keys and mouse buttons drive `out` (a player's keyboard_active).
+    // `keyboard`: keys and mouse buttons drive `out` (a player's keyboard_active). `race`: the race
+    // pad (a pedal presses from kRacePedalPress, not the menus' threshold).
     void evaluate_profile(const Player& p, const Device* dev, bool keyboard, const Profile& prof,
-                          std::vector<float>& ramps, PadState& out, double dt) const;
+                          std::vector<float>& ramps, PadState& out, double dt, bool race = false) const;
     void evaluate_any_device(double dt); // any_device_pad()
     void evaluate_actions(Player& p, bool keyboard);
     // A chord capture's new input (from an event or a moved axis), if it fits the chord.
     void add_chord_input(const InputSource& s);
     void update_chord_capture();
     void update_tilt(Player& p, const Device* dev);
-    int brake_trigger(const Player& p) const; // SDL trigger axis bound to the brake, or -1
+    // SDL trigger axis bound to a pedal (Square the brake, Cross the throttle), or -1.
+    int pedal_trigger(const Player& p, PadButton pedal) const;
     void vibrate_phone(float strength);       // 0 stops it
     void apply_background() const;            // SDL's background hint: background_ or background_held_
 
@@ -313,6 +348,7 @@ private:
     double time_ = 0;
     bool phone_vibration_ = false;
     bool background_ = false;      // [input] background
+    bool xbox_rawinput_ = true;    // [input] xbox_driver
     bool background_held_ = false; // hold_background()
     SDL_Haptic* vibrator_ = nullptr; // the device's own motor, opened on first use
     bool vibrator_tried_ = false;
@@ -328,6 +364,7 @@ private:
     std::optional<Chord> captured_chord_;
     int capture_player_ = 0;
     std::optional<InputSource> captured_;
+    float captured_rest_ = 0.0f; // CapturedInput::rest
     std::vector<std::pair<SDL_JoystickID, std::vector<float>>> capture_baseline_;
 };
 

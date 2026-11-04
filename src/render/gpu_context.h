@@ -57,6 +57,20 @@ struct PipelineKey {
     // transparent clear); otherwise alpha is never written.
     bool coverage = false;
     AlphaWrite alpha = AlphaWrite::Keep;
+    // One sample and no depth target, whatever the MSAA level: View3D's small single-sample
+    // passes (the depth of field's downsampled pictures).
+    bool single = false;
+    // The corners of triangles GT3 clips at the guard band (render/guard_band.h): View3D's
+    // ClipVertex layout and model.vert built with CLIPPED.
+    bool clipped = false;
+    // A modelled rim's turned copies (DrawItem::spin_turn): model.vert's and model.frag's
+    // SPIN_COPIES variants.
+    bool spin_copy = false;
+    // Nothing but the depth is written (scene::kDepthOnly).
+    bool depth_only = false;
+    // Writes the depth whatever is there and no colour: View3D's depth reset after an item
+    // (DrawItem::depth_reset).
+    bool depth_reset = false;
     auto operator<=>(const PipelineKey&) const = default;
 };
 
@@ -74,6 +88,20 @@ struct GpuOptions {
 };
 
 class Uploader;
+
+// A generated shader (render/shaders/generated/<name>.h, as GT3R_SHADER_CODE(<name>)): SPIR-V,
+// MSL, and GLSL ES with its uniform block and sampler names in slot order.
+struct ShaderCode {
+    const unsigned char* spv;
+    size_t spv_size;
+    const char *msl, *gles, *gles_blocks, *gles_samplers;
+};
+#define GT3R_SHADER_CODE(n)                                                                                      \
+    ::gt3r::render::ShaderCode {                                                                                 \
+        ::gt3r::render::shaders::n##_spv, sizeof(::gt3r::render::shaders::n##_spv),                              \
+            ::gt3r::render::shaders::n##_msl, ::gt3r::render::shaders::n##_gles,                                 \
+            ::gt3r::render::shaders::n##_gles_blocks, ::gt3r::render::shaders::n##_gles_samplers                 \
+    }
 
 class GpuContext {
 public:
@@ -98,6 +126,8 @@ public:
     static constexpr SDL_GPUTextureFormat kColorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     SDL_GPUTextureFormat depth_format() const { return depth_format_; }
     SDL_GPUSampleCount sample_count() const { return samples_; }
+    // The SPIN_COPIES shader variants were created (PipelineKey::spin_copy).
+    bool spin_copies() const { return vs_copy_ && fs_copy_; }
     int msaa() const { return 1 << int(samples_); }
     // The MSAA levels the GPU draws the 3D pass with (1 = off), lowest first.
     std::vector<int> msaa_levels() const;
@@ -118,6 +148,10 @@ public:
     // can move under it without new targets.
     float render_ceiling() const { return render_ceiling_; }
     void set_render_ceiling(float s);
+
+    // A shader from `code` in a format the device takes (OpenGL ES: its GLSL ES), with
+    // `samplers` sampled textures and `uniform_buffers` uniform buffers; null (logged) on failure.
+    SDL_GPUShader* create_shader(const ShaderCode& code, bool vertex, Uint32 samplers, Uint32 uniform_buffers);
 
     SDL_GPUGraphicsPipeline* pipeline(const PipelineKey& key);
     // Creates the pipelines races and menus draw with on a background thread, ahead of their
@@ -149,7 +183,8 @@ public:
 private:
     GpuContext() = default;
     bool init(SDL_Window* window, const GpuOptions& options);
-    SDL_GPUShader* make_shader(bool vertex);
+    enum class Stage : u8 { Vertex, ClippedVertex, Fragment, CopyVertex, CopyFragment };
+    SDL_GPUShader* make_shader(Stage stage);
     bool create_samplers();
     void release_samplers();
     SDL_GPUGraphicsPipeline* create_pipeline(const PipelineKey& key);
@@ -172,7 +207,10 @@ private:
     float render_ceiling_ = 0.0f;
     SDL_Renderer* renderer_ = nullptr;
     SDL_GPUShader* vs_ = nullptr;
+    SDL_GPUShader* vs_clipped_ = nullptr;
     SDL_GPUShader* fs_ = nullptr;
+    // model.vert's and model.frag's SPIN_COPIES variants (null: spin_turn items drawn plain)
+    SDL_GPUShader *vs_copy_ = nullptr, *fs_copy_ = nullptr;
     SDL_GPUSampler* samplers_[8] = {};
     SDL_GPUTexture* white_ = nullptr;
     SDL_GPUTextureFormat depth_format_ = SDL_GPU_TEXTUREFORMAT_D16_UNORM;
@@ -195,6 +233,12 @@ private:
     std::map<TextureKey, SDL_GPUTexture*> textures_by_key_;
     std::map<SDL_GPUTexture*, SharedTexture> shared_textures_;
 };
+
+// `texture` (w x h, GpuContext::kColorFormat) as a texture of the context's 2D renderer, drawn
+// replacing what is behind and scaled linearly; with SDL_TEXTUREACCESS_TARGET the 2D renderer
+// can also draw into it. Null (logged) on failure.
+SDL_Texture* wrap_texture(SDL_Renderer* renderer, SDL_GPUTexture* texture, int w, int h,
+                          SDL_TextureAccess access = SDL_TEXTUREACCESS_STATIC);
 
 // Mip chain of a w x h texture: levels down to 1 x 1, each side halving to no less than 1.
 u32 mip_levels(u32 w, u32 h);

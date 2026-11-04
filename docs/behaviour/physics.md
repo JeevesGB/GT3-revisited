@@ -126,7 +126,7 @@ on this page are at 60 steps a second.
 
 A disc of another game on the same engine, or a GT3 build that GT3 Revisited does not fully
 recognize, races on GT3's physics with GT3's built-in tables and NTSC-U's rules for each
-behavior it does not recognize. Settings > Game disc shows the race physics, with a note
+behavior it does not recognize. Settings > Disc & saves shows the race physics, with a note
 when GT3's stands in for the disc's own.
 
 In a free run, when the ghost car restarts its lap a fraction of a step behind, the race
@@ -185,7 +185,7 @@ most 127:
 After every step the race sends the level of a car the pad drives to its controller's large
 motor as it is (so at most about half strength); the small motor never runs. A car the AI
 drives (a run-up, after the finish) sends nothing, and its controller's motors stop. This is
-the Rumble setting's GT3 original (Auto plays it on a DualSense); its Modern rumble and the
+the Rumble setting's GT3 original; its Modern rumble (Auto) and the
 triggers' ABS and wheelspin effects are the engine's own (`docs/INPUT.md`).
 
 ### §1.3 State, frames and the ground query
@@ -2460,7 +2460,8 @@ below; those marked (disc) need the disc.
 | `exact_replay_round_trip` (disc) | a race with a seeded engine condition replays to the same end (§10.3) |
 | `exact_replay_ghost` (disc) | a time trial's whole-run ghost drives the earlier run again step for step and takes no part in the player's (walls-only) collision step (§5.3) |
 | `net_exact_posed_car_contact` (disc) | an online player's posed car driving into ours: our car is pushed, and the hit reported for its owner pushes the posed car back (§5.3) |
-| `race_rumble` | GT3 original: a step's vibration level goes to the large motor as it is (100, 127) and the small motor stays off; Modern: hits, curbs, off-road, slides and wheelspin; both stop for a car the AI drives or a step without telemetry (§1.2) |
+| `race_rumble` | GT3 original: a step's vibration level goes to the large motor as it is (100, 127) and the small motor stays off; Modern: both motors for everything, hits and off-road leaning on the large one, curbs, slides, wheelspin and locked wheels on the small one, the other motor at 0.35 (0.7 on a DualSense); both stop for a car the AI drives or a step without telemetry (§1.2) |
+| `exact_abs_level_hard_stop` (disc) | the ABS level the brake triggers follow: a hard stop from speed works it (a wheel at the tire's best braking slip, then past it); the brake held at a standstill gives none, though the tire's peak force keeps the pressure under the pedal there (§4.5) |
 | `exact_game_exit_as_finish` (disc) | a car the pad drives sends vibration through a lap; after the finish, the AI driving it, it sends none (§1.2) |
 | `race_pylons_disc` (disc) | the license pylons are knocked about by a car's box and every touch is reported (§11) |
 

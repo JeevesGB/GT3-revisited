@@ -6,6 +6,7 @@
 #include "base/config.h"
 #include "input/input_manager.h"
 #include "input/touch_controls.h"
+#include "race/controls.h"
 #include "sim/exact/pad_read.h"
 
 #include <SDL3/SDL_hints.h>
@@ -119,6 +120,84 @@ TEST(touch_slide_between_pedals) {
     CHECK(t.pad().buttons == 0);
 }
 
+// Reverse: GT3's back input (Triangle, held) on its own button above shift up, away from the thumb
+// on the pedals. A finger put down on it reverses; one sliding onto it never does, and one on it can
+// slide onto the pedals.
+TEST(touch_reverse_button) {
+    TouchControls t = driving();
+    const Widget rev = *find_widget(t, Widget::Kind::Button, PadButton::Triangle);
+    const Widget up = *find_widget(t, Widget::Kind::Button, PadButton::R2);
+    const Widget brake = *find_widget(t, Widget::Kind::Pedal, PadButton::Square);
+    const Widget gas = *find_widget(t, Widget::Kind::Pedal, PadButton::Cross);
+    CHECK(std::string_view(rev.key) == "drive.reverse" && !rev.hidden);
+    CHECK(rev.x == up.x && rev.y + rev.w * 1.2f < up.y - up.w * 1.2f); // above shift up, the touch areas apart
+    CHECK(rev.y - rev.w > 100); // under the race's lap list (its last line ends at 120.5: left to cover it)
+    // 20:9: in the side bar, beside the HUD's corner block.
+    t.set_screen(-70, 0, 710, 360);
+    CHECK(find_widget(t, Widget::Kind::Button, PadButton::Triangle)->x - rev.w >= 640);
+    t.set_screen(0, 0, 640, 360);
+    // Every control size: inside the screen and clear of the other controls' touch areas (above shift
+    // up while it fits; on a 360-unit screen up to size 1.44, then above the handbrake).
+    for (float size : {0.6f, 1.0f, 1.4f, 1.44f, 1.45f, 1.5f, 1.6f}) {
+        TouchConfig cfg;
+        cfg.size = size;
+        TouchControls z = driving(cfg);
+        const Widget rz = *find_widget(z, Widget::Kind::Button, PadButton::Triangle);
+        CHECK(rz.y - rz.w >= 14 && rz.x + rz.w <= 626);
+        CHECK(rz.x == find_widget(z, Widget::Kind::Button, size <= 1.44f ? PadButton::R2 : PadButton::Circle)->x);
+        const float hr = rz.w * 1.2f; // touch radius
+        for (const Widget& w : z.widgets()) {
+            if (w.kind == Widget::Kind::Steering || w.button == PadButton::Triangle) continue;
+            if (w.shape == Widget::Shape::Circle) CHECK(std::hypot(w.x - rz.x, w.y - rz.y) > hr + w.w * 1.2f);
+            else CHECK(rz.y + hr < w.y || rz.x + hr < w.x); // above or left of the pedals
+        }
+    }
+
+    CHECK(t.finger_down(1, rev.x, rev.y, 0.3f));
+    t.update(0.016, 0);
+    CHECK(t.pad().down(PadButton::Triangle) && t.pad().press(PadButton::Triangle) == 255);
+    CHECK(!t.pad().down(PadButton::Cross) && !t.pad().down(PadButton::Square));
+    // Player 1's race pad gets it in any race layout, and the race asks for reverse.
+    InputManager input;
+    input.set_overlay(0, t.pad());
+    input.update(0.016);
+    const PadState& race = input.race_pad(0);
+    CHECK(race.down(PadButton::Triangle) && race.press(PadButton::Triangle) == 255);
+    race::ControlMapper mapper;
+    mapper.update(race, 1.0 / 60);
+    CHECK(mapper.reverse());
+    // Done reversing: the thumb slides on to the gas.
+    t.finger_move(1, gas.x + gas.w / 2, gas.y + gas.h / 2, 1.0f);
+    t.update(0.016, 0);
+    CHECK(t.pad().down(PadButton::Cross) && !t.pad().down(PadButton::Triangle));
+    t.finger_up(1);
+
+    // A thumb sliding up off the brake over shift up onto reverse: it shifts, and never reverses.
+    t.finger_down(2, brake.x + brake.w / 2, brake.y + brake.h / 2, 1.0f);
+    t.update(0.016, 0);
+    t.finger_move(2, up.x, up.y, 1.0f);
+    t.update(0.016, 0);
+    t.finger_move(2, rev.x, rev.y, 1.0f);
+    t.update(0.016, 0);
+    CHECK(t.pad().down(PadButton::R2) && !t.pad().down(PadButton::Triangle));
+    t.finger_up(2);
+    t.update(0.016, 0);
+    CHECK(t.pad().buttons == 0);
+
+    // A layout key of its own: moved, resized or hidden like the others.
+    TouchConfig cfg = TouchConfig::load(IniDocument::parse("[touch]\ndrive.reverse = hidden\n"));
+    CHECK(cfg.hidden("drive.reverse"));
+    TouchControls h = driving(cfg);
+    h.note_touch();
+    CHECK(find_widget(h, Widget::Kind::Button, PadButton::Triangle)->hidden);
+    h.finger_down(5, rev.x, rev.y, 1.0f); // takes no touches (where it was is open screen: it looks around)
+    h.update(0.016, 0);
+    CHECK(h.pad().buttons == 0);
+    IniDocument ini;
+    cfg.save(ini);
+    CHECK(ini.get("touch", "drive.reverse") == std::optional<std::string>("hidden"));
+}
+
 TEST(touch_drag_steering_and_multitouch) {
     TouchConfig cfg;
     TouchControls t = driving(cfg);
@@ -142,6 +221,58 @@ TEST(touch_drag_steering_and_multitouch) {
     t.finger_up(1);
     t.update(0.016, 0);
     CHECK(t.pad().axis(PadAxis::LX) == 128);
+}
+
+// Ours: a finger on the open screen looks around. Dragged sideways it points the race pad's right
+// stick that way (90 degrees per kLookRange, behind at twice that); lifted, the stick lets go. Not
+// within kLookClear of a control or on the drag steering zone (with tilt steering the zone is open
+// screen), never in the menu layout, and [touch] look = off turns it off.
+TEST(touch_look_around) {
+    constexpr float kRange = TouchControls::kLookRange;
+    TouchControls t = driving();
+    // Between the steering zone and the pedals: open screen.
+    CHECK(t.opens_look(400, 200));
+    CHECK(t.finger_down(1, 400, 200, 1.0f));
+    t.update(0.016, 0);
+    CHECK(std::fabs(t.pad().axis_fine(PadAxis::RX)) < 0.01f && t.pad().axis_fine(PadAxis::RY) < -0.99f); // ahead
+    t.finger_move(1, 400 + kRange, 230, 1.0f);
+    t.update(0.016, 0);
+    CHECK(t.pad().axis_fine(PadAxis::RX) > 0.99f && std::fabs(t.pad().axis_fine(PadAxis::RY)) < 0.01f); // right
+    t.finger_move(1, 400 - kRange * 2.5f, 200, 1.0f); // past behind: behind
+    t.update(0.016, 0);
+    CHECK(std::fabs(t.pad().axis_fine(PadAxis::RX)) < 0.01f && t.pad().axis_fine(PadAxis::RY) > 0.99f);
+    // It presses nothing, even dragged over the gas; a second finger drives as usual.
+    const Widget gas = *find_widget(t, Widget::Kind::Pedal, PadButton::Cross);
+    t.finger_move(1, gas.x + 5, gas.y + 5, 1.0f);
+    CHECK(t.finger_down(2, 120, 260, 1.0f)); // the steering zone: steers
+    t.finger_move(2, 160, 260, 1.0f);
+    t.update(0.016, 0);
+    CHECK(t.pad().buttons == 0 && t.pad().axis_f(PadAxis::LX) > 0.2f);
+    t.finger_up(1);
+    t.update(0.016, 0);
+    CHECK(t.pad().axis(PadAxis::RX) == 128 && t.pad().axis(PadAxis::RY) == 128); // let go
+    // Near a control (the brake's side, the steering zone's edge): nothing.
+    const Widget brake = *find_widget(t, Widget::Kind::Pedal, PadButton::Square);
+    CHECK(!t.opens_look(brake.x - TouchControls::kLookClear / 2, brake.y + brake.h / 2));
+    CHECK(!t.finger_down(3, brake.x - TouchControls::kLookClear / 2, brake.y + brake.h / 2, 1.0f));
+    CHECK(!t.opens_look(330, 200) && !t.opens_look(120, 260));
+    // Tilt steering: the zone is open screen.
+    TouchConfig tilt;
+    tilt.steering = TouchConfig::Steering::Tilt;
+    TouchControls tt = driving(tilt);
+    CHECK(tt.opens_look(120, 260));
+    CHECK(tt.finger_down(1, 120, 260, 1.0f));
+    tt.finger_move(1, 120 - kRange, 260, 1.0f);
+    tt.update(0.016, 0);
+    CHECK(tt.pad().axis_fine(PadAxis::RX) < -0.99f); // left
+    // Off, and the menus.
+    TouchConfig off;
+    off.look = false;
+    TouchControls to = driving(off);
+    CHECK(!to.opens_look(400, 200) && !to.finger_down(1, 400, 200, 1.0f));
+    TouchControls menu;
+    menu.set_layout(TouchLayout::Menu);
+    CHECK(!menu.opens_look(320, 180));
 }
 
 TEST(touch_tilt_steering) {
@@ -171,7 +302,7 @@ TEST(touch_button_steering) {
     const Widget left = *find_widget(t, Widget::Kind::Button, PadButton::Left);
     const Widget right = *find_widget(t, Widget::Kind::Button, PadButton::Right);
     CHECK(left.x + left.w <= right.x && right.x + right.w < 320 && left.y + left.h > 300); // side by side, bottom left
-    CHECK(!t.finger_down(9, 160, 120, 1.0f)); // the rest of the left half isn't a control
+    CHECK(t.opens_look(160, 120)); // the rest of the left half isn't a control: open screen, it looks around
     CHECK(t.finger_down(1, left.x + left.w / 2, left.y + left.h / 2, 1.0f));
     t.update(0.016, 0.5f); // tilt is ignored
     CHECK(t.pad().down(PadButton::Left) && t.pad().press(PadButton::Left) == 255);
@@ -270,8 +401,9 @@ TEST(touch_left_handed_mirrors) {
 TEST(touch_config_roundtrip) {
     IniDocument ini = IniDocument::parse(
         "[touch]\nmode = on\nsteering = tilt\npedals = area\npedal_min = 0.2\nsteer_range = 9\nopacity = 0.8\n"
-        "size = 1.2\nleft_handed = on\n");
+        "size = 1.2\nleft_handed = on\nlook = off\n");
     TouchConfig c = TouchConfig::load(ini);
+    CHECK(!c.look && TouchConfig::load(IniDocument{}).look);
     CHECK(c.mode == TouchConfig::Mode::On);
     CHECK(c.steering == TouchConfig::Steering::Tilt);
     CHECK(c.pedals == TouchConfig::Pedals::Area);
@@ -281,7 +413,7 @@ TEST(touch_config_roundtrip) {
     IniDocument out;
     c.save(out);
     TouchConfig d = TouchConfig::load(out);
-    CHECK(d.mode == c.mode && d.steering == c.steering && d.pedals == c.pedals && d.left_handed);
+    CHECK(d.mode == c.mode && d.steering == c.steering && d.pedals == c.pedals && d.left_handed && !d.look);
     CHECK(std::fabs(d.size - 1.2f) < 1e-3f && std::fabs(d.opacity - 0.8f) < 1e-3f);
     TouchConfig def = TouchConfig::load(IniDocument{});
     CHECK(def.mode == TouchConfig::Mode::Auto && def.steering == TouchConfig::Steering::Drag);
@@ -578,6 +710,61 @@ TEST(input_binding_sets) {
     CHECK((!b.custom(Pad, true) && sources(b.set(Pad, true, Keys), accel) == V{src("key.W"), src("key.Up")}));
 }
 
+// Ours: the look around's race controls. The right stick by default (the modern layout's; Home /
+// End / Page Up / Page Down on the keyboard); the stick axes are Look left / right and Look ahead /
+// behind, the RX halves Look left and Look right, which take buttons and keys (the whole axes refuse
+// them). Replacing the stick on Look left / right keeps them.
+TEST(input_look_around_controls) {
+    auto src = [](const char* s) {
+        InputSource out;
+        CHECK((InputSource::parse(s, out)));
+        return out;
+    };
+    auto target = [](const char* s) {
+        PadTarget out;
+        CHECK((PadTarget::parse(s, out)));
+        return out;
+    };
+    auto sources = [](const Profile& p, const PadTarget& t) {
+        std::vector<InputSource> out;
+        for (const Binding& b : p.bindings)
+            if (b.target == t) out.push_back(b.source);
+        return out;
+    };
+    using V = std::vector<InputSource>;
+    constexpr DeviceKind Pad = DeviceKind::Pad;
+    constexpr BindingSet Ctl = BindingSet::Controller, Keys = BindingSet::Keyboard;
+    const PadTarget rx = target("RX"), ry = target("RY"), left = target("RX-"), right = target("RX+");
+    CHECK(race_action_name(rx) == "Look left / right" && race_action_name(ry) == "Look ahead / behind");
+    CHECK(race_action_name(left) == "Look left" && race_action_name(right) == "Look right");
+    CHECK(race_action_name(target("RY+")).empty());
+    PlayerBindings b;
+    CHECK((sources(b.set(Pad, true, Ctl), rx) == V{src("pad.rightx")} && sources(b.set(Pad, true, Ctl), ry) == V{src("pad.righty")}));
+    CHECK((sources(b.set(Pad, true, Keys), left) == V{src("key.Home")} && sources(b.set(Pad, true, Keys), right) == V{src("key.End")}));
+    CHECK((sources(b.set(Pad, true, Keys), target("RY+")) == V{src("key.PageDown")}));
+    CHECK(!b.bind(Pad, true, rx, src("pad.leftshoulder"), true)); // a button can't look both ways
+    CHECK(b.bind(Pad, true, left, src("pad.leftshoulder"), true));
+    CHECK(b.bind(Pad, true, right, src("pad.rightshoulder"), true));
+    CHECK(b.bind(Pad, true, rx, src("pad.leftx"), true)); // the left stick instead
+    const Profile& ctl = b.set(Pad, true, Ctl);
+    CHECK((sources(ctl, rx) == V{src("pad.leftx")}));
+    CHECK((sources(ctl, left) == V{src("pad.leftshoulder")} && sources(ctl, right) == V{src("pad.rightshoulder")}));
+    // A stick direction on a half reads as that direction's push.
+    CHECK(b.bind(Pad, true, left, src("pad.lefty-"), false));
+    CHECK((sources(b.set(Pad, true, Ctl), left) == V{src("pad.leftshoulder"), src("pad.lefty-")}));
+    // GT3 original reads the menu pad, whose R3 looks back (race::look_back_held): a custom set made
+    // from it keeps R3's inputs on Look back, never on the performance overlay.
+    PlayerBindings g;
+    g.set_race_layout(Pad, "gt3");
+    CHECK(g.race_reads_menu(Pad));
+    CHECK(g.bind(Pad, true, target("Cross"), src("pad.east"), true));
+    CHECK(!g.race_reads_menu(Pad));
+    const PadTarget l1 = target("L1"), r3 = target("R3");
+    CHECK((sources(g.set(Pad, true, Ctl), l1) == V{src("pad.leftshoulder"), src("pad.rightstick")}));
+    CHECK((sources(g.set(Pad, true, Keys), l1) == V{src("key.Q"), src("key.G")}));
+    CHECK(sources(g.set(Pad, true, Ctl), r3).empty() && sources(g.set(Pad, true, Keys), r3).empty());
+}
+
 // The back paddles shift by default (right up, left down) in both race layouts: the modern one
 // binds them, and under GT3 original the race reads the menu pad, whose paddles press R2 / L2.
 // Each is its own control: bound to another action it stops shifting. They read as "Right paddle".
@@ -660,7 +847,200 @@ TEST(input_capture_cancel) {
     key(SDL_SCANCODE_K);
     InputSource k;
     CHECK(InputSource::parse("key.K", k));
-    CHECK(!input.capturing() && input.poll_capture() == std::optional<InputSource>(k));
+    const std::optional<InputManager::CapturedInput> c = input.poll_capture();
+    CHECK(!input.capturing() && c && c->source == k && c->rest == 0);
+}
+
+// A wheel has no dead zone around its centre (public issue 134): its axes bound in the binding
+// editor get none (a stick's get kStickDeadzone), and the wheel's saved sets drop the stick dead
+// zone they were given before. The pad keeps each axis at its full resolution next to its byte.
+TEST(input_wheel_axes_no_deadzone) {
+    auto src = [](const char* s) {
+        InputSource out;
+        CHECK(InputSource::parse(s, out));
+        return out;
+    };
+    auto deadzone = [](const Profile& p, const char* target) {
+        PadTarget t;
+        CHECK(PadTarget::parse(target, t));
+        for (const Binding& b : p.bindings)
+            if (b.target == t) return b.options.deadzone;
+        return -1.0f;
+    };
+    PadTarget steer;
+    CHECK(PadTarget::parse("LX", steer));
+    PlayerBindings b;
+    CHECK(b.bind(DeviceKind::Wheel, true, steer, src("joy.axis0"), true, AxisInfo{true}));
+    CHECK(deadzone(b.set(DeviceKind::Wheel, true, BindingSet::Controller), "LX") == 0);
+    CHECK(b.bind(DeviceKind::Joystick, true, steer, src("joy.axis0"), true));
+    CHECK(deadzone(b.set(DeviceKind::Joystick, true, BindingSet::Controller), "LX") == kStickDeadzone);
+    CHECK(b.bind(DeviceKind::Pad, true, steer, src("pad.leftx"), true));
+    CHECK(deadzone(b.set(DeviceKind::Pad, true, BindingSet::Controller), "LX") == kStickDeadzone);
+    PlayerBindings old;
+    old.load(IniDocument::parse("[player1.wheel.race]\nLX = joy.axis0 deadzone=0.08\nCross = joy.axis1 pedal invert\n"
+                                "[player1.wheel.bindings]\nLX = joy.axis0 deadzone=0.08\nLY = joy.axis3 deadzone=0.2\n"
+                                "[player1.joystick.race]\nLX = joy.axis0 deadzone=0.08\n"),
+             "player1");
+    CHECK(deadzone(old.set(DeviceKind::Wheel, true, BindingSet::Controller), "LX") == 0);
+    CHECK(deadzone(old.set(DeviceKind::Wheel, false, BindingSet::Controller), "LX") == 0);
+    CHECK(deadzone(old.set(DeviceKind::Wheel, false, BindingSet::Controller), "LY") == 0.2f); // chosen: kept
+    CHECK(deadzone(old.set(DeviceKind::Joystick, true, BindingSet::Controller), "LX") == kStickDeadzone);
+
+    // The fine axis: what set_axis set, while the byte is still its byte; a byte set alone reads as
+    // itself (every byte back to the same byte). A merge keeps the axis furthest from rest, fine
+    // value with it.
+    PadState p;
+    p.set_axis(PadAxis::LX, 1.0f / 450.0f); // a degree on a 900-degree wheel
+    CHECK(p.axis(PadAxis::LX) == 128 && p.axis_fine(PadAxis::LX) == 1.0f / 450.0f);
+    p.set_axis(PadAxis::LX, -2.0f);
+    CHECK(p.axis(PadAxis::LX) == 0 && p.axis_fine(PadAxis::LX) == -1.0f);
+    for (int v = 0; v < 256; ++v) {
+        p.axes[size_t(PadAxis::LX)] = u8(v);
+        CHECK(int(PadState::axis_byte(p.axis_fine(PadAxis::LX))) == v);
+    }
+    PadState rest, nudged;
+    nudged.set_axis(PadAxis::LX, -0.001f);
+    const PadState m = merge_pads({rest, nudged});
+    CHECK(m.axis(PadAxis::LX) == nudged.axis(PadAxis::LX) && m.axis_fine(PadAxis::LX) == -0.001f);
+}
+
+// A pedal bound in the binding editor reads over its whole travel (public issue 134): the axis
+// rests at an end, so the capture's half (past the middle) would leave the first half of the
+// travel dead. An axis resting in the middle (combined pedals, a stick) keeps its half.
+TEST(input_pedal_whole_travel) {
+    auto src = [](const char* s) {
+        InputSource out;
+        CHECK(InputSource::parse(s, out));
+        return out;
+    };
+    auto find = [](const Profile& p, const char* target) {
+        PadTarget t;
+        CHECK(PadTarget::parse(target, t));
+        for (const Binding& b : p.bindings)
+            if (b.target == t) return b;
+        return Binding{};
+    };
+    PadTarget gas, brake, steer, look;
+    CHECK(PadTarget::parse("Cross", gas) && PadTarget::parse("Square", brake) && PadTarget::parse("LX", steer) &&
+          PadTarget::parse("RY+", look));
+    Profile p;
+    p.bind(gas, src("joy.axis1+"), true, AxisInfo{true, -1.0f}); // rests at -1
+    p.bind(brake, src("joy.axis2-"), true, AxisInfo{true, 0.98f}); // rests at +1
+    Binding g = find(p, "Cross"), b = find(p, "Square");
+    CHECK(g.source.half == InputSource::Half::Full && g.options.pedal && !g.options.invert);
+    CHECK(b.source.half == InputSource::Half::Full && b.options.pedal && b.options.invert);
+    CHECK(g.source_with_options() == "joy.axis1 pedal" && b.source_with_options() == "joy.axis2 invert pedal");
+    p.bind(look, src("joy.axis3+"), true, AxisInfo{false, -1.0f}); // a half axis too, no dead zone
+    Binding l = find(p, "RY+");
+    CHECK(l.options.pedal && l.options.deadzone == 0);
+    p.bind(gas, src("joy.axis1+"), true, AxisInfo{true, 0.0f}); // combined pedals: the half
+    g = find(p, "Cross");
+    CHECK(g.source.half == InputSource::Half::Positive && !g.options.pedal);
+    p.bind(steer, src("joy.axis0-"), true, AxisInfo{true, -1.0f}); // a whole axis: as it reads
+    CHECK(!find(p, "LX").options.pedal);
+}
+
+// A wheel's pedals captured in Settings and the steering curve, on SDL's virtual wheel: half a
+// pedal's travel is half pressure, and the race (not the menus) steers through the wheel's curve,
+// kept apart from other controllers' and saved per player.
+TEST(input_steering_curve_shape) {
+    // Ends kept, sign kept, rising, and at most ~3.7 times linear at the centre (no power curve's infinite slope:
+    // the force feedback oscillated around it, issue 134).
+    for (float c = InputManager::kSteeringCurveMin; c <= InputManager::kSteeringCurveMax + 0.001f; c += 0.1f) {
+        CHECK(InputManager::curved_steering(0.0f, c) == 0.0f);
+        CHECK(InputManager::curved_steering(1.0f, c) == 1.0f && InputManager::curved_steering(-1.0f, c) == -1.0f);
+        CHECK(InputManager::curved_steering(-0.3f, c) == -InputManager::curved_steering(0.3f, c));
+        CHECK(InputManager::curved_steering(1e-4f, c) / 1e-4f < 3.75f);
+        float prev = 0.0f;
+        for (int i = 1; i <= 100; ++i) {
+            const float y = InputManager::curved_steering(float(i) / 100.0f, c);
+            CHECK(y > prev);
+            prev = y;
+        }
+    }
+    CHECK(InputManager::curved_steering(0.37f, 1.0f) == 0.37f);
+    CHECK(InputManager::curved_steering(0.3f, 0.1f) > 0.5f); // quicker off the centre
+    CHECK(InputManager::curved_steering(0.3f, 2.5f) < 0.15f); // finer near it
+}
+
+TEST(input_virtual_wheel_pedals_and_steering_curve) {
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) SKIP("no SDL gamepad subsystem");
+    int connected = 0;
+    SDL_free(SDL_GetJoysticks(&connected));
+    if (connected > 0) { // a real device would be player 1, not the test's
+        SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+        SKIP("a controller is connected");
+    }
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_WHEEL;
+    desc.name = "Test Wheel";
+    desc.naxes = 3;
+    desc.nbuttons = 10;
+    const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+    SDL_Joystick* wheel = id ? SDL_OpenJoystick(id) : nullptr;
+    CHECK(wheel != nullptr);
+    if (wheel) {
+        InputManager in;
+        in.set_background(true); // no window has the focus here
+        auto axis = [&](int a, Sint16 v) { SDL_SetJoystickVirtualAxis(wheel, a, v); };
+        auto frame = [&] {
+            SDL_UpdateJoysticks();
+            for (SDL_Event e; SDL_PollEvent(&e);) in.handle_event(e);
+            in.update(1.0 / 60);
+        };
+        axis(1, -32768), axis(2, 32767); // gas rests at -1, brake at +1
+        frame();
+        CHECK(in.kind(0) == DeviceKind::Wheel && in.wheel_steering(0));
+        auto capture = [&](int a, Sint16 to, const char* target) {
+            in.begin_capture(0);
+            axis(a, to);
+            frame();
+            std::optional<InputManager::CapturedInput> c = in.poll_capture();
+            CHECK(c && c->source.kind == InputSource::Kind::JoyAxis && c->source.code == a);
+            PadTarget t;
+            CHECK(PadTarget::parse(target, t));
+            if (c) CHECK(in.bind_race(0, t, c->source, true, c->rest));
+        };
+        capture(1, 32767, "Cross");
+        capture(2, -32768, "Square");
+        axis(1, 0), axis(2, 0); // both half way down
+        frame();
+        CHECK(in.race_pad(0).press(PadButton::Cross) == 128 && in.race_pad(0).press(PadButton::Square) == 128);
+        axis(1, -32768), axis(2, 32767);
+        frame();
+        CHECK(!in.race_pad(0).down(PadButton::Cross) && !in.race_pad(0).down(PadButton::Square));
+        axis(1, -29491), axis(2, 29491); // 5 % down: pressed (the race's pedal threshold, not 12 %)
+        frame();
+        CHECK(in.race_pad(0).press(PadButton::Cross) == 13 && in.race_pad(0).press(PadButton::Square) == 13);
+        axis(1, -32440), axis(2, 32440); // 1 %: the rest's noise
+        frame();
+        CHECK(!in.race_pad(0).down(PadButton::Cross) && !in.race_pad(0).down(PadButton::Square));
+        axis(1, -32768), axis(2, 32767);
+
+        CHECK(in.steering_curve(0) == 1.0f);
+        in.set_steering_curve(0, 2.0f);
+        axis(0, 16384); // half lock to the right
+        frame();
+        CHECK(std::fabs(in.race_pad(0).axis_fine(PadAxis::LX) - 0.35f / 1.2f) < 0.001f); // (0.6^2 - 0.1^2) / (1.1^2 - 0.1^2)
+        CHECK(std::fabs(in.pad(0).axis_fine(PadAxis::LX) - 0.5f) < 0.001f); // the menus: as it is
+        axis(0, -32768);
+        frame();
+        CHECK(in.race_pad(0).axis_fine(PadAxis::LX) == -1.0f); // full lock stays full lock
+        IniDocument cfg;
+        in.save(cfg);
+        CHECK(cfg.get("player1", "wheel_steering_curve") == "2.00" && cfg.get("player1", "steering_curve") == "1.00");
+        cfg.set("player1", "steering_curve", "9");
+        InputManager again;
+        again.load(cfg);
+        CHECK(again.steering_curve(0) == 2.0f);
+        again.set_device_filter(0, InputManager::kKeyboardOnly); // not the wheel: the other curve
+        CHECK(again.steering_curve(0) == InputManager::kSteeringCurveMax);
+        in.set_background(false);
+        SDL_CloseJoystick(wheel);
+    }
+    if (id) SDL_DetachVirtualJoystick(id);
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
 }
 
 // A button or key on a whole stick axis (Steer, the menu sticks) could push it only one way: it is
@@ -1131,12 +1511,16 @@ TEST(touch_control_bounds) {
     }
     CHECK(gas_seen && up_seen);
     // The race HUD's corner blocks keep their places beside the driving layout at its normal
-    // size (16:9 and 20:9): the top corners hold no control down to the shift buttons.
+    // size (16:9 and 20:9): the top corners hold no control down to the shift buttons but reverse,
+    // which comes up under the lap list's last line (112.5..120.5: left to cover it), and on 20:9
+    // stays in the side bar.
     for (float x1 : {640.0f, 710.0f}) {
         t.set_screen(640 - x1, 0, x1, 360);
+        const Widget rev = *find_widget(t, Widget::Kind::Button, PadButton::Triangle);
         for (const TouchRect& r : t.control_bounds()) {
             const bool top_left = r.x < 200 && r.y < 150, top_right = r.x + r.w > 500 && r.y < 150;
-            CHECK(!top_left && !top_right);
+            if (r.x == rev.x - rev.w && r.y == rev.y - rev.w) CHECK(r.y > 120.5f - 24 && (x1 == 640 || r.x >= 640));
+            else CHECK(!top_left && !top_right);
         }
     }
 }
@@ -1179,7 +1563,7 @@ TEST(touch_gt3_race_buttons) {
     CHECK(find_widget(t, Widget::Kind::Button, PadButton::L2)->label == "DOWN");
     CHECK(find_widget(t, Widget::Kind::Button, PadButton::R1)->label == "CAM");
     CHECK(find_widget(t, Widget::Kind::Button, PadButton::Select) == nullptr); // no respawn, as in GT3
-    CHECK(find_widget(t, Widget::Kind::Button, PadButton::Triangle) == nullptr);
+    CHECK(find_widget(t, Widget::Kind::Button, PadButton::Triangle)->label == "REV"); // GT3's reverse ("back")
 }
 
 namespace {

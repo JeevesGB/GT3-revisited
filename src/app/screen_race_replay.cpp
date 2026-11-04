@@ -93,7 +93,7 @@ std::shared_ptr<const sim::exact::RaceRecord> RaceScreen::exact_playback() const
 }
 
 std::shared_ptr<const sim::exact::RaceRecord> RaceScreen::exact_ghost_source() const {
-    if (replaying_ || demo_ || !preset_.ghost || !whole_run_ghost()) return nullptr;
+    if (replaying_ || demo_ || backdrop_ || !preset_.ghost || !whole_run_ghost()) return nullptr;
     return ghost_record_;
 }
 
@@ -549,6 +549,22 @@ void RaceScreen::apply_post_pass(render::DrawOptions& o) const {
     g.white = levels ? f.white : e.has_env ? e.grade_white : 1.0f;
     for (int i = 0; i < 3; ++i) g.curve[i] = filter ? f.curve[i] : e.has_env ? e.grade_g[size_t(i)] : 0.5f;
     g.saturation = filter ? f.saturation : e.has_env ? e.saturation : 1.0f;
+}
+
+// The depth of field (presentation §G17): GT3 draws it in the full-frame 1P view of a replay,
+// a demonstration, the attract demo and the quick menu's race (play modes 1-3), on courses with
+// Env0 flag 0x100; never live, in the 2P halves or the licence menu's preview box (callers).
+// The lens from Env0, focused at the camera's distance but no nearer than Env0's.
+void RaceScreen::apply_depth_of_field(render::DrawOptions& o) const {
+    const SunParams& e = sun_.params();
+    const bool replay = replaying_ || attract_ || demo_ || backdrop_;
+    if (!replay || !e.has_env || !e.dof || dof_off_) return;
+    render::DrawOptions::DepthOfField& d = o.dof;
+    d.on = true;
+    d.f_number = e.dof_f_number;
+    d.focal_mm = e.dof_focal_mm;
+    d.focus = std::max(camera_.focus(), e.dof_min_focus);
+    d.far = e.far_clip;
 }
 
 } // namespace gt3r::race_screen

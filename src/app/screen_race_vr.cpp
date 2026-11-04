@@ -60,9 +60,11 @@ void RaceScreen::render_vr_eyes(App& app, Ui& ui, const render::DrawOptions& o) 
     TyreSmoke::View sv;
     sv.forward = render::normalize(render::Vec3{-head.at(0, 2), -head.at(1, 2), -head.at(2, 2)});
     sv.proj_x = 2.0f / std::max(e0.tan_right - e0.tan_left, 1e-3f);
-    sv.near_m = camera_.near_plane, sv.far_m = camera_.far_plane;
+    sv.near_m = camera_.near_plane, sv.far_m = camera_.gt3_far > 0 ? camera_.gt3_far : camera_.far_plane;
     const bool own_car = !camera_.onboard() || st.show_car;
+    spark_pass_ = true, spark_view_ = render::inverse(head); // (the sparks' streaks from the head)
     collect_items(head_pos, right, own_car, true, sv);
+    spark_pass_ = false;
     if (camera_.onboard()) // from inside the body: its bonnet, not its roof and windows
         for (size_t i = player_items_[0]; i < player_items_[1]; ++i) items_[i].single_sided = true;
     const float fovy = std::atan(e0.tan_up) - std::atan(e0.tan_down);
@@ -119,7 +121,7 @@ void RaceScreen::render_vr_eyes(App& app, Ui& ui, const render::DrawOptions& o) 
     SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
     SDL_RenderClear(r);
     // The rear-view mirror where GT3 draws it, at the top of the panel.
-    if (camera_.onboard() && camera_.mirror() && !camera_.look_back())
+    if (camera_.shows_mirror())
         draw_mirror(app, ui, SDL_FRect{0, 0, ui.width(), ui.height()}, o, false, false);
     x.submit_stereo();
 }

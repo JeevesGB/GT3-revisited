@@ -84,6 +84,8 @@ struct WheelState {
     bool grounded = false;
     u32 surface = 0;
     float flap = 0;          // [physics §8.8] flap pendulum, -1..1 (car models' morph phase 0.5 + 0.5 flap)
+    float camber = 0;        // radians, the drawn wheel's camber from its suspension travel (the wheel record's)
+    float brake_heat = 0;    // [physics §8.5] 0..1, drawn as the brake rotor's glow
 };
 
 // A car's state after a step (race::exact_state). Rendering, camera, HUD and
@@ -151,7 +153,12 @@ struct VehicleTelemetry {
     std::array<float, 4> brake_torque{};
     float drag_force = 0;         // N
     float downforce = 0;          // N
-    bool abs_active = false, tcs_active = false;
+    // The ABS at work (physics §4.5), 0..1, the strongest wheel's: a braked wheel nearing the tyre's best braking
+    // slip (from 85 % of it) up to 0.4, then past it 0.4 + 0.6 x the share of the pressure the ABS takes off (slip
+    // over the target x G g; a car without it, G 0: how far past that slip the wheel is locking, over 0.5). Not a
+    // pressure below the pedal: GT3 limits that by the tyre's peak force too, at a standstill as well.
+    float abs_level = 0;
+    bool tcs_active = false;
     float understeer = 0, oversteer = 0; // ASCC indicators [physics §4.6]
     float throttle_processed = 0;     // throttle after the pedal shaping and TCS, before the turbo lag
     // Turbo boost of the lagged stages: Bcap(lag0, lag1) - 1 (physics §2.3), i.e. the
@@ -176,6 +183,10 @@ struct VehicleTelemetry {
     // steering wheel's force (car +0x16D6, 0x80 centred), and whether the race has tyre wear (the HUD's tyre gauges).
     int tcs_status = -1, asm_status = -1;
     int pad_rumble = -1, wheel_force = -1;
+    // The steering in percent of full lock, left positive (F+0x523), and the throttle and brake pedals 0..1 (F+0x428 /
+    // +0x42C): the replay's steering and accel / brake monitors. steer_pct -1000 = none.
+    int steer_pct = -1000;
+    float throttle_pedal = 0, brake_pedal = 0;
     // Whether the race sends the car's pad vibration and wheel force: its control source is not the AI (1, 2) and no
     // driver kind is set (a car the AI drives, as in a run-up or after the finish, sends nothing).
     bool pad_output = false;

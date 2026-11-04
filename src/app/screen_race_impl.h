@@ -46,6 +46,8 @@
 #include "race/lamp_glows.h"
 #include "race/race_panels.h"
 #include "race/sun_glare.h"
+#include "race/replay_post.h"
+#include "race/sun_disc.h"
 #include "race/results.h"
 #include "race/pause_menu.h"
 #include "race/paint.h"
@@ -59,6 +61,7 @@
 #include "race/point_lights.h"
 #include "formats/text/mltx.h"
 #include "race/pylons.h"
+#include "race/sparks.h"
 #include "race/tyre_smoke.h"
 #include "race/wet_road.h"
 #include "race/road_shade.h"
@@ -268,6 +271,18 @@ private:
     void seed_vehicle_condition(const sim::EngineCondition& c, bool live);
     sim::EngineCondition live_condition() const;
     std::optional<Bytes> read_car(App& app, const std::string& model) const;
+    // [video] showroom_wheels: the model's menu/cars file and a fitted wheel's
+    // menu/wheel/<label> (CarVisual's showroom_car, showroom_wheel); none when off.
+    struct ShowroomFiles {
+        std::optional<Bytes> car, wheel;
+        ByteSpan car_span() const { return car ? ByteSpan(*car) : ByteSpan{}; }
+        ByteSpan wheel_span() const { return wheel ? ByteSpan(*wheel) : ByteSpan{}; }
+    };
+    ShowroomFiles read_showroom(App& app, const std::string& model, const std::string& wheel) const;
+    // A car model's spark points (GTCI +0x58 / +0x5C of read_car's model): ExactFieldOptions::spark_points. Kept by folder
+    // and model (every restart builds the race again).
+    std::vector<sim::exact::SparkPoint> car_spark_points(App& app, const std::string& model) const;
+    mutable std::map<std::string, std::vector<sim::exact::SparkPoint>> spark_points_;
     // Flying start (physics §9.1, 9.4: licence tests and time trials with the event's
     // distance and speed): the race's AI drives the player's car until the first line crossing.
     bool flying_runup() const { return !race_mode_ && tt_start_.flying() && track_ && !track_->lap_started(); }
@@ -281,6 +296,10 @@ private:
     }
     // A live view: not a replay, demonstration, attract demo or menu backdrop.
     bool live_view() const { return !replaying_ && !demo_ && !attract_ && !backdrop_; }
+    // The camera manager's live handler (start.cam over a standing hold, else the driver's camera): live views,
+    // the licence menu's preview box and the quick menus' races, whose records off leave the camera's view without the
+    // race's input (presentation §A8c).
+    bool live_camera() const { return live_view() || preview_ || backdrop_; }
     // Rolling start: the race's AI drives the player's car for the first 300 ticks (counted in
     // ticks, so the hand-over cannot drift by a frame).
     bool rolling_runup() const { return rolling_ && field_ && std::llround(field_->race_time() * 60.0) < 300; }
@@ -303,10 +322,12 @@ private:
     // Drive loop (screen_race_drive.cpp)
     sim::ControlInputs scripted_inputs(double t, bool& reverse) const; // GT3R_RACE script=
     void next_view(CameraRig& cam, int player);
+    // Ours: the look around from a race pad's right stick (CameraRig::set_look).
+    void look_around(App& app, CameraRig& cam, const PadState& pad) const;
     void tick(App& app, const PadState& pad);
     void update_drive(App& app, double dt);
     static ForceFeedbackState feedback(const sim::VehicleState& s, const sim::VehicleTelemetry& t, const sim::ControlInputs& in,
-                                       float wall, float car_hit);
+                                       float wall, float car_hit, const RumbleModel& rumble);
     void update_gear_hint(const sim::VehicleState& s);
     void update_dirt(double dt);
     void update_pylons(double dt);
@@ -342,9 +363,14 @@ private:
     CarLook car_look(const sim::VehicleState& s, bool player, size_t slot) const;
     int car_lamp_index(const sim::VehicleState& s, size_t slot) const;
     static TyreSmoke::View smoke_view(const CameraRig& c, float aspect, float fovy);
-    // `mirror`: the rear-view mirror's pass (its own sky; CourseScene::add_items).
+    // The view items are collected for: the main view, a 2P half, the rear-view mirror (its own
+    // sky; CourseScene::add_items). They differ in the course draw's flags (Env0 +0xF30 / +0xF34 /
+    // +0xF38: the billboards), the sun disc (not in the mirror) and the mirror's passes (presentation
+    // §H2, §I6, §I7).
+    enum class ItemsView { Main = 0, Split = 1, Mirror = 2 };
+    // `smoke_v.forward` is also the camera's view direction for the sun disc (none when zero).
     void collect_items(const render::Vec3& eye, const sim::Vec3& right = {1, 0, 0}, bool player = true,
-                       bool second = true, const TyreSmoke::View& smoke_v = {}, bool mirror = false);
+                       bool second = true, const TyreSmoke::View& smoke_v = {}, ItemsView view = ItemsView::Main);
     size_t player_items_[2] = {0, 0}; // collect_items: the player's car is items_[first, end)
     size_t scenery_items_ = 0;          // collect_items: the course's items are items_[0, end)
     HudData hud_data(int player);
@@ -355,8 +381,7 @@ private:
     render::DrawOptions draw_options() const;
     void render_drive(App& app, Ui& ui);
     size_t add_wet_road(const render::Vec3& eye, float aspect, const render::DrawOptions& o) {
-        return add_wet_road(eye, camera_.view(), camera_.projection(aspect),
-                            render::Frustum::symmetric(camera_.fovy(), aspect), o);
+        return add_wet_road(eye, camera_.view(), camera_.projection(aspect), camera_.frustum(aspect), o);
     }
     void remove_wet_road(size_t n) {
         auto first = items_.begin() + std::ptrdiff_t(scenery_items_);
@@ -447,6 +472,12 @@ private:
     PauseMenu::Kind pause_kind() const;
     void open_pause(App& app);
     void update_pause(App& app, double dt);
+    void pause_result(App& app, PauseMenu::Result r);
+    void pause_more_choose(App& app); // Select's list: the cursor's item, as Cross
+    int pause_more_row(const Ui& ui, float x, float y) const;
+    // The quick menus' and the pause window's pointer (menu_pointer_): true when it closed or
+    // changed the menu (the caller's update stops there).
+    bool menu_pointer(App& app);
     void online_pause_note(Ui& ui);
     void render_pause(Ui& ui);
 
@@ -482,9 +513,9 @@ private:
     void start_hud_clocks(int replay, float start_speed);
     bool long_title(float start_speed) const;
     void apply_replay_settings(App& app, const ReplaySettings& rs);
-    // The view settings in force: the attract demo's and the menu backdrop's own pick (play
-    // mode 2), else REPLAY OPTIONS'.
-    const ReplaySettings& view_settings() const { return attract_ || backdrop_ ? attract_view_ : replay_settings_; }
+    // The view settings in force: the attract demo's own pick, else REPLAY OPTIONS' (the menu
+    // backdrop's too: its records-off flag skips the pick, presentation §A8c).
+    const ReplaySettings& view_settings() const { return attract_ ? attract_view_ : replay_settings_; }
     // A new replay or demonstration: no shot, the director's generator seeded from the clock.
     void restart_director();
     void pick_attract_view();
@@ -511,9 +542,11 @@ private:
     // The post-process pass (presentation §G6, §G16): the grade (the shot's levels / filter over
     // the course's Env0 values), the dissolve and the trail.
     void apply_post_pass(render::DrawOptions& o) const;
+    // The replay depth of field (presentation §G17) for the full-frame view.
+    void apply_depth_of_field(render::DrawOptions& o) const;
     // The disc region's replays (race::replay_dir).
     std::string replay_dir(App& app) const {
-        return race::replay_dir(app.data_dir(), app.vfs() ? app.vfs()->region().region : Region::America);
+        return race::replay_dir(app.save_folder(), app.vfs() ? app.vfs()->region().region : Region::America);
     }
 
     // After a run (screen_race_post_run.cpp; race/post_run.h): the race-exit transition, the
@@ -530,11 +563,13 @@ private:
     void after_run(App& app);        // the live run's transition is over
     void solo_run_ghost();           // the best run and the ghost after a live solo run
     void start_auto_replay(App& app); // the run's replay, by itself
-    void return_to_menu(App& app);   // a replay's (or the licence demonstration's) transition is over
+    void return_to_menu(App& app);   // a replay's (or the quick menu's demonstration's) transition is over
     // The quick menu's backdrop (race::menu_backdrop): the race in play mode 2, the licence
     // preview box, or nothing.
     void start_menu_backdrop(bool before_run);
-    void stop_backdrop(App& app);
+    // The run's race again, with its recording, replay and result (`rebuild` false: the caller builds a new race at once).
+    void stop_backdrop(App& app, bool rebuild = true);
+    void end_backdrop_race(bool rebuild = true);
     void update_backdrop(App& app, double dt);
     // A live run is over and lost to the replays that re-run it: its laps for the saved replay.
     void keep_run_laps() { run_laps_ = lap_times_; }
@@ -600,6 +635,11 @@ private:
     std::shared_ptr<const sim::exact::RaceRecord> exact_playback() const;
     // A demonstration the exact core plays from its record (the race judges and drives it: no screen-side takeover).
     bool exact_demo() const { return demo_ && demo_record_ && exact_field() && exact_race_of(*exact_field()); }
+    // A demonstration played as a replay (play mode 1, the quick menu's DEMO and the theater's), not behind a menu: Start
+    // opens the replay pause, it shows the replay's mark, and it ends when its recording runs out.
+    bool demo_replay() const { return demo_ && !preview_; }
+    // The disc's demonstration has run out (DemoReplay::run_out): a replay of it ends, the licence preview box restarts it.
+    bool demo_over() const { return disc_demo_ && disc_demo_->run_out(demo_tick_); }
     // The solo modes (screen_race_solo.cpp): the time trial, licence test, machine test, free run and free practice as
     // GT3 runs them (their conductors' race flow judges the run, times its laps, sectors and splits; the free run's lap
     // handlers keep its best lap and drive its ghost car). The run's field is solo_field_ (field_ stays null: the screen's
@@ -659,18 +699,33 @@ private:
     Pylons pylons_;
     bool pylon_hit_ = false; // the player's car touched a pylon
     TyreSmoke smoke_;                             // tyre smoke / dirt dust (course slots 26 / 32)
+    SparkDraw sparks_;                            // the race's sparks (race/particle.img)
+    // collect_items draws the sparks with this view (the one-player view, the VR head); off for the mirror and the
+    // split-screen halves. The view's camera at the last draw (a change is a cut).
+    bool spark_pass_ = false;
+    render::Mat4 spark_view_;
+    std::optional<CameraRig::Shot> spark_shot_;
     // Per-car light sets this frame (stable addresses; filled while collecting the draw items).
     mutable std::deque<render::ItemLights> item_lights_;
+    // The wheels (race/wheel_fx.h): race/brake.bin, the course's Env0 values, the view collecting
+    // the draw items (null: plain wheels) and each car's track of its wheels on screen (by
+    // car_look slot; the ghost's own).
+    std::optional<BrakeParts> brake_parts_;
+    WheelEnv wheel_env_;
+    const WheelView* wheel_view_ = nullptr;
+    mutable std::deque<WheelTrack> wheel_tracks_;
+    WheelTrack ghost_wheel_track_;
     bool env_cube_on_ = true; // [video] car_reflections
     bool shadows_on_ = true;  // [video] car_shadows
     bool full_car_detail_ = false; // [video] full_car_detail (CarVisual::set_full_detail)
+    bool showroom_wheels_ = false; // [video] showroom_wheels (read_showroom)
     std::vector<render::DrawItem> env_items_;
     bool env_gt3_scene_ = false; // the map holds GT3's reflection scene: use GT3's lookup
     std::vector<RecordEntry> records_;
     std::vector<std::string> record_names_;
     RecordsPanel records_panel_;
     bool records_loaded_ = false;
-    bool demo_ = false;                  // quick menu "demonstration": the computer drives
+    bool demo_ = false;                  // the disc's demonstration plays (DEMO, the theater's, the licence box)
     std::optional<Replay> pre_demo_run_; // the player's run, kept for replay / save
     // The live run's replay as it ended (latch_run_replay): its replays, the menu's backdrop and the licence preview
     // rebuild the field, so the field no longer holds the run.
@@ -684,7 +739,9 @@ private:
     // live run so far set a session record (SAVE GHOST, DATA LOGGER; reset at every run start).
     race::QuickMenuItems qm_items_;
     bool run_session_record_ = false;
-    bool last_run_ended_ = false; // the last live run ended (finished, failed, or EXIT as its finish)
+    // The demonstration stands in the last run's place (DEMONSTRATION; a licence run left with EXIT): GT3 loads
+    // demo/%s over the race's data (presentation §A8, §A8c), so the licence box plays it.
+    bool demo_loaded_ = false;
     bool exit_finished_ = false;  // pause EXIT was this run's finish
     double overlay_delay_ = race::kRecordOverlayDelay; // finish -> record overlay (s)
     std::vector<double> run_laps_; // the last live run's laps (the replays re-run lap_times_)
@@ -735,8 +792,22 @@ private:
     bool setting_pending_ = false;
     bool tt_failed_ = false;
     SunGlare sun_;
+    SunDisc sun_disc_; // drawn after the sky dome (Env0 +0x9D4 / +0x9D8)
     bool no_course_fog_ = SDL_getenv("GT3R_NO_COURSE_FOG") != nullptr; // compare with the old linear fog
+    bool no_far_plane_ = SDL_getenv("GT3R_NO_FAR_PLANE") != nullptr;    // compare without GT3's far plane
+    bool dof_off_ = SDL_getenv("GT3R_NO_DOF") != nullptr; // compare without the replay depth of field
+    bool heat_haze_ = false; // [video] heat_haze = on (default off): replays' heat haze lenses
     LampGlows lamps_;
+    // The passes between the 3D scene and the grade, and the replay vignette (presentation §L6):
+    // the heat haze lenses (stepped every 60 Hz tick), and this frame's batches for View3D.
+    HeatHaze haze_;
+    std::vector<HazeLens> haze_lenses_;
+    render::ScreenBatch haze_batch_, overlay_batch_, overlay2_batch_, vignette_batch_;
+    int view_frame_ = 0, haze_log_ = 0; // GT3R_RACE_DEBUG's haze lines: the main view's frames (as GT3R_CAPTURE3D counts)
+    // This frame's passes on the main view's options: the overlay (glare, lamps) for `rect`
+    // (`second`: player 2's view); the haze and the vignette (replays only).
+    void add_screen_passes(render::DrawOptions& o, const SDL_FRect& rect, const CameraRig& cam, float sun_visibility,
+                           bool second, bool split);
     int sun_log_ = 0;
     Billboards billboards_;
     bool original_res_ = false, original_nearest_ = true;
@@ -772,6 +843,8 @@ private:
     std::optional<std::vector<ResultRow>> prerace_rows_;
     PauseMenu pause_menu_;
     bool pause_loaded_ = false;
+    PointerInput menu_pointer_; // taps, clicks and hovers on the quick menus and the pause window
+    SDL_FRect menu_frame_{};    // where those menus were last drawn (UI units)
     menu::flow::MenuSounds quick_sounds_; // the menus' sound effects (quick / pause menus)
     bool quick_sounds_tried_ = false;
     ResultsOverlay results_;
@@ -993,6 +1066,7 @@ private:
     double toast_time_ = 0;
     double song_shown_ = 0; // draw_song after a skip while driving: seconds left
     bool show_replays_ = false;
+    XrList xr_list_; // the selection page's lists for the VR pointer
     std::vector<ReplayFile> replay_files_;
     int replay_sel_ = 0;
     double race_time_ = 0, clock_ = 0, frame_ms_ = 0;

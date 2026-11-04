@@ -26,8 +26,8 @@ namespace gt3r::race {
 namespace {
 
 // The race pad (the player's race layout, buttons in GT3's type A meanings) as the device object holds it after its read:
-// the analog pad with pressure buttons (pad type 8), or the steering wheel's axes (the wheel on the stick's x, the pedals on
-// Cross and Square).
+// the analog pad with pressure buttons (pad type 8), or the steering wheel's axes (the wheel on the stick's x at its full
+// resolution, as the GT Force's 10 bits; the pedals on Cross and Square).
 // A race pad button's pressure (held without a pressure report: all the way).
 u8 pressure(const PadState& p, PadButton b) {
     if (!p.down(b)) return 0;
@@ -56,7 +56,7 @@ ex::PadReading pad_reading(const PadState& p, const ExactHuman& h) {
                  press(PadButton::L1), press(PadButton::R1), press(PadButton::L2), press(PadButton::R2)};
     if (wheel) {
         r.type = 0, r.wheel = 1;
-        r.wheel_pos = u16(p.axis(PadAxis::LX) * 4);
+        r.wheel_pos = u16(std::clamp(std::lround((p.axis_fine(PadAxis::LX) + 1.0f) * 512.0f), 0L, 1023L));
         r.wheel_throttle = u8(255 - press(PadButton::Cross));
         r.wheel_brake = u8(255 - press(PadButton::Square));
     }
@@ -78,7 +78,8 @@ u16 frame_value(float u, const std::function<ex::F(ex::F)>& shape) {
 }
 
 // A player's frame from the race pad: the pad as GT3 reads it (ExactHuman::original_response), or, by default, the same
-// frame with its analog axes linear in the race pad's: the stick's (or the wheel's) x straight to the steering, the
+// frame with its analog axes linear in the race pad's: the stick's (or the wheel's) x straight to the steering at its full
+// resolution (PadState::axis_fine: a wheel's every step, not the byte's 256 over its whole turn), the
 // d-pad's pressures to it as GT3 steers with the d-pad (kind 3), and each pressure (Cross, Square, Circle, Triangle)
 // to the frame value whose throttle, brake, handbrake or back axis after phase 3's shaping (its analog step x + c (1 - x),
 // a wheel's pedal curves) is that pressure's fraction (from c on: the shaping's own least step).
@@ -93,9 +94,7 @@ ex::PadFrame pad_frame(const PadState& p, const ExactHuman& h, const ex::Program
         const int s = int(pressure(p, PadButton::Left)) - int(pressure(p, PadButton::Right));
         f.steer = s16(std::lround(float(s) * 4096.0f / 255.0f));
     } else if (f.kind == 2 || f.kind == 4) {
-        const int lx = p.axis(PadAxis::LX);
-        const float v = lx < 128 ? float(128 - lx) / 128.0f : -float(lx - 128) / 127.0f; // left positive
-        f.steer = s16(std::lround(v * 4096.0f));
+        f.steer = s16(std::lround(-p.axis_fine(PadAxis::LX) * 4096.0f)); // left positive
     }
     auto pedal = [&](PadButton b, u16 ex::PadFrame::*field, u8 flag, const std::function<ex::F(ex::F)>& shape) {
         f.flags = u8(f.flags | flag);
@@ -309,6 +308,7 @@ public:
         rs.course_category = exact_course_category(db, opts_.course);
         rs.kind = opts_.kind;
         rs.config = opts_.config;
+        rs.replay = opts_.records_off;
         rs.laps = opts_.laps;
         if (solo) {
             // The licence test's and machine test's laps byte is their type: the event's. The race information's words.
@@ -442,27 +442,28 @@ public:
             rs.ghost_car = ghost_entry ? humans_ : -1;
             if (fr) visit_ = opts_.free_run;
         }
+        first_remote_ = int(rs.entries.size() - cfg_.remote.size()); // (the remote players' entries come last)
+        std::vector<std::string> car_labels;
+        const int first_opp = humans_ + (ghost_entry ? 1 : 0);
+        for (int i = 0; i < int(rs.entries.size()); ++i)
+            car_labels.push_back(i == 0                ? opts_.player.car.label
+                                 : i == 1 && battle    ? opts_.second.car.label
+                                 : i < first_opp       ? opts_.player.car.label // (the ghost: the player's car)
+                                 : i >= first_remote_  ? remote_cars[size_t(i - first_remote_)] // (online: the car raced here)
+                                                       : opps[size_t(i - first_opp)].label);
+        rs.sparks = exact_spark_points(db, car_labels, opts_.spark_points); // (the models the screen draws)
         try {
             race_ = std::make_unique<ex::ExactRace>(rs);
         } catch (const std::exception& e) {
             if (error) *error = std::string("exact race: ") + e.what();
             return false;
         }
-        first_remote_ = int(rs.entries.size() - cfg_.remote.size()); // (the remote players' entries come last)
         remote_.assign(cfg_.remote.size(), {});
         for (size_t j = 0; j < cfg_.remote.size(); ++j) race_->set_posed(first_remote_ + int(j), true);
         rs_ = rs;
         rec_ = std::make_shared<ex::RaceRecord>(ex::RaceRecord::of(rs, opts_.course));
         rec_->data = exact_data_fingerprint(db, rs.entries, opts_.course_bytes());
         change({0, ex::RaceChange::StartCountdown});
-        std::vector<std::string> car_labels;
-        const int first_opp = humans_ + (ghost_entry ? 1 : 0);
-        for (int i = 0; i < race_->size(); ++i)
-            car_labels.push_back(i == 0                ? opts_.player.car.label
-                                 : i == 1 && battle    ? opts_.second.car.label
-                                 : i < first_opp       ? opts_.player.car.label // (the ghost: the player's car)
-                                 : i >= first_remote_  ? remote_cars[size_t(i - first_remote_)] // (online: the car raced here)
-                                                       : opps[size_t(i - first_opp)].label);
         finish_build(db, rs, car_labels, n_opp, p1);
         return true;
     }
@@ -507,11 +508,13 @@ public:
             rs.entries.resize(1);
             ex::SoloRecorders s(false);
             const ex::RaceRecord* b = opts_.analysis_b.get();
+            rs.sparks.resize(std::min<size_t>(rs.sparks.size(), 1));
             if (b && !b->entries.empty()) {
                 ex::StartEntry g = b->entries[0];
                 g.human = 1, g.player = true, g.car = 0, g.grid_slot = r.entries.size() > 1 ? r.entries[1].grid_slot : g.grid_slot;
                 rs.entries.push_back(g);
                 rs.ghost_switch = 1;
+                if (!b->sparks.empty() && !b->sparks[0].empty()) rs.sparks.resize(1), rs.sparks.push_back(b->sparks[0]);
             }
             s.analysis(ex::run_recording_of(r), b ? ex::run_recording_of(*b) : std::vector<u8>{});
             rs.recorders = std::make_shared<const ex::SoloRecorders>(std::move(s));
@@ -715,8 +718,15 @@ public:
                 x.lap = b.laps - 1;
                 x.ms = c.x530;
                 x.split_ms = (long long)c.x530 - (long long)b.x530;
-                crossings_.push_back({id_of(k), x});
                 if (k == 0) lap_done_ = true, last_lap_s_ = double(x.split_ms) / 1000.0;
+                // A licence test's line short of its end: its conductor posts the sector events with the time since
+                // its lap start, which it never moves (the run's start), instead of a lap.
+                if (const std::optional<Sector>& sx = sector_of[size_t(k)]) {
+                    x.sector = true;
+                    x.split_ms = sx->split >= 0 ? sx->split : now_ms - (long long)c.x530;
+                    x.ms = (long long)c.x530 + x.split_ms;
+                }
+                crossings_.push_back({id_of(k), x});
                 if (k < humans_)
                     LOG_INFO("Race (exact): car %d lap %d %.3f s (at %.3f s)", int(k), x.lap + 1, double(x.split_ms) / 1000.0,
                              double(x.ms) / 1000.0);
@@ -1146,6 +1156,18 @@ std::unique_ptr<RaceField> make_exact_field(const RaceTrack&, const data::CarDat
     auto f = std::make_unique<ExactField>(cfg);
     if (!f->build(db, error)) return nullptr;
     return f;
+}
+
+std::vector<std::vector<ex::SparkPoint>> exact_spark_points(
+    const data::CarDatabase& db, const std::vector<std::string>& labels,
+    const std::function<std::vector<ex::SparkPoint>(const std::string&)>& source) {
+    std::vector<std::vector<ex::SparkPoint>> out;
+    if (!source) return out;
+    for (const std::string& l : labels) {
+        const data::Car* c = db.car(exact_base_car(db, l));
+        out.push_back(c ? source(db.model_of(*c)) : std::vector<ex::SparkPoint>{});
+    }
+    return out;
 }
 
 const sim::exact::ExactRace* exact_race_of(const RaceField& f) {

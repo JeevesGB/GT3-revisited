@@ -47,6 +47,17 @@ enum PrimitiveFlags : u32 {
     // alpha earlier passes left (course road sheen). DrawItem::frame_alpha items only; elsewhere
     // the pass is plain additive.
     kDestAlphaAdd = 1u << 12,
+    // The vertex colours' RGB are the GS bytes as they are (0x80 = 128), a texel factor up to
+    // 255/128 that the renderer applies: GTM1 packets with a colour past 0x80 (Trial Mountain's
+    // scenery). Other packets store 0x80 as 255 (gtm1.cpp expand_color).
+    kVertexColor2x = 1u << 13,
+    // GS FBMSK 0xFFFFFFFF with depth writes on: the pass writes only the depth. Cars whose glass
+    // is drawn without depth writes leave its depth this way, after its reflection.
+    kDepthOnly = 1u << 14,
+    // With a car reflection pass: GS TEST.DATE with DATM 0, drawn only where the frame alpha
+    // is below 0x80. Every reflection pass leaves 0x80 where it draws, so these skip what an
+    // earlier one covered and the texels at full reflectivity (texel x vertex alpha = 0x80).
+    kDestAlphaTest = 1u << 15,
 };
 
 // Fixed-function lighting material of a lit primitive (GT3 cars: GTM1 material

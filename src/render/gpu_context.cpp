@@ -2,8 +2,12 @@
 
 #include "base/log.h"
 #include "platform/render_scale.h"
+#include "render/guard_band.h"
+#include "render/shaders/generated/model_clip_vert.h"
 #include "render/shaders/generated/model_frag.h"
+#include "render/shaders/generated/model_frag_copy.h"
 #include "render/shaders/generated/model_vert.h"
+#include "render/shaders/generated/model_vert_copy.h"
 #include "scene/model.h"
 
 #include <algorithm>
@@ -145,9 +149,12 @@ bool GpuContext::init(SDL_Window* window, const GpuOptions& options) {
     if (!open) return false;
     if (renderer_ && SDL_GetRenderWindow(renderer_)) SDL_SetRenderVSync(renderer_, options.vsync ? 1 : 0);
 
-    vs_ = make_shader(true);
-    fs_ = make_shader(false);
-    if (!vs_ || !fs_) return false;
+    vs_ = make_shader(Stage::Vertex);
+    vs_clipped_ = make_shader(Stage::ClippedVertex);
+    fs_ = make_shader(Stage::Fragment);
+    if (!vs_ || !vs_clipped_ || !fs_) return false;
+    vs_copy_ = make_shader(Stage::CopyVertex);
+    fs_copy_ = make_shader(Stage::CopyFragment);
 
     for (SDL_GPUTextureFormat f :
          {SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREFORMAT_D24_UNORM, SDL_GPU_TEXTUREFORMAT_D16_UNORM})
@@ -184,13 +191,28 @@ GpuContext::~GpuContext() {
         if (white_) SDL_ReleaseGPUTexture(device_, white_);
         for (auto& [t, shared] : shared_textures_) SDL_ReleaseGPUTexture(device_, t);
         if (vs_) SDL_ReleaseGPUShader(device_, vs_);
+        if (vs_clipped_) SDL_ReleaseGPUShader(device_, vs_clipped_);
+        if (vs_copy_) SDL_ReleaseGPUShader(device_, vs_copy_);
+        if (fs_copy_) SDL_ReleaseGPUShader(device_, fs_copy_);
         if (fs_) SDL_ReleaseGPUShader(device_, fs_);
     }
     if (renderer_) SDL_DestroyRenderer(renderer_); // releases the window claim
     if (device_) SDL_DestroyGPUDevice(device_);
 }
 
-SDL_GPUShader* GpuContext::make_shader(bool vertex) {
+SDL_GPUShader* GpuContext::make_shader(Stage stage) {
+    // Each stage's generated shader (render/shaders/generated), in Stage order.
+    static const ShaderCode kCode[] = {GT3R_SHADER_CODE(model_vert), GT3R_SHADER_CODE(model_clip_vert),
+                                       GT3R_SHADER_CODE(model_frag), GT3R_SHADER_CODE(model_vert_copy),
+                                       GT3R_SHADER_CODE(model_frag_copy)};
+    const bool vertex = stage != Stage::Fragment && stage != Stage::CopyFragment;
+    // Vertex: transforms, GT3 per-vertex lighting. Fragment: the texture, the environment cube,
+    // the sphere map.
+    return create_shader(kCode[size_t(stage)], vertex, vertex ? 0 : 3, vertex ? 2 : 1);
+}
+
+SDL_GPUShader* GpuContext::create_shader(const ShaderCode& code, bool vertex, Uint32 samplers,
+                                         Uint32 uniform_buffers) {
     SDL_GPUShaderCreateInfo info{};
     SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device_);
     SDL_PropertiesID props = 0;
@@ -198,36 +220,32 @@ SDL_GPUShader* GpuContext::make_shader(bool vertex) {
     if (formats & SDL_GPU_SHADERFORMAT_PRIVATE) {
         // OpenGL ES (gpu_gles.h): GLSL ES source, with its block and sampler names.
         props = SDL_CreateProperties();
-        SDL_SetStringProperty(props, GT3R_GL_PROP_SHADER_UNIFORM_BLOCKS,
-                              vertex ? shaders::model_vert_gles_blocks : shaders::model_frag_gles_blocks);
-        SDL_SetStringProperty(props, GT3R_GL_PROP_SHADER_SAMPLERS,
-                              vertex ? shaders::model_vert_gles_samplers : shaders::model_frag_gles_samplers);
+        SDL_SetStringProperty(props, GT3R_GL_PROP_SHADER_UNIFORM_BLOCKS, code.gles_blocks);
+        SDL_SetStringProperty(props, GT3R_GL_PROP_SHADER_SAMPLERS, code.gles_samplers);
         info.props = props;
         info.format = SDL_GPU_SHADERFORMAT_PRIVATE;
-        const char* src = vertex ? shaders::model_vert_gles : shaders::model_frag_gles;
-        info.code = reinterpret_cast<const Uint8*>(src);
-        info.code_size = std::strlen(src);
+        info.code = reinterpret_cast<const Uint8*>(code.gles);
+        info.code_size = std::strlen(code.gles);
         info.entrypoint = "main";
     } else
 #endif
     if (formats & SDL_GPU_SHADERFORMAT_SPIRV) {
         info.format = SDL_GPU_SHADERFORMAT_SPIRV;
-        info.code = vertex ? shaders::model_vert_spv : shaders::model_frag_spv;
-        info.code_size = vertex ? sizeof(shaders::model_vert_spv) : sizeof(shaders::model_frag_spv);
+        info.code = code.spv;
+        info.code_size = code.spv_size;
         info.entrypoint = "main";
     } else if (formats & SDL_GPU_SHADERFORMAT_MSL) {
         info.format = SDL_GPU_SHADERFORMAT_MSL;
-        const char* src = vertex ? shaders::model_vert_msl : shaders::model_frag_msl;
-        info.code = reinterpret_cast<const Uint8*>(src);
-        info.code_size = std::strlen(src);
+        info.code = reinterpret_cast<const Uint8*>(code.msl);
+        info.code_size = std::strlen(code.msl);
         info.entrypoint = "main0";
     } else {
         LOG_WARN("GPU driver %s accepts none of our shader formats", driver_name());
         return nullptr;
     }
     info.stage = vertex ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
-    info.num_samplers = vertex ? 0 : 3; // fragment: the texture, the environment cube, the sphere map
-    info.num_uniform_buffers = vertex ? 2 : 1; // vertex: transforms, GT3 per-vertex lighting
+    info.num_samplers = samplers;
+    info.num_uniform_buffers = uniform_buffers;
     SDL_GPUShader* s = SDL_CreateGPUShader(device_, &info);
     if (!s) LOG_WARN("Shader creation failed: %s", SDL_GetError());
     if (props) SDL_DestroyProperties(props);
@@ -360,6 +378,39 @@ std::vector<PipelineKey> warm_keys() {
                 keys.push_back(k);
             }
     }
+    // The course's triangles GT3 clips at the guard band (PipelineKey::clipped): the main views'
+    // blends and frame-alpha modes, back faces culled or none.
+    const size_t plain = keys.size();
+    for (size_t i = 0; i < plain; ++i)
+        if (!keys[i].coverage && keys[i].cull != CullMode::Front) {
+            PipelineKey k = keys[i];
+            k.clipped = true;
+            keys.push_back(k);
+        }
+    // The showroom rims' turned copies (DrawItem::spin_turn): their opaque and blended passes.
+    for (BlendMode b : {BlendMode::Opaque, BlendMode::Alpha, BlendMode::Additive})
+        for (CullMode c : {CullMode::Back, CullMode::None}) {
+            PipelineKey k;
+            k.blend = b, k.depth_write = b != BlendMode::Additive, k.cull = c, k.spin_copy = true;
+            keys.push_back(k);
+        }
+    // The cars' depth-only passes (scene::kDepthOnly), in the main views and the pictures.
+    for (bool coverage : {false, true})
+        for (CullMode c : {CullMode::Back, CullMode::None, CullMode::Front}) {
+            PipelineKey k;
+            k.cull = c, k.coverage = coverage, k.depth_only = true;
+            keys.push_back(k);
+        }
+    // The depth reset after the course backdrop (DrawItem::depth_reset).
+    PipelineKey reset;
+    reset.cull = CullMode::None, reset.depth_write = false, reset.depth_reset = true;
+    keys.push_back(reset);
+    // The replay depth of field's downsampled pictures (View3D::encode_dof).
+    PipelineKey single;
+    single.cull = CullMode::None, single.depth_write = false, single.single = true;
+    keys.push_back(single);
+    single.blend = BlendMode::Alpha; // (and the spin copies' filter, View3D::spin_resolve)
+    keys.push_back(single);
     return keys;
 }
 
@@ -375,6 +426,7 @@ void GpuContext::warm_pipelines() {
         int made = 0;
         for (const PipelineKey& k : keys) {
             if (warm_stop_) return;
+            if (k.spin_copy && !spin_copies()) continue;
             made += build_pipeline(k);
         }
         LOG_INFO("3D pipelines warmed: %d in %.0f ms", made, double(SDL_GetTicksNS() - t0) / 1e6);
@@ -403,9 +455,9 @@ SDL_GPUGraphicsPipeline* GpuContext::pipeline(const PipelineKey& key) {
     const u64 t0 = SDL_GetTicksNS();
     SDL_GPUGraphicsPipeline* p = create_pipeline(key);
     LOG_INFO("3D pipeline built on first use in %.0f ms: blend %d, cull %d, depth write %d, lines %d, coverage %d, "
-             "alpha %d",
+             "alpha %d, spin copy %d, depth only %d, depth reset %d",
              double(SDL_GetTicksNS() - t0) / 1e6, int(key.blend), int(key.cull), int(key.depth_write), int(key.lines),
-             int(key.coverage), int(key.alpha));
+             int(key.coverage), int(key.alpha), int(key.spin_copy), int(key.depth_only), int(key.depth_reset));
     std::lock_guard lock(pipelines_mutex_);
     auto [it, added] = pipelines_.emplace(key, p); // failures too, so we don't retry every frame
     if (!added && p) SDL_ReleaseGPUGraphicsPipeline(device_, p); // the warm-up made it meanwhile
@@ -415,14 +467,20 @@ SDL_GPUGraphicsPipeline* GpuContext::pipeline(const PipelineKey& key) {
 SDL_GPUGraphicsPipeline* GpuContext::create_pipeline(const PipelineKey& key) {
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
-    vb.pitch = sizeof(scene::Vertex);
+    vb.pitch = key.clipped ? sizeof(ClipVertex) : sizeof(scene::Vertex);
     vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-    SDL_GPUVertexAttribute attrs[4] = {
-        {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, u32(offsetof(scene::Vertex, pos))},
-        {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, u32(offsetof(scene::Vertex, normal))},
-        {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, u32(offsetof(scene::Vertex, uv))},
-        {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, u32(offsetof(scene::Vertex, color))},
-    };
+    // A scene::Vertex; clipped: ClipVertex's three of them, then the weights.
+    SDL_GPUVertexAttribute attrs[13];
+    const int vertices = key.clipped ? 3 : 1;
+    for (int k = 0; k < vertices; ++k) {
+        const u32 at = u32(k * sizeof(scene::Vertex)), loc = u32(4 * k);
+        SDL_GPUVertexAttribute* a = attrs + 4 * k;
+        a[0] = {loc + 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, at + u32(offsetof(scene::Vertex, pos))};
+        a[1] = {loc + 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, at + u32(offsetof(scene::Vertex, normal))};
+        a[2] = {loc + 2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, at + u32(offsetof(scene::Vertex, uv))};
+        a[3] = {loc + 3, 0, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, at + u32(offsetof(scene::Vertex, color))};
+    }
+    if (key.clipped) attrs[12] = {12, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, u32(offsetof(ClipVertex, b))};
 
     SDL_GPUColorTargetDescription color{};
     color.format = kColorFormat;
@@ -499,14 +557,20 @@ SDL_GPUGraphicsPipeline* GpuContext::create_pipeline(const PipelineKey& key) {
                                  : SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B |
                                        SDL_GPU_COLORCOMPONENT_A;
     }
+    if (key.depth_only) b.color_write_mask = 0;
+    if (key.depth_reset) { // the depth alone, whatever is there (GT3's Z resets)
+        b.enable_blend = false;
+        b.enable_color_write_mask = true;
+        b.color_write_mask = 0;
+    }
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
-    info.vertex_shader = vs_;
-    info.fragment_shader = fs_;
+    info.vertex_shader = key.clipped ? vs_clipped_ : key.spin_copy ? vs_copy_ : vs_;
+    info.fragment_shader = key.spin_copy ? fs_copy_ : fs_;
     info.vertex_input_state.vertex_buffer_descriptions = &vb;
     info.vertex_input_state.num_vertex_buffers = 1;
     info.vertex_input_state.vertex_attributes = attrs;
-    info.vertex_input_state.num_vertex_attributes = 4;
+    info.vertex_input_state.num_vertex_attributes = key.clipped ? 13 : 4;
     info.primitive_type = key.lines ? SDL_GPU_PRIMITIVETYPE_LINELIST : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = key.lines || key.cull == CullMode::None ? SDL_GPU_CULLMODE_NONE
@@ -514,17 +578,18 @@ SDL_GPUGraphicsPipeline* GpuContext::create_pipeline(const PipelineKey& key) {
                                                                             : SDL_GPU_CULLMODE_FRONT;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     info.rasterizer_state.enable_depth_clip = true;
-    info.multisample_state.sample_count = samples_;
-    info.depth_stencil_state.enable_depth_test = true;
-    info.depth_stencil_state.enable_depth_write = key.depth_write;
+    info.multisample_state.sample_count = key.single ? SDL_GPU_SAMPLECOUNT_1 : samples_;
+    info.depth_stencil_state.enable_depth_test = !key.single;
+    info.depth_stencil_state.enable_depth_write = key.depth_write || key.depth_reset;
     // GT3's depth test, for every pass with or without depth writes: GEQUAL on a reversed depth
     // (render::perspective: 1 near, 0 far), so second passes over the same vertices (decals,
     // reflections) pass on equal depth.
-    info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+    info.depth_stencil_state.compare_op =
+        key.depth_reset ? SDL_GPU_COMPAREOP_ALWAYS : SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
     info.target_info.color_target_descriptions = &color;
     info.target_info.num_color_targets = 1;
     info.target_info.depth_stencil_format = depth_format_;
-    info.target_info.has_depth_stencil_target = true;
+    info.target_info.has_depth_stencil_target = !key.single;
 
 #ifdef __ANDROID__
     // Android's crash reports name the crashing thread: while the driver compiles, the thread is
@@ -533,7 +598,7 @@ SDL_GPUGraphicsPipeline* GpuContext::create_pipeline(const PipelineKey& key) {
     char thread_name[16] = {}, key_name[16];
     prctl(PR_GET_NAME, thread_name);
     std::snprintf(key_name, sizeof key_name, "pipe%d%d%d%d%d%dx%d", int(key.blend), int(key.cull),
-                  int(key.depth_write), int(key.lines), int(key.coverage), int(key.alpha), msaa());
+                  int(key.depth_write), int(key.lines), int(key.coverage), int(key.alpha), key.single ? 1 : msaa());
     prctl(PR_SET_NAME, key_name);
 #endif
     SDL_GPUGraphicsPipeline* p = SDL_CreateGPUGraphicsPipeline(device_, &info);
@@ -628,6 +693,34 @@ SDL_GPUBuffer* Uploader::buffer(SDL_GPUBufferUsageFlags usage, const void* data,
     if (!b) return nullptr;
     pending_.push_back({b, nullptr, stage(data, size), size, 0, 0, 0, false});
     return b;
+}
+
+SDL_Texture* wrap_texture(SDL_Renderer* renderer, SDL_GPUTexture* texture, int w, int h, SDL_TextureAccess access) {
+    SDL_Texture* t = nullptr;
+#if GT3R_HAVE_GPU_RENDERER
+    SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_ABGR8888);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, access);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, w);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, h);
+#if GT3R_GLES
+    if (gles::active()) // SDL's GLES2 renderer takes the GL texture
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_OPENGLES2_TEXTURE_NUMBER, gt3r_gl_texture_name(texture));
+    else
+#endif
+        SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, texture);
+    t = SDL_CreateTextureWithProperties(renderer, props);
+    SDL_DestroyProperties(props);
+#else
+    (void)renderer, (void)texture, (void)w, (void)h, (void)access;
+#endif
+    if (!t) {
+        LOG_WARN("Could not wrap a %dx%d GPU texture for the 2D renderer: %s", w, h, SDL_GetError());
+        return nullptr;
+    }
+    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_NONE);
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
+    return t;
 }
 
 u32 mip_levels(u32 w, u32 h) {

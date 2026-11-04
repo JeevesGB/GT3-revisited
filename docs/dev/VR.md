@@ -15,7 +15,7 @@ compiles none of it.
 |---|---|
 | Meta Quest 3 (standalone APK) | ✅ verified: boot movie, menus on the virtual screen, controllers (buttons, sticks, analog triggers), stereo races in the in-car view with the HUD panel and mirror (played by hand, and auto-driven over adb). A steady 90 fps at the recommended 1680x1760 per eye, 4x MSAA (Trial Mountain, in-car): 6.5 ms of GPU and ~3 ms of CPU per frame |
 | Chase views, steering wheel mode, haptics, the menus' pointer | ✅ verified on the Quest 3 (2026-10-19). The pointer's hover focus and the arcade pickers' strip taps (one click chooses) came after that test: covered by disc tests, not yet re-tried in the headset |
-| Disc from the system file picker (the release APK has no `run-as`) | ✅ verified on the Quest 3 (2026-10-19): Settings > Game disc > Browse for a disc image opens the picker over the game; a disc in Download opens through its `content://` URI |
+| Disc from the system file picker (the release APK has no `run-as`) | ✅ verified on the Quest 3 (2026-10-19): Settings > Disc & saves > Browse for a disc image opens the picker over the game; a disc in Download opens through its `content://` URI |
 | Quest 2 / 3S / Pro | ⚠️ unverified (same APK; Quest 2 has less GPU headroom: lower `[vr] resolution` if it misses frames) |
 | Linux + Monado (simulated headset) | ✅ the session, swapchains, frames and stereo races run under Monado's null compositor (below); used for testing without a headset |
 | PC VR (SteamVR, Quest Link) | ⚠️ unverified: desktop builds with `-DGT3R_XR=ON` use the active OpenXR runtime when there is one (Vulkan only: Windows and Linux) |
@@ -123,10 +123,12 @@ system's own re-centring (hold the Meta button) resets it to LOCAL's new origin.
 **Input.** OpenXR actions on `/interaction_profiles/oculus/touch_controller`
 feed an SDL virtual gamepad, "Meta Quest Touch": sticks, analog triggers, A B X Y,
 grips as shoulders, stick clicks, Menu as Start; its rumble goes to the
-controllers' haptics. VR builds' gamepad layout (`quest`) is the gamepad
+controllers' haptics, both hands at the stronger motor's level (a controller in each
+hand turns any split between the motors into a side). VR builds' gamepad layout (`quest`) is the gamepad
 layout with B as Triangle (back) and Y as Circle. The race's modern layout then gives
 right trigger throttle, left trigger brake, A/X shift up/down, Y view, B
-handbrake, left grip reverse, right stick click look back. With
+handbrake, left grip reverse, right stick click look back (the right stick's look around is off
+in stereo: the head looks around). With
 `[vr] steering = wheel` both grips squeezed grab a steering wheel: the roll of
 the line between the hands steers (`wheel_degrees` lock to lock) and the grips are
 no longer shoulders. In menus the right controller's aim ray hits the screen: a
@@ -136,7 +138,20 @@ item under it is focused (fixed pages, horizontal scrolling rows, which then hol
 GT Mode garage rows and wheel shop tiles), so one click chooses; on vertical scrolling
 selectors and the arcade pickers' strip a click moves the cursor and a second chooses.
 The online lobby's pages take it the same way (docs/dev/ONLINE.md "Pickers": rows and
-tiles follow it, "<" ">" and the footer's actions are buttons).
+tiles follow it, "<" ">" and the footer's actions are buttons). So do our own pages, in a
+headset only (a desktop mouse still only clicks): the row or tile under it is focused
+(Settings, Mods, the save editor, Quick Race, the main menu, the disc page; the jukebox,
+movie theater, car database and time trial lists, which hold still under it), and buttons and
+tabs under it light up. A pressed over anything the page takes clicks on (a header's Back, a
+tab, a row, the title's GT3R menu button: `Screen::clickable`) clicks it as the trigger does;
+elsewhere A is the pad's Cross. Pulling the trigger tips the controller: from the start of a
+pull (or an A click) the pointer holds still until the ray moves 3 degrees away, so the click
+lands where it was. The race's menus take it too (docs/dev/RACE.md "Pointers on these
+menus"); in a stereo race the pause window is on the HUD panel, so the ray aims at that panel
+there (`hud_distance`, `hud_drop`, `hud_width`) instead of the screen. The online start page's
+text (session code, name, address, relay server) is typed on the game's own keyboard,
+VR builds only: Android's screen keyboard does not open over an immersive app
+(`SDL_HINT_ENABLE_SCREEN_KEYBOARD` is off), and the controllers have no D-pad.
 
 Two Android details: SDL drops joystick input while its window lacks keyboard
 focus, which the invisible window in an immersive app never has

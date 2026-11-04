@@ -4,6 +4,7 @@
 #include "base/log.h"
 
 #include <SDL3/SDL_init.h>
+#include <SDL3/SDL_timer.h>
 
 #include <algorithm>
 #include <cmath>
@@ -41,17 +42,26 @@ u8 byte01(float v) { return u8(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
 struct Ds5Effects {
     u8 enable_bits1;     // 0x04 right trigger, 0x08 left trigger
     u8 enable_bits2;
-    u8 rumble_right, rumble_left;
+    u8 rumble_right, rumble_left; // with enable_bits1 0x02 and 0x01 (halved) or enable_bits3 0x04
     u8 headphone_volume, speaker_volume, microphone_volume, audio_enable_bits;
     u8 mic_light_mode, audio_mute_bits;
     u8 right_trigger[11];
     u8 left_trigger[11];
     u8 unknown1[6];
-    u8 led_flags;
+    u8 enable_bits3;
     u8 unknown2[2];
     u8 led_anim, led_brightness, pad_lights, led_red, led_green, led_blue;
 };
-static_assert(sizeof(Ds5Effects) == 47, "DS5 effects block layout");
+static_assert(sizeof(Ds5Effects) == sizeof(ffb::Ds5Packet), "DS5 effects block layout");
+
+// Whether SDL plays a DualSense's motors with the improved rumble emulation of firmware 2.24 and newer,
+// or the older one at half strength, decided as SDL_hidapi_ps5.c does: Sony's pads only, a DualSense
+// Edge, a firmware it could not read (Bluetooth) or 2.24 on.
+bool ds5_improved_rumble(SDL_Gamepad* g) {
+    if (SDL_GetGamepadVendor(g) != 0x054C) return false;
+    const Uint16 firmware = SDL_GetGamepadFirmwareVersion(g);
+    return SDL_GetGamepadProduct(g) == 0x0DF2 || firmware == 0 || firmware >= 0x0224;
+}
 
 } // namespace
 
@@ -106,11 +116,16 @@ TriggerEffect trigger_vibration(float start, int hz, float amplitude) {
 
 TriggerEffect brake_trigger_effect(const ForceFeedbackState& s, const ForceFeedbackConfig& c) {
     if (!c.enabled || !c.triggers) return trigger_off();
-    if (s.abs_active) return trigger_vibration(0.1f, 18, 1.0f); // ABS pulse under the finger
+    if (s.abs_level > 0) return trigger_vibration(0.1f, 18, s.abs_level); // the ABS under the finger, by its level
     // Firm pedal: resistance builds after the first 20 % of travel. Rolling
     // slowly it's lighter (less brake to feel).
     float speed = std::clamp(s.speed_kmh / 60.0f, 0.3f, 1.0f);
     return trigger_resistance(0.2f, c.trigger_force * speed);
+}
+
+TriggerEffect throttle_trigger_effect(const ForceFeedbackState& s, const ForceFeedbackConfig& c) {
+    if (!c.enabled || !c.triggers || s.wheelspin <= 0.0f) return trigger_off();
+    return trigger_vibration(0.1f, 35, std::min(s.wheelspin, 1.0f)); // wheelspin buzz, by its amount
 }
 
 int wheel_spring_coefficient(const ForceFeedbackState& s, const ForceFeedbackConfig& c) {
@@ -127,10 +142,32 @@ int wheel_constant_level(const ForceFeedbackState& s, const ForceFeedbackConfig&
     return int(std::lround(std::clamp(f * c.strength, -1.0f, 1.0f) * 32767.0f));
 }
 
-float impulse_brake(const ForceFeedbackState& s, double t) {
-    if (!s.abs_active) return 0.0f;
-    return std::fmod(t * 16.0, 1.0) < 0.5 ? 0.8f : 0.0f; // ~16 Hz square pulse
+Ds5Packet ds5_trigger_packet(const TriggerEffect& left, const TriggerEffect& right, u8 low, u8 high, bool improved) {
+    Ds5Effects pkt{};
+    pkt.enable_bits1 = 0x04 | 0x08; // both triggers
+    std::memcpy(pkt.left_trigger, left.data(), left.size());
+    std::memcpy(pkt.right_trigger, right.data(), right.size());
+    if (low || high) {
+        pkt.enable_bits1 |= 0x02; // the motors, not the audio haptics
+        if (improved) {
+            pkt.enable_bits3 |= 0x04;
+            pkt.rumble_left = low, pkt.rumble_right = high;
+        } else {
+            pkt.enable_bits1 |= 0x01;
+            pkt.rumble_left = u8(low >> 1), pkt.rumble_right = u8(high >> 1);
+        }
+    }
+    Ds5Packet out;
+    std::memcpy(out.data(), &pkt, sizeof(pkt));
+    return out;
 }
+
+float impulse_brake(const ForceFeedbackState& s, double t) {
+    if (s.abs_level <= 0) return 0.0f;
+    return std::fmod(t * 16.0, 1.0) < 0.5 ? 0.8f * std::min(s.abs_level, 1.0f) : 0.0f; // ~16 Hz square pulse
+}
+
+float impulse_throttle(const ForceFeedbackState& s) { return 0.5f * std::clamp(s.wheelspin, 0.0f, 1.0f); }
 
 } // namespace ffb
 
@@ -157,7 +194,7 @@ ForceFeedback::Dev& ForceFeedback::dev(SDL_JoystickID id) {
 }
 
 void ForceFeedback::apply(SDL_JoystickID id, SDL_Gamepad* gamepad, SDL_Joystick* joystick, int brake_trigger,
-                          const ForceFeedbackState& s, double time) {
+                          int throttle_trigger, const ForceFeedbackState& s, double time) {
     Dev& d = dev(id);
     const bool resumed = !d.active;
     d.gamepad = gamepad;
@@ -168,27 +205,31 @@ void ForceFeedback::apply(SDL_JoystickID id, SDL_Gamepad* gamepad, SDL_Joystick*
     }
     if (gamepad) {
         SDL_GamepadType type = SDL_GetGamepadType(gamepad);
-        if (type == SDL_GAMEPAD_TYPE_PS5 && brake_trigger >= 0) {
-            ffb::TriggerEffect e = ffb::brake_trigger_effect(s, cfg_);
-            if (e != d.sent || brake_trigger != d.sent_trigger) {
-                Ds5Effects pkt{};
-                bool left = brake_trigger == SDL_GAMEPAD_AXIS_LEFT_TRIGGER;
-                pkt.enable_bits1 = 0x04 | 0x08; // update both: clears the other one
-                std::memcpy(left ? pkt.left_trigger : pkt.right_trigger, e.data(), e.size());
-                ffb::TriggerEffect off = ffb::trigger_off();
-                std::memcpy(left ? pkt.right_trigger : pkt.left_trigger, off.data(), off.size());
-                SDL_SendGamepadEffect(gamepad, &pkt, sizeof(pkt));
-                d.sent = e;
-                d.sent_trigger = brake_trigger;
+        if (type == SDL_GAMEPAD_TYPE_PS5 && (brake_trigger >= 0 || throttle_trigger >= 0)) {
+            // Both triggers in one packet: the brake's, the throttle's, else off.
+            auto effect = [&](int axis) {
+                if (axis == brake_trigger) return ffb::brake_trigger_effect(s, cfg_);
+                if (axis == throttle_trigger) return ffb::throttle_trigger_effect(s, cfg_);
+                return ffb::trigger_off();
+            };
+            ffb::TriggerEffect l = effect(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), r = effect(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+            if (!d.sent_triggers || l != d.sent_left || r != d.sent_right) {
+                send_triggers(d, l, r);
+                d.sent_left = l, d.sent_right = r;
+                d.sent_triggers = true;
             }
-        } else if (brake_trigger >= 0 && cfg_.triggers) {
-            // Xbox One/Series impulse triggers (no-op on pads without them).
-            float v = ffb::impulse_brake(s, time);
-            if (v > 0.0f || d.impulse_on) {
-                float l = brake_trigger == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? v : 0.0f;
-                float r = brake_trigger == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER ? v : 0.0f;
+        } else if ((brake_trigger >= 0 || throttle_trigger >= 0) && cfg_.triggers) {
+            // Xbox One/Series impulse triggers (no-op on pads without them): the ABS on the brake's trigger, the
+            // wheelspin on the throttle's.
+            auto level = [&](int axis) {
+                if (axis == brake_trigger) return ffb::impulse_brake(s, time);
+                if (axis == throttle_trigger) return ffb::impulse_throttle(s);
+                return 0.0f;
+            };
+            const float l = level(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), r = level(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+            if (l > 0.0f || r > 0.0f || d.impulse_on) {
                 SDL_RumbleGamepadTriggers(gamepad, Uint16(l * 65535), Uint16(r * 65535), 100);
-                d.impulse_on = v > 0.0f;
+                d.impulse_on = l > 0.0f || r > 0.0f;
             }
         }
         return;
@@ -259,7 +300,9 @@ void ForceFeedback::apply_wheel(Dev& d, SDL_Joystick* joystick, const ForceFeedb
             if (id >= 0) SDL_RunHapticEffect(d.haptic, id, 1);
     }
     if (!d.haptic) return;
-    // Only talk to the device when a value moved noticeably (USB bandwidth).
+    // Only talk to the device when a value moved (USB bandwidth): the spring, which follows the
+    // speed, noticeably; the steering force at each of GT3's steps (1/127 of full force, 258 at
+    // 100% strength: a threshold above one step left the smallest forces around the centre out).
     int coef = ffb::wheel_spring_coefficient(s, cfg_);
     if (d.spring_id >= 0 && std::abs(coef - d.spring_coef) > 300) {
         SDL_HapticEffect e = wheel_spring(coef);
@@ -267,7 +310,7 @@ void ForceFeedback::apply_wheel(Dev& d, SDL_Joystick* joystick, const ForceFeedb
         d.spring_coef = coef;
     }
     int level = ffb::wheel_constant_level(s, cfg_);
-    if (d.constant_id >= 0 && std::abs(level - d.constant_level) > 300) {
+    if (d.constant_id >= 0 && level != d.constant_level) {
         SDL_HapticEffect e = wheel_constant(level);
         SDL_UpdateHapticEffect(d.haptic, d.constant_id, &e);
         d.constant_level = level;
@@ -282,16 +325,9 @@ void ForceFeedback::stop(SDL_JoystickID id) {
 void ForceFeedback::stop(Dev& d) {
     if (!d.active) return;
     d.active = false;
-    if (d.gamepad && d.sent_trigger >= 0) {
-        Ds5Effects pkt{};
-        pkt.enable_bits1 = 0x04 | 0x08;
-        ffb::TriggerEffect off = ffb::trigger_off();
-        std::memcpy(pkt.left_trigger, off.data(), off.size());
-        std::memcpy(pkt.right_trigger, off.data(), off.size());
-        SDL_SendGamepadEffect(d.gamepad, &pkt, sizeof(pkt));
-    }
+    if (d.gamepad && d.sent_triggers) send_triggers(d, ffb::trigger_off(), ffb::trigger_off());
     if (d.gamepad && d.impulse_on) SDL_RumbleGamepadTriggers(d.gamepad, 0, 0, 0);
-    d.sent_trigger = -2;
+    d.sent_triggers = false;
     d.impulse_on = false;
     if (d.haptic) {
         // Zero the forces but keep the effects allocated for the next race.
@@ -306,6 +342,23 @@ void ForceFeedback::stop(Dev& d) {
             cfg_ = saved;
         }
     }
+}
+
+// SDL builds the motors it plays into each effects packet it sends (SDL_hidapi_ps5.c, UpdateEffects): a
+// packet without the rumble bits puts the pad back on its audio haptics, and the motors stop until SDL's
+// next change. Ours carry them the same way, while SDL still plays them: it stops them 250 ms after the
+// last request (by its clock), and motors put back after that would run on.
+void ForceFeedback::send_triggers(Dev& d, const ffb::TriggerEffect& left, const ffb::TriggerEffect& right) {
+    const bool playing = SDL_GetTicks() - d.rumble_ticks < 200;
+    const ffb::Ds5Packet pkt = ffb::ds5_trigger_packet(left, right, playing ? d.rumble_low : 0, playing ? d.rumble_high : 0,
+                                                       ds5_improved_rumble(d.gamepad));
+    SDL_SendGamepadEffect(d.gamepad, pkt.data(), int(pkt.size()));
+}
+
+void ForceFeedback::rumbling(SDL_JoystickID id, u8 low, u8 high) {
+    Dev& d = dev(id);
+    d.rumble_low = low, d.rumble_high = high;
+    d.rumble_ticks = SDL_GetTicks();
 }
 
 void ForceFeedback::forget(SDL_JoystickID id) {

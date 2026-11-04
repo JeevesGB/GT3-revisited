@@ -4,7 +4,7 @@
 // VOL; ids listed in cars/.list). Layout (all little endian):
 //
 //   0x00 u32 section offsets[5] (0x00 is the header itself), u32 end
-//        [1] "GTCI" car info: lamp and camera placements
+//        [1] "GTCI" car info: lamp, camera and spark point placements
 //        [2] "GTM1" body model (node 0 = body with 3 LODs, others = effects/shadows)
 //        [3] "GTTR" tyre: header + Tex1 tread/sidewall texture
 //        [4] "GTTW" wheel model (byte-identical to wheel/<id>)
@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace gt3r {
 
@@ -32,6 +33,11 @@ struct CarFile {
     static bool is_car(ByteSpan data);
     static CarFile parse(ByteSpan data);
 };
+
+// The car's underbody spark points from its GTCI block (+0x58 count, +0x5C offset of 16-byte records: x, y, z floats in the
+// model frame, a fourth word unused), as the file's words; where the race's sparks start (docs/formats/car_model.md "GTCI").
+// Empty when the block has none (or the list runs past the block).
+std::vector<std::array<u32, 3>> car_spark_points(ByteSpan gtci);
 
 // Wheel and tyre dimensions (metres). Not stored in the car file: they come
 // from the car parameter database (see wheel_spec.h). Axle 0 = front, 1 = rear.
@@ -74,10 +80,16 @@ struct CarModelOptions {
     bool reflection = true;    // include the environment-map (reflection) passes
     int paint = 0;             // colour index into the car's list in database/carcolor.db
     bool wheels = true;        // add wheels + generated tyres
-    bool menu_tyres = false;   // the menus' tyres (30 segments); else the race's for each LOD (tyre_model.h)
+    bool menu_tyres = false;   // the menus' tyres (30 segments) and brake parts; else the race's tyres for each LOD (tyre_model.h)
     // Another wheel to fit instead of the car's own: the contents of a wheel/<label>
     // file (the same GTTW format as the car file's wheel section). Empty = stock.
     ByteSpan wheel_override;
+    // Showroom wheels in races ([video] showroom_wheels): LOD 0's rims and tyres as the menus
+    // draw them, from the car's menu/cars file (its GTTW and GTTR) with the menus' tyres. A
+    // fitted wheel's rim is `showroom_wheel` (its menu/wheel/<label>), else `wheel_override`.
+    // Empty = the car file's own at every LOD.
+    ByteSpan showroom_car;
+    ByteSpan showroom_wheel;
     std::optional<WheelSpec> wheel_spec; // placement; estimated from the body when absent
     bool brake = false;        // the brake-lamp branch of the node programs (lit lenses)
     CarBodyMod body_mod;       // mod cars: stretched or replaced body

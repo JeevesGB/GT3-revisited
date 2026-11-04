@@ -39,13 +39,15 @@ void RaceScreen::start_demo() {
 void RaceScreen::start_preview() {
     if (!track_ || !vehicle_ || preview_) return;
     // After a run, GT3's licence menu replays that run in the box, looping
-    // (presentation.md A7); with no run, or after one left with EXIT (the driver loads the
-    // demonstration in its place, §A8), the disc's demonstration.
-    if (finish_menu_shown_ && recorder_.tick() > 0 && last_run_ended_) {
+    // (presentation.md A7); with no run, or after one left with EXIT or a DEMONSTRATION (the
+    // driver loads the demonstration in the run's place, §A8), the disc's demonstration.
+    // The box's race runs under the driver's records off, so with the driver's camera (live_camera).
+    if (finish_menu_shown_ && recorder_.tick() > 0 && !demo_loaded_) {
         pre_demo_run_ = finished_recording();
         preview_ = run_preview_ = true;
         start_playback(*pre_demo_run_);
         quick_ = finish_menu_shown_ = true; // (the playback resets the run state)
+        camera_.set_mode(drive_camera_);
         return;
     }
     if (!disc_demo_) return;
@@ -54,9 +56,7 @@ void RaceScreen::start_preview() {
     restart();
     quick_ = true;
     demo_tick_ = 0, demo_logged_ = false;
-    drive_camera_ = camera_.mode() == CameraMode::Tv ? drive_camera_ : camera_.mode();
-    camera_.set_mode(CameraMode::Tv);
-    restart_director();
+    if (camera_.mode() == CameraMode::Tv) camera_.set_mode(drive_camera_);
 }
 
 void RaceScreen::stop_preview(App& app) {
@@ -118,8 +118,12 @@ void RaceScreen::begin_license() {
         // The race GT3's replay playback builds from the save, played like a replay.
         const data::Event* dev = db_.event(demo_code);
         if (disc_demo_ && dev && load_program_data(*app_))
-            if (std::optional<sim::exact::RaceRecord> r = race::demo_record(*disc_demo_, *dev, db_, exact_data_->fingerprint(), 180, &err))
+            if (std::optional<sim::exact::RaceRecord> r = race::demo_record(*disc_demo_, *dev, db_, exact_data_->fingerprint(), 180, &err)) {
+                // (the demonstration's car's sparks, as GT3's playback races it)
+                r->sparks = race::exact_spark_points(db_, {db_.label(r->entries[0].eq.car)},
+                                                     [this](const std::string& m) { return car_spark_points(*app_, m); });
                 demo_record_ = std::make_shared<const sim::exact::RaceRecord>(std::move(*r));
+            }
     }
     if (license_event_.empty()) return;
     const data::Event* ev = db_.event(license_event_);

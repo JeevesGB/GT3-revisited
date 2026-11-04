@@ -5,11 +5,13 @@
 #include "audio/audio_engine.h"
 #include "base/config.h"
 #include "disc/disc.h"
+#include "game/save_folder.h"
 #include "input/input_manager.h"
 #include "platform/aspect.h"
 #include "platform/display_insets.h"
 #include "race/custom_music.h"
 #include "render/dynamic_scale.h"
+#include "render/gamma_pass.h"
 #include "render/gpu_context.h"
 #include "vfs/vfs.h"
 #include "xr/xr_session.h"
@@ -55,6 +57,10 @@ public:
     // A file dropped on the window: true when this screen takes it (the Mods screen takes .zip
     // archives) and gets it as an SDL_EVENT_DROP_FILE; otherwise it opens as a disc image.
     virtual bool takes_dropped_file(const std::string&) const { return false; }
+    // Whether a click at (x, y), UI units, would act on something (a button, a tab, a row): in a
+    // headset, A pressed there clicks it as the trigger does; elsewhere A is the pad's Cross
+    // (App::xr_pointer). Screens without pointer input keep the default.
+    virtual bool clickable(float, float) const { return false; }
 };
 
 class App {
@@ -90,6 +96,11 @@ public:
     // every screen (App::draw_fps).
     bool show_fps() const { return show_fps_; }
     void set_show_fps(bool on);
+    // [video] gamma = 0.5..2.0 (default 1): the whole picture through out = in ^ (1 / gamma)
+    // (render/gamma_pass.h); 1 draws GT3's colours unchanged. Needs the 3D renderer; not in VR.
+    float gamma() const { return gamma_; }
+    void set_gamma(float g);
+    bool gamma_available() const;
     // [video] aspect = 16:9 (default) | 4:3 | fill: the game area's shape (platform/aspect.h).
     // Always 16:9 in VR (the headset's virtual screen).
     platform::Aspect aspect() const;
@@ -98,6 +109,10 @@ public:
     // full-detail model and textures at any distance; off: GT3's simpler models in the distance
     // (race::car_lod). Read when a race starts.
     bool full_car_detail() const;
+    // [video] showroom_wheels = on | off (default on, off on phones and tablets): close cars'
+    // rims and tyres as the menus draw them (CarModelOptions::showroom_car); off: GT3's race
+    // wheels. Read when a race starts.
+    bool showroom_wheels() const;
     // [video] dynamic_resolution = on | off (default on phones and tablets): the 3D resolution
     // drops (to 50% at most) when the GPU cannot keep up and climbs while it does, up to [video]
     // render_scale, or with auto the screen's full resolution (render::DynamicScale). Fixed for
@@ -145,6 +160,18 @@ public:
 #endif
     const std::string& data_dir() const { return data_dir_; }
     std::string mods_dir() const { return data_dir_ + "mods"; }
+    // The save folder (game/save_folder.h): [saves] folder, by default the user data folder;
+    // with a trailing separator. GT Mode's saves/ and the replays/ are there.
+    std::string save_folder() const;
+    bool save_folder_chosen() const; // [saves] folder is set (not the user data folder)
+    // Moves to another save folder ("": the user data folder): the saves and replays are copied
+    // in where it has none (game::copy_save_folder), then it is used and kept in the config, and
+    // GT Mode starts again from its saves. False (nothing changed) when they could not be
+    // copied or the folder cannot be written. `copied`: what was copied.
+    bool set_save_folder(const std::string& path, game::SaveFolderCopy* copied = nullptr);
+    // Whether the chosen save folder can be used now (Android: the game keeps its access and
+    // its provider is there; elsewhere: it is there). True for the user data folder.
+    bool save_folder_reachable() const;
     // The player's own race music (race/custom_music.h): [music] folder, by default the user data
     // folder's music/ (made at the first start, so the Files app shows it on phones). Scanned at
     // start, when the folder changes and when the app comes back to the foreground.
@@ -241,6 +268,11 @@ private:
     int pops_ = 0;
     bool quit_ = false;
     Uint64 last_ticks_ = 0;
+    // Desktop: the mouse cursor hides over the window after a moment without mouse use and
+    // comes back with the next move, click or wheel turn (App::idle_cursor).
+    Uint64 mouse_used_ns_ = 0;
+    bool cursor_hidden_ = false;
+    void idle_cursor(Uint64 now);
 
     SDL_Mutex* dialog_mutex_ = nullptr;
     std::string dialog_result_;
@@ -262,6 +294,11 @@ private:
     // The main loop rate set by App::apply_frame_limit (0: as fast as vsync allows).
     double frame_limit_rate_ = 0;
     void apply_frame_limit();
+    // [video] gamma, and its pass while it is not 1 (destroyed before gpu_).
+    float gamma_ = 1.0f;
+    std::unique_ptr<render::GammaPass> gamma_pass_;
+    bool gamma_frame_ = false; // this frame is drawn into gamma_pass_'s target
+    void begin_gamma_frame();
     // [video] show_fps: frames counted over about half a second and the rate they make.
     bool show_fps_ = false;
     int fps_frames_ = 0;
@@ -280,7 +317,7 @@ std::unique_ptr<Screen> make_developer_screen(); // Developer options (tools)
 std::unique_ptr<Screen> make_browser_screen(const std::string& open_path = "");
 std::unique_ptr<Screen> make_jukebox_screen();
 std::unique_ptr<Screen> make_mods_screen();
-// Settings; `tab` picks the first page shown (SettingsTab order: 0 Display .. 5 Game disc).
+// Settings; `tab` picks the first page shown (SettingsTab order: 0 Display .. 5 Disc & saves).
 // `to_game`: opened from the game's menus, which it returns to ("Back to game").
 std::unique_ptr<Screen> make_settings_screen(int tab = 0, bool to_game = false);
 constexpr int kSettingsTabControls = 2;

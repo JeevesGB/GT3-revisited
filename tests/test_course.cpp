@@ -168,6 +168,74 @@ TEST(course_trialmt) {
     CHECK(m.meshes.size() > 100 && tris > 50000);
 }
 
+// Pre-lit colours past 0x80 brighten the texel on the GS (texel x colour >> 7): Trial Mountain's
+// scenery uses 0x90-0xBF widely. Such packets keep the GS bytes (kVertexColor2x), the rest store
+// 0x80 as 255 as before.
+TEST(course_vertex_colours_past_0x80_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    struct Share {
+        size_t tris = 0, tris_2x = 0, prims_2x = 0, below_ff = 0;
+    };
+    auto share = [&](const char* name) {
+        Share s;
+        const Volume::Entry* e = disc->volume().find(std::string("courses/US/") + name);
+        CHECK(e != nullptr);
+        if (!e) return s;
+        CourseModelOptions opt;
+        opt.textures = false;
+        scene::Model m = build_course_model(disc->volume().read(*e), opt, name);
+        for (const scene::Mesh& mesh : m.meshes)
+            for (const scene::Primitive& p : mesh.primitives) {
+                s.tris += p.index_count / 3;
+                if (!(p.flags & scene::kVertexColor2x)) continue;
+                s.tris_2x += p.index_count / 3;
+                u32 hi = 0;
+                for (u32 i = 0; i < p.index_count; ++i) {
+                    u32 c = mesh.vertices[mesh.indices[p.first_index + i]].color;
+                    hi = std::max({hi, c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF});
+                }
+                ++s.prims_2x;
+                s.below_ff += hi > 0x80 && hi < 0xFF; // the GS bytes (0x80 = 255 would clamp to 0xFF)
+            }
+        return s;
+    };
+    Share tm = share("trialmt"), gv = share("grandvalley");
+    CHECK(tm.tris_2x * 5 > tm.tris);  // a fifth or more of Trial Mountain's triangles
+    CHECK(tm.below_ff * 2 > tm.prims_2x);
+    CHECK(gv.tris_2x * 20 < gv.tris); // Grand Valley: a few
+}
+
+// GT3's VU clips a strip's triangles in strip order (render/guard_band.h); the renderer takes it
+// from the indices (View3D::upload_clipped): a course triangle is three consecutive strip vertices,
+// stored in strip order or with its first two swapped.
+TEST(course_triangles_in_strip_order_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    for (const char* name : {"super", "route5_dry", "trialmt"}) {
+        const Volume::Entry* e = disc->volume().find(std::string("courses/US/") + name);
+        CHECK(e != nullptr);
+        if (!e) continue;
+        const Bytes data = disc->volume().read(*e);
+        CourseModelOptions scenery, mask, backdrop;
+        scenery.textures = mask.textures = backdrop.textures = false;
+        mask.scenery = mask.course_line = mask.backdrop = mask.sky = false;
+        mask.road_reflection_mask = mask.frame_alpha = true;
+        backdrop.scenery = backdrop.course_line = backdrop.sky = false;
+        backdrop.backdrop = true;
+        size_t tris = 0, strip = 0;
+        for (const CourseModelOptions& o : {scenery, mask, backdrop})
+            for (const scene::Mesh& m : build_course_model(data, o, name).meshes)
+                for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+                    const u32 a = m.indices[i], b = m.indices[i + 1], c = m.indices[i + 2];
+                    ++tris;
+                    strip += (b == a + 1 || a == b + 1) && c == std::max(a, b) + 1;
+                }
+        CHECK(tris > 1000);
+        CHECK(strip == tris);
+    }
+}
+
 TEST(course_all_us) {
     Disc* disc = test::test_disc();
     if (!disc) SKIP("needs GT3R_DISC");

@@ -32,9 +32,9 @@ generic HID joysticks, wheels and pedals. Devices hot-plug at any time.
 
 | Feature | How it is used |
 |---|---|
-| Rumble | DS2 large motor → low-frequency motor, small motor → high-frequency motor. In races, each player's **Rumble** (Settings → Rumble & feedback, `[playerN] rumble`) picks how the motors run: **GT3 original** (`gt3`) follows GT3's own vibration: each step's level (suspension movement, curbs under the front wheels, the front tires' drive and brake forces, wall hits) on the large motor as GT3 sends it (at most half strength), never the small motor; most controllers play its low levels much stronger than a DualShock 2, so it runs all the time there. **Modern** (`modern`) rumbles for what the car meets: a wall or car hit pulses the large motor for 0.25 s by its speed change, off-road, wheelspin and a slide (the tire squeal) hold it, and curbs pulse the small motor at a rate that follows the speed. **Auto** (`auto`, the default) is GT3 original on a DualSense and Modern on every other controller. Either way, a car the AI drives, as after the finish, does not vibrate |
+| Rumble | DS2 large motor → low-frequency motor, small motor → high-frequency motor. In races, each player's **Rumble** (Settings → Rumble & feedback, `[playerN] rumble`) picks how the motors run: **GT3 original** (`gt3`) follows GT3's own vibration: each step's level (suspension movement, curbs under the front wheels, the front tires' drive and brake forces, wall hits) on the large motor as GT3 sends it (at most half strength), never the small motor; most controllers play its low levels much stronger than a DualShock 2, so it runs all the time there. **Modern** (`modern`) rumbles for what the car meets on both motors, so it is felt in both grips, with a lean: the body stronger on the large motor (the left grip), the tires on the small one (the right grip), the other motor at 35%, or 70% on a DualSense, whose motors play in separate grips where a split feels like a side. A wall or car hit pulses for 0.25 s by its speed change and off-road holds, leaning left; wheelspin, a slide (the tire squeal) and locked wheels hold, and curbs pulse at a rate that follows the speed, leaning right. **Auto** (`auto`, the default) is Modern on every controller. Either way, a car the AI drives, as after the finish, does not vibrate |
 | Phone vibration (Android, off by default) | `[player1] phone_vibration = on` (Settings → Rumble & feedback → Phone vibration): player 1's rumble on the device's own motor, only while the controls driving them have no rumble motor (built-in handheld controls, touch, a controller without motors). A controller that rumbles keeps it; the phone stays still |
-| Impulse triggers (Xbox One/Series) | `InputManager::set_trigger_rumble`, for brake/ABS feedback |
+| Impulse triggers (Xbox One/Series) | See Force feedback: the ABS on the brake's trigger, the wheelspin on the throttle's. On Windows only through SDL's RAWINPUT driver (see Xbox controllers) |
 | Player LEDs / light bars | Set to the player number |
 | Button labels | The UI shows Cross/Circle on PlayStation pads and A/B on Xbox pads |
 | Motion sensors | `tilt` source: steer by rolling the controller (DualSense, DS4, Switch Pro, or a phone's own accelerometer on Android and iOS) |
@@ -113,6 +113,13 @@ second copy of the game can use the same pad without the game acting on it.
 The keyboard and mouse always need the game's window. VR builds always read
 their controllers (the headset's window never has the focus).
 
+**Xbox controllers** (Windows; Settings → Controls, `[input] xbox_driver`,
+`rawinput` by default): SDL reads Xbox pads through its RAWINPUT driver, which
+plays their impulse triggers (through Windows.Gaming.Input, once a button has
+been pressed). `xinput` reads them through XInput instead, which has no trigger
+motors: no impulse triggers, for a pad that misbehaves with Raw Input. SDL takes
+the choice when it starts, so a change applies after a restart.
+
 ## Remapping in the app
 
 In Settings, choices, switches and sliders change only with Left/Right or a
@@ -120,14 +127,16 @@ tap on their arrows, switch or track; Cross never changes a setting (it runs
 actions and starts a rebind).
 
 **Settings → Controls** starts with the settings for **all players** (Race
-views, Analog response, In-car camera shake, Controllers in the background),
+views, Analog response, In-car camera shake, Controllers in the background,
+Xbox controllers on Windows),
 then holds the controllers and their bindings, for player 1 and player 2
 (split screen) alike: under each player's **Controller**, **Race controls** and
 **Keyboard** rows come their bindings, inline:
 
 - **Player N race controls**: the race actions in driving order (Accelerate,
   Brake, Shift up, Shift down, Handbrake, Reverse, Change view, Look back,
-  Pause, Steer, Steer left / right, the performance overlay);
+  Look left / right, Look ahead / behind, Look left, Look right, Pause, Steer,
+  Steer left / right, the performance overlay);
 - **Player N menu buttons**: a reset row, then the DualShock 2's buttons and
   sticks, as the game's menus read them.
 
@@ -141,9 +150,15 @@ then:
   controller input. The other column keeps its input. Esc, Android Back or a
   tap / click cancels instead (so those keys can't be captured: choose the
   layout again to get them back), and mouse buttons aren't captured (set them
-  in `config.ini`, e.g. `mouse.left`). A button or key on Steer or a stick axis
-  is refused: it could push it only one way (bind it to Steer left / Steer
-  right, or the D-pad).
+  in `config.ini`, e.g. `mouse.left`). A button or key on Steer, Look left /
+  right, Look ahead / behind or a stick axis is refused: it could push it only
+  one way (bind it to Steer left / Steer right, Look left / Look right or Look
+  back, or the D-pad). A stick captured on Steer or a stick axis gets
+  `deadzone=0.08`; a wheel's axis gets none, and the wheel's saved sets drop the
+  `deadzone=0.08` earlier versions gave it (issue 134). An axis that rests at an
+  end (a pedal, a joystick's trigger) captured on a button or a stick half reads
+  over its whole travel (`pedal`, with `invert` when it rests at +1), not from
+  half way; one resting in the middle (combined pedals) keeps its half.
 - **Square**: add an input instead of replacing
 - **Select** (Delete on the keyboard): clear the highlighted column
 - **Left/Right**: switch between the two columns
@@ -170,9 +185,12 @@ Settings asks first ("Replace your custom race controls with GT3 original plus
 this change?", Cancel focused).
 
 Under **GT3 original** the race reads the menu pad, so the race list shows each
-action's menu button ("Accelerate (Cross)") and the menu buttons' inputs.
-Editing one there starts custom race controls from GT3 original's mapping plus
-the change.
+action's menu button ("Accelerate (Cross)") and the menu buttons' inputs. R3
+(the right stick's click) looks back there as well as L1, as Look back is the
+right stick's click in Modern: the list shows "Look back (L1, R3)" with both
+buttons' inputs, and the performance overlay none. Editing one there starts
+custom race controls from GT3 original's mapping plus the change, with R3's
+inputs on Look back.
 
 **Inputs from other devices.** Any binding can come from any connected
 controller, for either player: a brake pedal set, a second pad's trigger, a
@@ -197,7 +215,7 @@ an action (Reverse, say) takes it off the one it had (shift); clearing Shift up
 or down, or rebinding it to another button, takes shift off the paddle.
 
 The **Settings** screen (Controls, Rumble & feedback and Touch pages) edits the
-`[playerN]` controller/keyboard/race/rumble keys and bindings (and `[player1]
+`[playerN]` controller/keyboard/race/rumble/steering curve keys and bindings (and `[player1]
 phone_vibration` on Android), every `[ffb]` key and every `[touch]` key
 described below, and applies them immediately.
 
@@ -217,7 +235,9 @@ back to the game; the layout editor's **Done** returns to Settings.
 controller = auto      ; auto, part of a device name ("DualSense", "G29"), or keyboard (only)
 keyboard = on
 race = modern          ; race layout (modern | gt3), used when there is no [player1.race]
-rumble = auto          ; race rumble: auto (GT3 original on a DualSense, else modern) | modern | gt3 (see Native features)
+rumble = auto          ; race rumble: auto (modern) | modern | gt3 (see Native features)
+steering_curve = 1.00  ; race steering = |x|^curve, 0.5..2.5 (see Race controls)
+wheel_steering_curve = 1.00 ; the same for a wheel
 phone_vibration = off  ; Android, player 1 only: rumble on the device's own motor (see Native features)
 
 [player1.bindings]     ; the menu pad, a gamepad's inputs ([player1.wheel.bindings], [player1.joystick.bindings])
@@ -272,7 +292,7 @@ Circle Cross Square`, and the axes `LX LY RX RY`, optionally as halves
 | `invert` | Flip the axis |
 | `pedal` | Map a −1..1 axis to 0..1 (combine with `invert` for pedals resting at +1) |
 | `ramp=0.2` | Seconds to reach full value (makes digital inputs analog) |
-| `threshold=0.3` | Pressure at which an analog source counts as a digital press |
+| `threshold=0.3` | Pressure at which an analog source counts as a digital press (default 0.12; a `pedal` on the race pad 0.02, so it presses from the start of its travel) |
 | `device=G29%20Pedals` | Read it from that device instead of the player's Controller (below; `%20` = space, `@s:` serial, `@p:` port path) |
 
 When several bindings target the same button, the strongest value wins.
@@ -294,26 +314,38 @@ The race pad's buttons keep GT3's meaning, and the race layout (per player:
 | Shift up / down (R2 / L2) | Cross / Square (A / X), back paddles | R2 / L2 | E / Q | O / U |
 | Reverse (Triangle, pressure) | L1 (held) | Triangle | R | H |
 | Change view (R1) | Triangle / Y | R1 | C | period |
-| Look back, held (L1) | R3 | L1 | X | comma |
+| Look back, held (L1) | R3 | L1, R3 | X | comma |
+| Look around (RX / RY, ours) | Right stick | Right stick | Home / End (left / right), Page Down (behind) | unbound |
 | Pause (Start) | Start | Start | Esc, P | ; |
 | Performance overlay (R3, ours; developer tool) | unbound | unbound | unbound | unbound |
 
 Players without these keys rebind them in Settings → Controls.
 
 There is no respawn, as in GT3: a car stays where it is. The performance overlay
-is off controllers by default (under `gt3` the menu pad's R3 does nothing in a
+is off controllers by default (under `gt3` the menu pad's R3 looks back in a
 race); bind it under the race controls in **Settings → Controls** if wanted. In time
 trials, free runs, machine tests and licence tests the controller's own Select (the
 menu pad's: Back / Select, Tab on the keyboard) shows or hides the ghost, as in the
 original.
+
+**Look around** (ours): the stick's direction is where the view
+turns (right: 90° right, pulled back: behind, pushed up: ahead), eased there
+and back ahead when the stick is let go. In-car the view turns where the eye
+is; the chase views go round the car. Look back takes over while held, the
+mirror is hidden while the view is turned to the side, and it is off in the
+disc's demonstrations, replays and VR (the headset looks around). In Settings
+the stick is on **Look left / right** and **Look ahead / behind** (`RX` and
+`RY` on the race pad); buttons and keys go on **Look left** and **Look right**
+(`RX-` / `RX+`), and behind is Look back's. Replacing the stick on Look left /
+right keeps them.
 
 Change view cycles in-car (with mirror), in-car without mirror, chase and far
 chase; `[race] views = gt3` (Settings: Race views) keeps GT3's own two, in-car
 and chase. Races start in the view last used, in-car at first.
 
 With `gt3` the race reads the menu pad itself, so every button does what it
-did on a DualShock 2. In the modern layout shifting down at a standstill also
-selects reverse (as in GT3). Wheels keep their pedals and buttons in both
+did on a DualShock 2. Reverse is its own held input in both, as in GT3:
+shifting down never selects it. Wheels keep their pedals and buttons in both
 layouts, and the back paddles shift in both (under `gt3` they press R2 / L2).
 Configs from before per-player layouts used
 `[race] buttons = gt3 | ours | auto`; it is read once as the default
@@ -328,9 +360,23 @@ and pressure buttons, wheels, touch and tilt, steer, accelerate, brake and pull
 the handbrake exactly as far as it is moved, after GT3's own shaping (from its
 least step: 10 % of a pedal); `original` keeps GT3's DualShock 2 curves as they
 are (no steering over the stick's inner 29 %, full lock from 88 %; full throttle
-from 18 % of the pressure range, brake 33 %, handbrake 10 %). The physics is the
+from 18 % of the pressure range, brake 33 %, handbrake 10 %). With `linear` the
+steering keeps the device's own resolution, not the DualShock 2 stick's 256 steps
+(a 900° wheel moved in 3.5° steps, a dead zone around its centre; issue 134);
+with `original` a wheel reads as the GT Force's 10 bits. The physics is the
 same either way, and replays keep what the race got. The automatic or manual
 gearbox is the race entry's pedal style (the gearbox setting, as in GT3).
+
+**Steering curve** (Settings > Controls, per player: `[playerN] steering_curve`,
+and `wheel_steering_curve` while a wheel steers) shapes the race's steering
+before GT3's pad read: the car steers ((x + 0.1)^curve − 0.1^curve) /
+(1.1^curve − 0.1^curve) of the way to full lock for x of the input's travel
+(0.1..2.5, 1 = as far as it is moved): |x|^curve eased at the centre, at most
+~3.7 times linear there (a plain power below 1 starts infinitely steep, and a
+wheel's force feedback oscillated around the centre). Above 1 is finer near the
+centre (a wheel set to a small rotation); below 1 is quicker off it (a large
+rotation). Full lock stays at the end of the travel. The menus read the input as
+it is.
 
 Replays, the pause window and the quick menus read the menu pad, as in GT3.
 Start opens the pause, in replays too. In a replay, Cross switches between the
@@ -381,18 +427,25 @@ vibration** (Android, player 1) and **Test rumble**, then these effects for all
 players under **Triggers and wheels**.
 
 Beyond DS2 rumble, the race sends a per-frame driving state
-(`InputManager::set_force_feedback`: speed, brake, ABS active, steering
-force, impacts) and each player's device turns it into native feedback:
+(`InputManager::set_force_feedback`: speed, brake, the ABS level, steering
+force, impacts, wheelspin) and each player's device turns it into native feedback:
 
 | Device | Effect |
 |---|---|
-| DualSense (PS5) | Adaptive trigger on the trigger bound to the brake (Square): resistance after 20 % of travel, lighter at low speed; an 18 Hz vibration while ABS is working. Sent with `SDL_SendGamepadEffect` only when the effect changes |
-| Xbox One/Series | Impulse trigger on the brake trigger pulses at ~16 Hz while ABS is working (`SDL_RumbleGamepadTriggers`) |
-| Wheels with force feedback | SDL haptics: a self-centring spring that firms up with speed (light when stopped, full from 120 km/h) and a constant force from the front tyres' lateral load (self-aligning feel) plus a kick on impacts. The wheel's own autocentre is switched off while driving. Such a wheel gets no DS2 rumble: SDL's joystick rumble on Windows (DirectInput) and macOS resets the wheel's force feedback when it starts, which removed these effects at the start of every race (issue 119) |
+| DualSense (PS5) | Adaptive triggers. The one bound to the brake (Square): resistance after 20 % of travel, lighter at low speed; an 18 Hz vibration while the ABS is working, by its level from zero. The one bound to the throttle (Cross): a 35 Hz vibration while the drive wheels spin, by the wheelspin from zero. Both sent in one packet with `SDL_SendGamepadEffect`, only when an effect changes (SDL's trigger rumble does nothing on a DualSense). The packet carries the motors' rumble as SDL's own packets do: without it the controller switches back to its audio haptics and the rumble stops until the next change. A DualSense plays the small motor (the right grip) much lighter than the large one, so its level is sent 1.75 times stronger (at most full; `dualsense_rumble`), and Modern's lean is milder there (see Rumble) |
+| Xbox One/Series | Impulse triggers (`SDL_RumbleGamepadTriggers`): the brake's pulses at ~16 Hz while the ABS is working, up to 80 % by its level; the throttle's runs at half the wheelspin |
+| Wheels with force feedback | SDL haptics: a self-centring spring that firms up with speed (light when stopped, full from 120 km/h) and a constant force from the front tyres' lateral load (self-aligning feel; GT3's own steering-wheel force, sent at each of its 1/127 steps) plus a kick on impacts. The wheel's own autocentre is switched off while driving. Such a wheel gets no DS2 rumble: SDL's joystick rumble on Windows (DirectInput) and macOS resets the wheel's force feedback when it starts, which removed these effects at the start of every race (issue 119) |
+
+The ABS level (`VehicleTelemetry::abs_level`, 0..1, the strongest wheel's) is
+GT3's own ABS at work (physics §4.5): past the tire's best braking slip it takes
+the slip over that target times G g of the pressure off. A car without the ABS
+(G 0) gives how far past that slip a wheel is locking, over 0.5. A brake
+pressure below the pedal does not count: GT3 also limits it by the tire's peak
+force, stopped or not.
 
 Effects stop by themselves ~0.25 s after the last update (pause, menus).
-The brake trigger is found from the race bindings: whichever of
-`pad.lefttrigger` / `pad.righttrigger` drives Square (brake).
+The brake and throttle triggers are found from the race bindings: whichever of
+`pad.lefttrigger` / `pad.righttrigger` drives Square (brake) and Cross (accelerate).
 
 ```ini
 [ffb]
@@ -424,7 +477,7 @@ Each screen picks a layout:
 | Layout | Controls |
 |---|---|
 | Menu (default) | D-pad (slide between directions), Cross / Circle / Square / Triangle, L1, R1, Select, Start. Taps away from the controls go to the screen underneath |
-| Driving (race screen, while racing; its pause and quick menus use Menu) | Steering zone on the left half: put a finger down anywhere and drag sideways (the touch-down point is centre). With `steering = buttons`, Left and Right buttons in the bottom corner instead (a thumb can rock from one to the other): they press the race pad's D-pad, so the car steers as GT3 steers with a DualShock 2's D-pad (full lock, turned in at its slow digital rate and let back faster). Gas (Cross) and brake (Square) pedals on the right: the higher the finger on the pedal, the more pressure; a finger can slide from brake to gas. Shift up / down above the pedals, handbrake (Circle), and pause (Start) and camera at the top; they press the race pad's buttons, so they work with any [race layout](#race-controls). Left of pause, Previous / Next song (the [song controls](#song-controls)): hidden until shown in the layout editor |
+| Driving (race screen, while racing; its pause and quick menus use Menu) | Steering zone on the left half: put a finger down anywhere and drag sideways (the touch-down point is centre). With `steering = buttons`, Left and Right buttons in the bottom corner instead (a thumb can rock from one to the other): they press the race pad's D-pad, so the car steers as GT3 steers with a DualShock 2's D-pad (full lock, turned in at its slow digital rate and let back faster). Gas (Cross) and brake (Square) pedals on the right: the higher the finger on the pedal, the more pressure; a finger can slide from brake to gas. Shift up / down above the pedals, reverse above shift up, handbrake (Circle) left of the brake, and pause (Start) and camera at the top; they press the race pad's buttons, so they work with any [race layout](#race-controls). Reverse is GT3's own reverse (Triangle): hold it to back up (it takes over from the gas while held, as in GT3), then press the gas to drive forward again. It sits out of the way of the thumb on the pedals (on 20:9 phones in the side bar, clear of the lap times), and only a finger put down on it reverses: a thumb sliding onto it never does, and one on it can slide on to the pedals. Where the screen is too short for it above shift up (the largest control sizes), it sits above the handbrake. Left of pause, Previous / Next song (the [song controls](#song-controls)): hidden until shown in the layout editor. A finger put down on the open screen, at least 20 units from every control (with tilt steering the steering zone is open screen), looks around (`look = drag`; Settings → Touch → Look around): drag sideways to turn the view, 96 units (15 % of the 640-unit width) for 90°, twice that for behind; lift it and the view turns back ahead |
 
 ```ini
 [touch]
@@ -433,6 +486,7 @@ steering = drag        ; drag | tilt (roll the device like a wheel, ±45° = ful
 pedals = position      ; position | area (touch pressure/size, where the screen reports it) | full
 pedal_min = 0.35       ; pressure at the bottom of a pedal (position mode)
 steer_range = 0.14     ; drag distance for full lock, fraction of the screen width
+look = drag            ; drag (a finger on the open screen looks around) | off
 tilt_deadzone = 0.04   ; fraction of full lock
 opacity = 0.50
 size = 1.00            ; 0.6 .. 1.6
@@ -461,7 +515,7 @@ Each changed control is one `[touch]` key, `drive.<control>` or
 
 | Layout | Controls |
 |---|---|
-| `drive.` | `gas`, `brake`, `up`, `down`, `handbrake`, `pause`, `camera`, `steer` (the steering buttons), `music` (Previous / Next song) |
+| `drive.` | `gas`, `brake`, `up`, `down`, `handbrake`, `reverse`, `pause`, `camera`, `steer` (the steering buttons), `music` (Previous / Next song) |
 | `menu.` | `dpad`, `buttons` (Cross, Circle, Square, Triangle), `l1`, `r1`, `select`, `start` |
 
 The value is `[left|center|right <x> top|bottom <y>] [size <s>] [hidden|shown]`
@@ -503,6 +557,10 @@ car pickers, tap an icon of the strip to move there and tap it again to choose; 
 on the left / right third step through the entries. The online lobby's pages work the same
 way: rows and tiles follow a hovering mouse, a finger's first tap focuses, "<" ">" and the
 footer's actions are buttons (docs/dev/ONLINE.md "Pickers").
+
+On desktop the mouse cursor hides over the game's window after 2 seconds without mouse use
+(`App::idle_cursor`) and comes back with the next move, click or wheel turn; a touch doesn't
+bring it back.
 
 Screens choose their layout by overriding `Screen::touch_layout()`
 (`TouchLayout::Menu`, `Driving` or `None`). On desktop, `GT3R_PHONE=1`

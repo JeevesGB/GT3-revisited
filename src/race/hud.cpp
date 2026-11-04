@@ -367,19 +367,46 @@ void Hud::draw_meter(SDL_Renderer* r, const Meter& m, float value) {
             SDL_RenderGeometry(r, nullptr, v, k, nullptr, 0);
         }
     }
-    // Needle: tapered quad from n0 to n1 of the radius (base 0.04, tip 0.02 of its length).
-    float a = angle(value) * kPi / 180.0f;
-    float len = m.n1 - m.n0;
-    auto np = [&](float along, float across) {
-        float lx = (m.n0 + along * len), ly = across * len;
-        float wx = lx * std::cos(a) - ly * std::sin(a), wy = lx * std::sin(a) + ly * std::cos(a);
-        return SDL_FPoint{ux(px + wx * rx), uy(py + wy * ry)};
-    };
-    SDL_Vertex v[6];
-    SDL_FPoint q[4] = {np(0, 0.02f), np(1, 0.01f), np(0, -0.02f), np(1, -0.01f)};
-    int idx[6] = {0, 1, 2, 1, 3, 2};
-    for (int i = 0; i < 6; ++i) v[i].position = q[idx[i]], v[i].color = {1.0f, 0.0f, 0.0f, 1.0f};
-    SDL_RenderGeometry(r, nullptr, v, 6, nullptr, 0);
+    // Needle (presentation §D1): a tapered quad from n0 to n1 of the radius (base 0.04, tip 0.02
+    // of its length), untextured RGB (0xC0, 0, 0), 8 passes at 1/8 each, swept over the last
+    // frame's movement and jittered by sub-pixel steps.
+    float& last = needle_prev_[size_t(std::clamp(m.needle, 0, int(needle_prev_.size()) - 1))];
+    const std::array<NeedlePass, 8> passes = needle_passes(angle(value), last);
+    last = angle(value);
+    const float len = m.n1 - m.n0;
+    SDL_BlendMode prev_blend = SDL_BLENDMODE_NONE;
+    SDL_GetRenderDrawBlendMode(r, &prev_blend);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    for (const NeedlePass& ps : passes) {
+        const float a = ps.angle * kPi / 180.0f;
+        auto np = [&](float along, float across) {
+            float lx = (m.n0 + along * len), ly = across * len;
+            float wx = lx * std::cos(a) - ly * std::sin(a), wy = lx * std::sin(a) + ly * std::cos(a);
+            return SDL_FPoint{ux(px + ps.dx + wx * rx), uy(py + ps.dy + wy * ry)};
+        };
+        SDL_Vertex v[6];
+        SDL_FPoint q[4] = {np(0, 0.02f), np(1, 0.01f), np(0, -0.02f), np(1, -0.01f)};
+        int idx[6] = {0, 1, 2, 1, 3, 2};
+        for (int i = 0; i < 6; ++i) v[i].position = q[idx[i]], v[i].color = {192.0f / 255.0f, 0.0f, 0.0f, 0.125f};
+        SDL_RenderGeometry(r, nullptr, v, 6, nullptr, 0);
+    }
+    SDL_SetRenderDrawBlendMode(r, prev_blend);
+}
+
+std::array<Hud::NeedlePass, 8> Hud::needle_passes(float angle, float last) {
+    // The race round meter base: step (a - a') x 0.125, 0 while a' is still FLT_MAX;
+    // pass k at a + step x (k + 1). The jitter steps go into XYOFFSET
+    // after each pass, so pass k sits at minus the sum of the first k.
+    static constexpr float kJitter[8][2] = {{0.5f, 0}, {-0.5f, 0.5f}, {0.5f, 0}, {-0.5f, -0.25f},
+                                            {0.5f, 0}, {-0.5f, 0.5f}, {0.5f, 0}, {-0.5f, -0.75f}};
+    const float step = last == kNoNeedleAngle ? 0.0f : (angle - last) * 0.125f;
+    std::array<NeedlePass, 8> out{};
+    float ox = 0, oy = 0;
+    for (int k = 0; k < 8; ++k) {
+        out[size_t(k)] = {angle + step * float(k + 1), -ox, -oy};
+        ox += kJitter[k][0], oy += kJitter[k][1];
+    }
+    return out;
 }
 
 void Hud::draw_replay_mark(SDL_Renderer* r, float alpha, const SDL_FRect* viewport, bool four_three) {
@@ -479,12 +506,12 @@ void Hud::draw_meters(SDL_Renderer* r, const HudData& d) {
         // View 0: tachometer and speedometer side by side at the bottom centre.
         std::snprintf(name, sizeof(name), "rev_%02d", face_k);
         Meter tach{image(name), anchor(350, 170, 0), anchor(436, 110, 1), 170, 110, 0, 23, 75, 72.5f, 287.5f,
-                   -0.2f, 0.95f, float(scale), d.shift_rpm, step};
+                   -0.2f, 0.95f, float(scale), d.shift_rpm, step, 0};
         draw_meter(r, tach, d.rpm);
         // Speed scale (presentation §D1): N x 80 km/h or N x 50 mph on the first face that reaches it.
         const SpeedScale ss = speed_scale(d.top_speed_kmh, d.imperial);
         Meter spd{image(ss.face), anchor(290, 170, 1), anchor(436, 110, 1), 170, 110, 0, 23, 75, 72.5f, 287.5f,
-                  -0.1f, 0.95f, ss.full, 0, ss.step};
+                  -0.1f, 0.95f, ss.full, 0, ss.step, 1};
         draw_meter(r, spd, speed);
         text(r, ux(tach.x + 85 - 10), uy(tach.y + 55 - 15), d.automatic ? ">" : "=", "meter#1", 1, kAmber,
              text::HAlign::Left);
@@ -495,7 +522,7 @@ void Hud::draw_meters(SDL_Renderer* r, const HudData& d) {
         // View 1: remote tachometer at the bottom right, digital speed and gear inside it.
         std::snprintf(name, sizeof(name), "revb_%02d", face_k);
         Meter tach{image(name), anchor(620, 160, 5), anchor(320, 140, 2), 160, 140, 3, 4, 73, 29.85f, 238.34f,
-                   0.38f, 0.9f, float(scale), d.shift_rpm, step};
+                   0.38f, 0.9f, float(scale), d.shift_rpm, step, 2};
         draw_meter(r, tach, d.rpm);
         text(r, ux(tach.x + 80 - 2), uy(tach.y + 70 + 28), d.automatic ? ">" : "=", "meter#1", 1, kAmber,
              text::HAlign::Center);
@@ -508,7 +535,7 @@ void Hud::draw_meters(SDL_Renderer* r, const HudData& d) {
     if (d.has_turbo) {
         bool on = d.onboard;
         Meter b{image("boost"), anchor(on ? 530.0f : 475.0f, 72, on ? 0 : 5), anchor(436, 64, 1), 72, 64, 0, 0, 32,
-                -45.0f, 200.32f, -0.1f, 0.95f, 2.0f, 0, 0};
+                -45.0f, 200.32f, -0.1f, 0.95f, 2.0f, 0, 0, 3};
         // The needle value is a pressure ratio: 1.0 sits at the face's "0 kg/cm2" mark (atmospheric),
         // lower values on the vacuum (mmHg) side; physics' boost is that ratio minus 1.
         draw_meter(r, b, std::clamp(1.0f + d.boost, 0.0f, 2.0f));
@@ -547,12 +574,13 @@ void Hud::draw_meters(SDL_Renderer* r, const HudData& d) {
         std::string odo = buf;
         std::snprintf(buf, sizeof(buf), "%04d", int(std::fmod(std::max(0.0, d.trip_m / unit_m * 10.0), 1e4)));
         std::string trip = buf;
+        // In-car rows centred, the outside view's right-aligned (pushed) at their x.
         if (d.onboard) {
             text(r, ux(205), uy(428), odo, "odo#1", 1, cyan, text::HAlign::Center, true);
             text(r, ux(205), uy(370), trip, "odo#1", 1, cyan, text::HAlign::Center, true);
         } else {
-            text(r, ux(anchor(605, 0, 5)), uy(424), odo, "odo#1", 1, cyan, text::HAlign::Center, true);
-            text(r, ux(anchor(525, 0, 5)), uy(424), trip, "odo#1", 1, cyan, text::HAlign::Center, true);
+            text(r, ux(anchor(605, 0, 5)), uy(424), odo, "odo#1", 1, cyan, text::HAlign::Right, true);
+            text(r, ux(anchor(525, 0, 5)), uy(424), trip, "odo#1", 1, cyan, text::HAlign::Right, true);
         }
     }
     // Gear with the unlit "8" behind it, and the shift light.
@@ -641,15 +669,17 @@ void Hud::draw_times(SDL_Renderer* r, const HudData& d, int view) {
         if (row.view != kAnyView && row.view != view) continue;
         const float R = anchor(row.x, 0, row.align), y = row.y;
         if (row.part == HudPart::Target) {
-            // Licence targets: gold / silver / bronze with their marks at 75 % left of the time.
+            // Licence targets: gold / silver / bronze, time lines with no label; the mark at its own size in the label's
+            // place, right-aligned at the label's edge (truncated) + the row's w, centred on y + the row's h.
             static const char* const kMarks[] = {"mark_1st", "mark_2nd", "mark_3rd"};
             const size_t i = std::min<size_t>(row.sub, 2);
             std::string t = format_time(d.license_targets[i]);
-            text(r, ux(R), uy(y), t, "sw_16", 1, kAmber, text::HAlign::Right);
-            float tw = std::max(width(t, "sw_16", 90), 90.0f);
-            if (const Image* im = image(kMarks[i]))
-                blit(r, im->tex,
-                     {ux(R - tw - 8 - im->w * 0.75f), uy(y - 4), im->w * 0.75f * vsx(), im->h * 0.75f * vsy()});
+            text(r, ux(R), uy(y), t, "sw_16", 1, kAmber, text::HAlign::Right, true);
+            const float tw = std::max(width(t, "sw_16", 90), 90.0f);
+            if (const Image* im = image(kMarks[i])) {
+                const float right = R - std::trunc(tw + 10) + row.w, cy = y + row.h;
+                blit(r, im->tex, {ux(right - im->w), uy(cy - im->h / 2), im->w * vsx(), im->h * vsy()});
+            }
             continue;
         }
         if (row.part != HudPart::TimeLine) continue;
@@ -930,16 +960,17 @@ void Hud::draw(SDL_Renderer* r, const HudData& d, const SDL_FRect* viewport) {
             }
     }
     if (const HudRow* sw = row(HudPart::Steering); sw && (d.items & kItemSteering)) {
-        // A light grey tick from 24 to 43 units above the pivot, and the "steering" mark on that
-        // circle (radius 43), turned with the steering, up to 90 degrees either side.
+        // A light grey tick from 24 to 43 units above the pivot, and the "steering" wheel with its
+        // top edge at 43 above the pivot, centred across, turned about the pivot (the wheel's hub)
+        // with the steering, up to 90 degrees either side.
         const float px = anchor(sw->x, 0, sw->align), py = sw->y;
         polygon_strip(r, {{px - 0.5f, py - 43}, {px + 0.5f, py - 43}, {px - 0.5f, py - 24}, {px + 0.5f, py - 24}},
                       SDL_Color{208, 208, 208, 255});
         if (const Image* im = image("steering")) {
-            const float a = 90.0f * std::clamp(d.steer, -1.0f, 1.0f), rad = a * kPi / 180.0f;
-            const float cx = px + 43 * std::sin(rad), cy = py - 43 * std::cos(rad);
-            SDL_FRect rc{ux(cx - im->w / 2), uy(cy - im->h / 2), im->w * vsx(), im->h * vsy()};
-            SDL_RenderTextureRotated(r, im->tex, nullptr, &rc, a, nullptr, SDL_FLIP_NONE);
+            const float a = 90.0f * std::clamp(d.steer, -1.0f, 1.0f);
+            SDL_FRect rc{ux(px - im->w / 2), uy(py - 43), im->w * vsx(), im->h * vsy()};
+            const SDL_FPoint hub{im->w / 2 * vsx(), 43 * vsy()};
+            SDL_RenderTextureRotated(r, im->tex, nullptr, &rc, a, &hub, SDL_FLIP_NONE);
         }
     }
     if (const HudRow* ab = row(HudPart::AccelBrake); ab && (d.items & kItemAccelBrake)) {

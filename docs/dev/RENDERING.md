@@ -16,6 +16,7 @@ App::init
   (failure) -> SDL_CreateRenderer(window, nullptr), 2D only
 
 each frame (App::iterate)
+  (gamma not 1) GammaPass::begin          the 2D renderer draws into a window-sized target
   Ui::clear
   Screen::render
     View3D::draw(rect, camera, models)    own command buffer:
@@ -23,6 +24,7 @@ each frame (App::iterate)
       submit
       SDL_RenderTexture(wrapper)          wrapper = SDL_Texture around the GPU texture
     ui.text(...)                          UI on top
+  (gamma not 1) GammaPass::end            that target onto the window through gamma.frag
   SDL_RenderPresent                       2D command buffer, submitted after ours
 ```
 
@@ -39,6 +41,20 @@ renderer then composites the view as an ordinary texture
   scale.
 - Resizing is handled lazily: the target is recreated when the pixel size
   or MSAA level changes.
+- The player's gamma (`[video] gamma`, `render::GammaPass`) is the one pass over the whole
+  frame. At 1, the default, it does not run and the frame goes to the window as before.
+  Otherwise the 2D renderer draws the frame into an RGBA8 target the window's size (wrapped
+  like a 3D view's, `render::wrap_texture`, with the window's logical presentation), and
+  before the present draws it over the whole window with `gamma.frag`,
+  `out = in ^ (1 / gamma)` per channel: on SDL_GPU as the GPU renderer's own fragment shader
+  (`SDL_GPURenderState`, in the frame's command buffer, so in order); on OpenGL ES, whose 2D
+  renderer takes no shaders, through our own pass (`gamma.vert`'s triangle) into a second
+  target that the 2D renderer then copies (gpu_gles.cpp draws pipelines without vertex
+  attributes with no vertex buffer bound, as SDL_GPU does). UI text in the target is rasterised
+  at the window's pixel size, as on the window (`render::drawing_to_window`), so the frame
+  matches one drawn to the window exactly. Screenshots are read before the pass, so they keep
+  GT3's colours (`GT3R_SHOT_GAMMA=1`: after it, as shown). There is none in VR (the canvases go to the headset as they are) or without the 3D
+  renderer.
 - The dynamic scale allocates nothing: the targets are sized for its ceiling
   (`GpuContext::render_ceiling`) and each frame draws its picture into their
   top-left corner (viewport and scissor), which the 2D renderer upscales with a
@@ -84,9 +100,12 @@ game with a message.
 | `msaa` | `--msaa N` | 4 (desktop), 2 (Android: phones, tablets, Quest) | 1/2/4/8, the nearest the device offers: a missing 2x becomes 4x (Mali GPUs offer 1x, 4x and 8x only; on a Galaxy A15 4x cost about 5 points of dynamic resolution), other missing levels the next lower. Phones default to 2x: on a Moto G Power 2024 (Trial Mountain, 6 cars, fixed 60% scale) 4x cost about 19% of the frame and 2x about 3% vs off, and with 4x dynamic resolution sat at its 50% floor. See `platform::default_msaa` |
 | `vsync` | | 1 | Present with vsync |
 | `aspect` | | 16:9 | Settings → Display → Aspect ratio: the game area of the game's own screens (`Screen::follows_aspect`: its menus, races, movies), 360 UI units tall and 640 (`16:9`), 480 (`4:3`) or the window's shape (`fill`, 480 to 1440 wide) across, letterboxed into the window (`App::layout_ui`, `platform::game_width`). Our own screens keep the 640×360 space or the whole window. 3D views are Hor+ (the vertical FOV is fixed). The race HUD keeps GT3's 640×448 layout in the middle and pushes the elements GT3 pushes in its 16:9 option to the game area's sides: 106.667 frame units on 16:9, more with `fill`, none at 4:3 (GT3's 4:3 layout). Always 16:9 in VR, where Settings has no such row |
+| `gamma` | | 1 | Settings → Display → Gamma, 0.50..2.00 in steps of 0.05 (`render::parse_gamma` clamps the file's value): the whole picture through `out = in ^ (1 / gamma)`, higher brighter ("Frame structure"). 1 removes the key, and Settings shows a "Reset gamma to 1.00" row while it is not 1. The pass costs a window-sized target (SDL keeps one per frame in flight) and a full-window draw a frame |
 | `limit_60fps` | | off | `on` (Settings → Display → Limit to 60 fps): on 120 Hz and faster displays draw every Nth refresh (120 Hz → 60 fps, 144 → 72) through SDL's main loop rate (`App::apply_frame_limit`); off: every refresh |
 | `show_fps` | | off | `on` (Settings → Display → FPS counter): the frames drawn per second, averaged over about half a second, at the top left of the window over everything; on our own screens (`Screen::adaptive_ui`), whose header runs along the top, at the bottom right (`App::draw_fps`). In the safe area on phones, on the virtual screen in VR |
 | `full_car_detail` | | on (desktop), off (Android, iOS) | Settings → Display → Always show full car detail: every car at LOD 0 at any distance (`race::car_lod`, `App::full_car_detail`); off: GT3's LODs by distance. On a Galaxy A15 (Trial Mountain, 6 cars) on drew 32% more triangles and 25% more draw calls: +1.4 ms a frame at a fixed 70% scale with `gpusync=1` (+0.7 ms of it CPU), and in normal play about 1.5 points less dynamic resolution at the same 45 fps |
+| `showroom_wheels` | | on (desktop), off (Android, iOS) | Settings → Display → Showroom wheels in races: race cars' LOD 0 wheels are the menus' (`menu/cars` rim and 256x128 tyre texture, a fitted wheel's `menu/wheel/<label>`, 30-segment tyres; `CarModelOptions::showroom_car`, `App::showroom_wheels`); a spinning rim is blurred by turned copies of itself (`DrawItem::spin_turn`, [RACE](RACE.md)); off: GT3's race wheels. About 5,200 more triangles a car at LOD 0 (median rim 1,413 triangles against 112), more while the rims spin (a six-car grid at Trial Mountain, 2560x1440: 96K to 400K triangles, about 0.4 ms of GPU and 0.3 ms of CPU a frame on an M4 Pro), and each car reads its `menu/cars` file when the race loads |
+| `heat_haze` | | off | `on` (Settings → Display → Heat haze in replays): the replays' heat haze lenses (`race::HeatHaze`, `DrawOptions::haze`; [RACE](RACE.md#passes-after-the-3d-picture)). Off by default: in a sharp picture the lenses, sliding across panning shots and jumping where they wrap, read as jitter rather than GT3's soft shimmer |
 | `gpu_debug` | | 0 | Backend validation layers (OpenGL ES: GL error checks kept) |
 | `anisotropy` | | 4 | 1 (off), 2, 4, 8 or 16: the mipmapped samplers' anisotropy (not the `no_mips` ones). A GPU without anisotropic filtering gets none (`GpuContext::anisotropy_supported`) |
 | `render_scale` | `--render-scale X` | auto | 0.5..4.0: 3D views render at this fraction of their on-screen pixel size and are scaled (linear) when composited; UI and HUD stay native. `auto` = 1.0 on desktop; on Android/iOS about 900 lines of the 16:9 game area (e.g. 0.63 on a 2560×1600 tablet, 0.70 on a 2856×1280 phone). Above 1 (supersampling) within `platform::supersample_limit`: 16384 pixels a side per view, the largest 2D texture SDL_GPU assumes (400% up to 4096 pixels across, 320% of 5120×2880); no memory cap, and like any 3D resolution it costs frame rate unless dynamic resolution is on. Supersampled targets are not cycled: SDL keeps a cycled target once per frame in flight, and 400% of 3840×2160 with 4x MSAA then took over 20 GB, which SDL's Vulkan backend put in system memory (it only warns, once per device) on a 10 GB RTX 3080: about a frame a second. Uncycled (about 5 GB), the 3080 draws it in 29.9 ms a frame, 10.3 ms with MSAA off; an M4 Pro draws 400% of 2560×1440 at 48–55 fps (42–46 cycled). A picture over twice the on-screen size is halved first by a linear `SDL_BlitGPUTexture` (each pixel a 2×2 mean), so the composite's linear filter misses no texel. A view whose supersampled targets cannot be created steps down to 75% of that size per failed frame, at most to native. See `src/platform/render_scale.*` |
@@ -95,7 +114,8 @@ game with a message.
 ## Shaders
 
 Shaders are authored once in Vulkan GLSL (`src/render/shaders/model.vert`,
-`model.frag`; `present.vert` / `.frag` are VR's present pass, [VR](VR.md)) and
+`model.frag`; `present.vert` / `.frag` are VR's present pass, [VR](VR.md); `gamma.frag` /
+`.vert` the player's gamma, "Frame structure") and
 compiled **offline**. The outputs are committed, so CI and
 the Android Gradle build need no shader tools:
 
@@ -112,11 +132,14 @@ brew install glslang spirv-cross     # or the LunarG Vulkan SDK on Linux/Windows
 python3 src/render/shaders/compile_shaders.py
 ```
 
-This writes `src/render/shaders/generated/model_{vert,frag}.h`: a 4-byte
-aligned SPIR-V byte array, the MSL source (entry point `main0`) and the GLSL ES
+This writes `src/render/shaders/generated/model_{vert,clip_vert,frag}.h` (`model_clip_vert`
+is `model.vert` with `CLIPPED` defined: the corners of the triangles GT3 clips at the guard
+band, see "GT3 lighting"): a 4-byte aligned SPIR-V byte array, the MSL source (entry point `main0`) and the GLSL ES
 source with its uniform block and sampler names in slot order (GLSL ES 3.00
 has no binding qualifiers, so `gpu_gles.cpp` binds them by name). The GLSL ES
-vertex shader flips y and remaps depth to GL's clip space.
+vertex shader flips y and remaps depth to GL's clip space. `model_{vert,frag}_copy.h`
+are the same sources built with `SPIN_COPIES` (`DrawItem::spin_turn`, `PipelineKey::spin_copy`);
+their GLSL ES fragment shader also has `NO_SAMPLE_MASK` (GLSL ES 3.00 has no `gl_SampleMask`).
 
 Binding conventions follow SDL_GPU's rules:
 
@@ -228,6 +251,7 @@ There is one shader pair. Per-primitive state comes from
 | `kAlphaBlend \| kAlphaTest \| kAlphaFailBlend` | GS AFAIL = RGB_ONLY (course foliage): drawn twice, the fragments passing the test in the opaque phase (with depth write), the failing ones blended in the blended phase without depth write |
 | `kDoubleSided` | no culling; normals flipped for back faces |
 | `kUnlit` | colour = texture × vertex colour, no lighting |
+| `kVertexColor2x` | the vertex RGB are the GS bytes (0x80 = 128): `model.vert` scales them by 255/128 (GTM1 packets with a colour factor past 0x80; texel × colour >> 7 as on the GS) |
 | `kEnvironmentMap` | placeholder reflection: sky/ground gradient mixed by `env_strength` |
 | `kNoDepthWrite` | depth write off (the depth test stays on, GREATER_OR_EQUAL as for every pass) |
 | `kAdditive \| kDestAlphaAdd` | GS ALPHA 0x58 (Cs·Ad + Cd): with `DrawItem::frame_alpha`, added weighted by the frame-buffer alpha (`BlendMode::DestAlphaAdd`); elsewhere plain additive (src·α + dst). The course road sheen and other blended ALPHA 0x58 course packets |
@@ -238,6 +262,8 @@ There is one shader pair. Per-primitive state comes from
 | `kMultiplyDest` | GS ALPHA 0x89 (Cd·As): destination × fragment alpha (prize cup rims) |
 | textured `kEnvironmentMap` with `DrawItem::sphere_map` | prize scenes: the model's own sphere map, UVs from the reflected view vector in view space (GT3's reflection kernel), vertex colour × the reflection rows |
 | `DrawItem::frame_alpha` (race course scenery) | the PS2's frame-buffer alpha: every pass writes its fragment alpha unblended (`AlphaWrite::Write`; `kKeepAlpha` = FBMSK 0xFF000000 keeps it), `kAlphaOnly` passes (FBMSK 0x00FFFFFF shadow masks) write only the alpha, and the road sheen is added as Cs·Ad (`BlendMode::DestAlphaAdd`, GS ALPHA 0x58). `kAlphaOnly` primitives of other items are not drawn |
+| `kDestAlphaTest` (car reflection passes) | GS TEST.DATE with DATM 0: drawn only where the frame alpha < 0x80. The fragment is discarded where its weight (texel × vertex alpha) reaches 0x80 (`output_mode.w`); the 0x80 an earlier reflection pass leaves is the decoder's part (it drops the triangles the pass repeats). See docs/formats/car_model.md |
+| `kDepthOnly` | GS FBMSK 0xFFFFFFFF with depth writes on: only the depth is written (`PipelineKey::depth_only`, colour write mask 0), in the blended phase in model order (car glass drawn without depth writes gets its depth after its reflection) |
 
 `View3D::render_env_cube` renders the six faces with the standard cube-map frames
 (the sampler's convention: row 0 of a side face is +Y, of +Y / -Y it is -Z / +Z)
@@ -256,6 +282,10 @@ to three more (`fill_*`, or `ItemLights` per item). Vertex colour is used
 as-is (RGBA8 → 0..1). Decoders should map PS2's 0x80 = 1.0 convention
 themselves (the GTM1 decoder does for colours that modulate a texture or feed the
 lighting; a pre-lit untextured colour stays as the GS shows it, 0x80 = mid grey).
+A factor can pass 1.0 (up to 0xFF = 255/128: the GS's MODULATE is texel × colour >> 7,
+clamped to 255), which RGBA8 at 0x80 = 255 cannot hold: packets with a colour past 0x80
+keep the GS bytes and carry `kVertexColor2x` (Trial Mountain's scenery: 31% of its pre-lit
+channels are 0x90-0xBF; other US courses about 1-2%).
 
 ### GT3 lighting (primitives with a valid `scene::Material`)
 
@@ -290,7 +320,50 @@ per-fragment sphere kernel (`params.w = 4`). See docs/formats/course.md "Lightin
 
 GT3 fog (`DrawOptions::fog_gt3`, course Env0) is computed per vertex too, from the
 view depth W like the VU's transform: F = trunc(b' + 0.1 + (255 − b') min(W, A) / W),
-b' = 255 b, fog amount 1 − F / 255, interpolated in screen space.
+b' = 255 b, fog amount 1 − F / 255, interpolated in screen space. A course whose Env0 has
+no fog (b = 1) is still fogged, at F = 255 everywhere, as its packets are on the GS.
+
+The GS works in 8-bit integers and truncates where a GPU rounds, so `model.frag` does its
+sums as the GS does, in the textured passes (base, sheen, car reflections, prize sphere
+maps): the filtered texel truncated to 8 bits (`gs_texel`), MODULATE = texel × colour >> 7
+clamped to 255 (`gs_color`; after GT3's lighting or our own), then fog
+(F C + (256 − F) FOGCOL) >> 8 (`gs_fog`: F = 255 still takes a colour past the fog colour
+down a level, and a pass fogged to black, the sheen, loses one). Each result is a whole
+8-bit level, which the RGBA8 target stores exactly. The blend unit still rounds its
+product (Cs × As or Cs × Ad), where the GS truncates ((A − B) C >> 7 + D); a weight of 0x80
+is exact either way, as on the road under the sheen. `render::gs_pixel` is the same on the
+CPU (tests). With float sums the race frame came out 1 to 3 levels above the original's
+(the arcade grids: 1.015 of it on average, now 0.998; Super Speedway's road 1.04, now 1.01;
+Route 5's lit windows, past 0x80 and fogged after the clamp, now near the original's).
+
+GT3's VU clips a triangle at the guard band before the GS sees it (twice the screen,
+|x|, |y| = 2 w, and the projection's near and far planes: docs/formats/course.md "Lighting"), so
+the colour the GS interpolates in screen space spans the clipped pieces. Items with
+`DrawItem::guard_band` get the same in views with `DrawOptions::guard_near` (the race's
+main views, `CameraRig::gt3_near`): the course models and the wet road's mask, which keep
+their geometry on the CPU (`GpuModel`'s keep_geometry). Each frame `View3D::upload_clipped`
+finds their triangles with a vertex outside (the indices ascending are GT3's strip order),
+clips them with `render::guard_clip` and uploads the corners as `ClipVertex` (the triangle's
+three vertices and the corner's weights). `model.vert` built with `CLIPPED`
+(`PipelineKey::clipped`) lights the three vertices, blends them and rounds a new corner's
+colour bytes as the VU does. The primitive's own draw leaves those triangles out (`v_fog_w.y`,
+discarded in `model.frag`) and the clipped draw drops any the GPU does not find outside, so
+each triangle is drawn once. These items' vertex colour is linear in screen space as well.
+`GpuModel::MeshInfo::primitive_spheres` let the CPU skip the primitives no plane can cut.
+Not clipped: the mirror, VR, offscreen views and the reflection map.
+
+GT3's far plane (`DrawOptions::far_clip`, Env0 +0x20 through `CameraRig::gt3_far`: the race's
+views, the race behind the quick menu and VR) is the race view's only draw distance: a mesh
+wholly beyond it is culled, the guard band clips its items there (the `+z` plane), the other
+items are cut at it in `model.frag` (`v_fog_w.y` = the depth past it, as the GPU cuts at its own
+far plane) and `DrawItem::far_whole` items (the cars, as GT3's cars pass drops a model whose box
+reaches past it) are dropped whole. Background items are never cut, and an item's modelview
+scale moves its plane: the backdrop's lies 100 times as far, where the projection's far plane is
+(`CameraRig::set_gt3_far`). `GT3R_NO_FAR_PLANE=1` draws as before (2500 m, a 6000 m projection).
+The backdrop is drawn whole (`in_order`, its moving nodes joined) right after the sky, and then
+the depth is reset to the far value (`DrawItem::depth_reset`: a viewport quad through the
+`PipelineKey::depth_reset` pipeline, compare always, no colour), as GT3 resets its Z before the
+course (presentation §M2): the course covers the backdrop wherever its planes lie.
 `DrawItem::light_scale` (road shade) scales every light, fills included.
 Light sources per scene:
 
@@ -318,16 +391,19 @@ keeps (mapped with cycling) and one command buffer per update;
 Pipelines (one per `PipelineKey`: blend, cull, depth write, alpha write, coverage, lines) are
 created on first use and cached in `GpuContext`. SDL 3.4's Vulkan backend has no pipeline
 cache, and a pipeline takes ~65 ms to create on a Galaxy A15 (Mali), a stutter the first time a
-combination appears mid-race (~200 ms on a Moto G Power 2024, Imagination BXM). On phones and
-tablets `GpuContext::warm_pipelines` creates the ~70 combinations races and menus use on a
-background thread at start-up (about 5 s on the A15, ~14 s on the Moto, while the opening movie
-and title play): the frame's own combinations, then the same for transparent pictures (coverage:
-car models on the race's gap pop-ups and results bar, the online pickers' cars), whose first
-mid-race pop-up otherwise stalled the Moto for 0.5 s. Others are still created on first use, and
-the log names each one ("3D pipeline built on first use"). On Android the compiling thread is
-named after the key while the driver works ("pipe" + blend, cull, depth write, lines, coverage,
-alpha, "x" MSAA, e.g. `pipe100000x4`), so a crash report names the pipeline, and the start-up
-log line "3D renderer: GPU …, driver …" gives the device name and driver version.
+combination appears mid-race (~200 ms on a Moto G Power 2024, Imagination BXM). Desktop drivers
+are as slow without their own shader cache (the first runs after an update or a driver install:
+50-190 ms per pipeline on an RTX 3080, a 190 ms stall at a race's GO). So everywhere
+`GpuContext::warm_pipelines` creates the ~110 combinations races and menus use on a
+background thread at start-up (about 5 s on the A15, ~14 s on the Moto, 0.4 s on an M4 Pro,
+while the opening movie and title play): the frame's own combinations, then the same for
+transparent pictures (coverage: car models on the race's gap pop-ups and results bar, the
+online pickers' cars), whose first mid-race pop-up otherwise stalled the Moto for 0.5 s. Others
+are still created on first use, and the log names each one ("3D pipeline built on first use").
+On Android the compiling thread is named after the key while the driver works ("pipe" + blend,
+cull, depth write, lines, coverage, alpha, "x" MSAA, e.g. `pipe100000x4`), so a crash report
+names the pipeline, and the start-up log line "3D renderer: GPU …, driver …" gives the device
+name and driver version.
 
 A Mali-G52 driver (r25p1, Android 11: Moto G20, realme C21Y) crashed in its shader compiler
 (a null read in `cmpbe_v2_compile_multiple_shaders`) on the first pipeline it built, on any
@@ -358,10 +434,15 @@ uses a slightly depth-biased projection, so it works without
 |---|---|
 | `frustum_cull` | skip meshes whose bounding sphere (`GpuModel::MeshInfo::center/radius`, computed on upload) is outside the frustum |
 | `draw_distance` | skip meshes further than this; `DrawItem::draw_distance` overrides per item (0 = never) |
+| `far_clip` | GT3's far plane (eye depth): what lies beyond is not drawn (see "GT3 lighting" above) |
 | `sort_blended` | blended primitives drawn back to front by mesh distance instead of model order |
 | `fog`, `fog_color/start/end/max` | linear distance fog (not on background or helper items); `fog_gt3`: GT3's per-vertex depth fog (see "GT3 lighting") |
 | `blend_alpha_ref` | alpha-test threshold for blended `kAlphaTest` primitives |
 | `post_grade`; `snapshot`, `dissolve`, `trail` | full-screen passes over the finished picture, as GT3's before its 2D layer: the colour grade (levels, a curve per channel, saturation, in GT3's 8-bit table arithmetic; `post_grade_pixel` is the same on the CPU) and, in replays, a dissolve from a frozen picture and a trail of the last one |
+| `dof` | GT3's replay depth of field, before those passes: the scene pass keeps its depth; five small single-sample pictures (`PipelineKey::single`, model.frag mode 6) downsampled from the picture, then a pass over the (multisampled) target draws the layers of `dof_layers` as quads at their depth, tested GEQUAL against the scene's depth. The OpenGL ES backend keeps the depth between the passes (a stored depth is not invalidated) |
+| `haze`; `overlay`; `vignette` | `render::ScreenBatch` triangles in their own rectangle's units, in GT3's order after the scene and `dof` ([RACE](RACE.md#passes-after-the-3d-picture)): `haze` samples a copy of the picture (the scene pass, or the depth of field's last pass, then stores its picture and depth, and a second pass draws the haze, the `DrawItem::late` items and the overlay; depth-of-field frames get that pass too), `overlay` is added before the grade (sun glare, lamp glows), `vignette` is blended over the graded picture before the dissolve and the trail. Uploaded once per draw (one vertex and index buffer); the model shader's unlit and post modes, no shader of their own |
+| `DrawItem::late` | drawn after every other item of the pass, with the scene's depth (the tyre smoke) |
+| `DrawItem::spin_turn` | a modelled rim's spin blur (showroom wheels): the item is drawn as n instances turned about its own x axis by k / n of the turn (the `SPIN_COPIES` shaders). Each copy writes only its share of each pixel's samples (`gl_SampleMask`), so the resolve averages the copies a pixel holds and each copy's own depth keeps the brake parts behind its spokes sharp; past the sample count the copies take cells of a 4 x 4 ordered pixel pattern (`spin_copy_at`), and after the scene `spin_resolve` filters each rim's place on screen with a kernel weighing every cell alike (two or four bilinear taps a pixel apart each way: a 3 x 3 tent or 1 2 2 2 1), at the weight of how far apart a pixel's copies lie, for the mean of all of them. n doubles from the sample count while the copies would lie more than 1.5 pixels apart at the rim's edge, up to 64 and 16 cells and no more than fit 1.5 pixels apart over a radian of the edge (`spin_copy_count`). OpenGL ES 3.0: a copy a pixel. Views without the filter (VR, offscreen, the reflection cube): a copy a sample |
 
 `DrawItem::background` draws an item first, without depth writes, culling or
 fog (sky domes; pass `translate(eye)` as the transform). `DrawItem::in_order`

@@ -269,12 +269,12 @@ TEST(vif_signed_8bit) {
 
 // The quad with vertex colours (V4-8 at 0x80: RGB 0x80, 0xFF, 0x40, alpha 0x80) and the GIF
 // tag's PRIM word `prim` (0x7C textured, 0x2C untextured).
-Bytes make_coloured_packet(u32 prim) {
+Bytes make_coloured_packet(u32 prim, u8 green = 0x60) {
     Bytes b = make_packet();
     const u32 tag1 = 0x30004000u | (prim << 15); // NREG 3, PRE, PRIM
     for (int i = 0; i < 4; ++i) b[8 + size_t(i)] = u8(tag1 >> (8 * i));
     put32(b, 0x6E04C080); // after the padding (VIF no-ops): V4-8 num=4 @0x80, colours
-    for (int i = 0; i < 4; ++i) b.push_back(0x80), b.push_back(0xFF), b.push_back(0x40), b.push_back(0x80);
+    for (int i = 0; i < 4; ++i) b.push_back(0x80), b.push_back(green), b.push_back(0x40), b.push_back(0x80);
     while (b.size() % 16) put32(b, 0);
     return b;
 }
@@ -290,10 +290,29 @@ TEST(gtm1_untextured_colours_as_the_gs_shows_them) {
     };
     auto rgb_is = [](u32 c, u32 r, u32 g, u32 b) { return (c & 0xFF) == r && ((c >> 8) & 0xFF) == g && ((c >> 16) & 0xFF) == b; };
     const u32 prelit_textured = colour(0x7C, 0), prelit_untextured = colour(0x2C, 0), lit_untextured = colour(0x2C, 1);
-    CHECK(rgb_is(prelit_textured, 255, 255, 128));
-    CHECK(rgb_is(prelit_untextured, 128, 255, 64));
-    CHECK(rgb_is(lit_untextured, 255, 255, 128));
+    CHECK(rgb_is(prelit_textured, 255, 191, 128));
+    CHECK(rgb_is(prelit_untextured, 128, 96, 64));
+    CHECK(rgb_is(lit_untextured, 255, 191, 128));
     CHECK((prelit_textured >> 24) == 255 && (prelit_untextured >> 24) == 255 && (lit_untextured >> 24) == 255);
+}
+
+// Past 0x80 a factor brightens (the GS: texel x colour >> 7, up to 255/128): the packet keeps the
+// GS bytes and kVertexColor2x, for the renderer to scale. An untextured pre-lit packet, shown as
+// it is, keeps its bytes without the flag.
+TEST(gtm1_colour_factors_past_0x80) {
+    auto decode = [](u32 prim, u8 kind) {
+        return gtm1::decode_gtm1(make_gtm1(make_coloured_packet(prim, 0xFF), kind));
+    };
+    auto check = [](const scene::Model& m, bool flagged) {
+        CHECK(!m.meshes.empty() && !m.meshes[0].vertices.empty() && !m.meshes[0].primitives.empty());
+        if (m.meshes.empty() || m.meshes[0].vertices.empty() || m.meshes[0].primitives.empty()) return;
+        const u32 c = m.meshes[0].vertices[0].color;
+        CHECK((c & 0xFFFFFFu) == (0x80u | 0xFFu << 8 | 0x40u << 16) && (c >> 24) == 255);
+        CHECK(((m.meshes[0].primitives[0].flags & scene::kVertexColor2x) != 0) == flagged);
+    };
+    check(decode(0x7C, 0), true);  // pre-lit, textured: MODULATE
+    check(decode(0x2C, 1), true);  // a factor of the VU's maths
+    check(decode(0x2C, 0), false); // pre-lit, untextured: shown as it is
 }
 
 TEST(gtm1_synthetic_model) {
@@ -512,6 +531,32 @@ TEST(wheel_model_disc) {
     CHECK(n == 3);
 }
 
+// The rim's runtime texture slot holds the rim image (texture table entry 1, issue 159): on the
+// Miata LS the current set's first texture is a dark copy under another palette, a flat disc.
+TEST(wheel_rim_image_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const Bytes data = disc->volume().read(*disc->volume().find("wheel/ma2096"));
+    const gtm1::Gtm1 g = gtm1::Gtm1::parse(WheelFile::parse(data).gtm1);
+    CHECK(!g.texset_tables.empty() && g.texset_tables[0].size() > 1);
+    if (g.texset_tables.empty() || g.texset_tables[0].size() <= 1) return;
+    std::vector<scene::Texture> image;
+    gtm1::decode_texture_set(g.data.subspan(g.texsets[g.texset_tables[0][1]]), image, "");
+    CHECK(!image.empty());
+    if (image.empty()) return;
+    auto shows_image = [&](int runtime_set) {
+        gtm1::Options o;
+        o.runtime_set = runtime_set;
+        const scene::Model m = load_wheel_model(data, o);
+        for (const scene::Mesh& mesh : m.meshes)
+            for (const scene::Primitive& p : mesh.primitives)
+                if (p.texture >= 0 && m.textures[size_t(p.texture)].rgba == image[0].rgba) return true;
+        return false;
+    };
+    CHECK(shows_image(1));
+    CHECK(!shows_image(-1));
+}
+
 TEST(car_paint_variants_disc) {
     Disc* disc = test::test_disc();
     if (!disc) SKIP("needs GT3R_DISC");
@@ -713,4 +758,152 @@ TEST(tyre_placement_and_menu_tyres_disc) {
     for (const scene::Mesh& mesh : race.meshes)
         if (mesh.name == "wheel_fl_tyre" && mesh.lod < 3) verts[size_t(mesh.lod)] = mesh.vertices.size();
     CHECK(verts[0] == 3 * 2 * 19 + 2 * 18 + 2 * 19 && verts[1] == 3 * 2 * 13 + 2 * 12 + 2 * 13 && verts[2] == 2 * 2 * 9 + 8);
+}
+
+// Menu cars' brake disc and caliper: nodes 2 (front) and 3 (rear) of the menu body, drawn in each wheel's
+// frame like the rim (scaled by R - 0.75 sidewall, at the outer sidewall), the right wheels' mirrored in x
+// about the hub. Race car files have neither.
+TEST(menu_brake_parts_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    data::CarDatabase db;
+    CHECK(db.load(disc->volume()));
+    std::optional<WheelSpec> ws = wheel_spec_for_car(db, "slk230_komp_00");
+    CHECK(ws.has_value());
+    if (!ws) return;
+    Bytes data = disc->volume().read(*disc->volume().find("menu/cars/mb0007"));
+    CarModelOptions o;
+    o.lod = 0;
+    o.menu_tyres = true;
+    o.wheel_spec = ws;
+    scene::Model m = load_car_model(data, o, "mb0007");
+    auto find = [](const scene::Model& model, const std::string& name) -> const scene::Mesh* {
+        for (const scene::Mesh& mesh : model.meshes)
+            if (mesh.name == name) return &mesh;
+        return nullptr;
+    };
+    const char* names[4] = {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"};
+    std::array<const scene::Mesh*, 4> brake{};
+    for (int i = 0; i < 4; ++i) brake[size_t(i)] = find(m, std::string(names[i]) + "_brake");
+    CHECK(brake[0] && brake[1] && brake[2] && brake[3]);
+    CHECK(!find(m, "node2") && !find(m, "node3") && !find(m, "node6")); // not drawn with the body
+    if (!brake[0] || !brake[1] || !brake[2] || !brake[3]) return;
+    for (int i = 0; i < 4; ++i) {
+        const scene::Mesh& b = *brake[size_t(i)];
+        CHECK(!b.vertices.empty() && !b.primitives.empty() && b.primitives[0].texture >= 0);
+        // Inside the wheel: between the rim face and the inner face, within the rim's radius.
+        const int axle = i >> 1;
+        const float r = ws->radius[axle], w = ws->width[axle], rim = r - 0.75f * ws->sidewall[axle];
+        const float cx = (i & 1 ? 0.5f : -0.5f) * ws->track[axle], cz = (axle ? 0.5f : -0.5f) * ws->wheelbase;
+        bool inside = true;
+        for (const scene::Vertex& v : b.vertices) {
+            const float out = (i & 1 ? 1.0f : -1.0f) * (v.pos[0] - cx); // towards the outside of the car
+            inside &= out < 0.5f * w && out > -0.5f * w && std::hypot(v.pos[1] - r, v.pos[2] - cz) < rim;
+        }
+        CHECK(inside);
+    }
+    // Front and rear parts differ (nodes 2 and 3); a right wheel's are the left one's mirrored in x,
+    // its triangles turned back.
+    CHECK(brake[0]->vertices.size() == brake[1]->vertices.size());
+    CHECK(brake[2]->vertices.size() == brake[3]->vertices.size());
+    bool mirrored = brake[0]->indices.size() == brake[1]->indices.size();
+    for (size_t k = 0; mirrored && k < brake[0]->vertices.size(); ++k) {
+        const scene::Vertex &l = brake[0]->vertices[k], &rv = brake[1]->vertices[k];
+        mirrored = std::fabs(l.pos[0] + rv.pos[0]) < 1e-5f && std::fabs(l.pos[1] - rv.pos[1]) < 1e-5f &&
+                   std::fabs(l.pos[2] - rv.pos[2]) < 1e-5f && std::fabs(l.normal[0] + rv.normal[0]) < 1e-5f;
+    }
+    for (size_t k = 0; mirrored && k + 2 < brake[0]->indices.size(); k += 3)
+        mirrored = brake[1]->indices[k] == brake[0]->indices[k] && brake[1]->indices[k + 1] == brake[0]->indices[k + 2];
+    CHECK(mirrored);
+    // The parts use the body's own textures: no texture is added for them.
+    CarModelOptions plain = o;
+    plain.menu_tyres = false;
+    CHECK(load_car_model(data, plain, "mb0007").textures.size() == m.textures.size());
+    // Race cars: no brake parts in the file (nodes 2 and 3 are empty).
+    CarModelOptions ro;
+    ro.lod = -1;
+    ro.effects = true;
+    ro.wheel_spec = ws;
+    scene::Model race = load_car_model(disc->volume().read(*disc->volume().find("cars/day/mb0007")), ro, "mb0007");
+    bool none = true;
+    for (const scene::Mesh& mesh : race.meshes)
+        none &= mesh.name.find("_brake") == std::string::npos && mesh.name != "node2" && mesh.name != "node3";
+    CHECK(none);
+}
+
+TEST(showroom_wheels_in_race_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    data::CarDatabase db;
+    CHECK(db.load(disc->volume()));
+    std::optional<WheelSpec> ws = wheel_spec_for_car(db, "slk230_komp_00");
+    CHECK(ws.has_value());
+    if (!ws) return;
+    auto& vol = disc->volume();
+    const Bytes race_file = vol.read(*vol.find("cars/day/mb0007")), menu_file = vol.read(*vol.find("menu/cars/mb0007"));
+    CarModelOptions ro; // as the race loads it
+    ro.lod = -1;
+    ro.effects = true;
+    ro.wheel_spec = ws;
+    CarModelOptions so = ro;
+    so.showroom_car = menu_file;
+    CarModelOptions mo; // as the menus load it
+    mo.lod = 0;
+    mo.menu_tyres = true;
+    mo.wheel_spec = ws;
+    const scene::Model race = load_car_model(race_file, ro, "mb0007"), showroom = load_car_model(race_file, so, "mb0007"),
+                       menu = load_car_model(menu_file, mo, "mb0007");
+    // The vertex positions of the meshes named `name` at `lod`, in order.
+    auto verts = [](const scene::Model& m, const std::string& name, int lod) {
+        std::vector<float> out;
+        for (const scene::Mesh& mesh : m.meshes)
+            if (mesh.name == name && mesh.lod == lod)
+                for (const scene::Vertex& v : mesh.vertices) out.insert(out.end(), v.pos, v.pos + 3);
+        return out;
+    };
+    auto triangles = [](const scene::Model& m, const std::string& name, int lod) {
+        size_t n = 0;
+        for (const scene::Mesh& mesh : m.meshes)
+            if (mesh.name == name && mesh.lod == lod) n += mesh.indices.size() / 3;
+        return n;
+    };
+    int lods = 0;
+    for (const scene::Mesh& mesh : race.meshes) lods = std::max(lods, mesh.lod + 1);
+    CHECK(lods >= 2);
+    for (const std::string w : {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"})
+        for (const std::string& n : {w, w + "_tyre", w + "_band"}) {
+            // LOD 0: the menus' rim and tyre, where the menus put them; the other levels the race's.
+            CHECK(!verts(showroom, n, 0).empty() && verts(showroom, n, 0) == verts(menu, n, 0));
+            for (int lod = 1; lod < lods; ++lod) CHECK(verts(showroom, n, lod) == verts(race, n, lod));
+        }
+    CHECK(triangles(showroom, "wheel_fl", 0) > 4 * triangles(race, "wheel_fl", 0)); // modelled spokes
+    CHECK(verts(showroom, "body", 0) == verts(race, "body", 0));
+    // No brake parts: races draw race/brake.bin's.
+    bool none = true;
+    for (const scene::Mesh& mesh : showroom.meshes) none &= mesh.name.find("_brake") == std::string::npos;
+    CHECK(none);
+
+    // A fitted wheel: its menu/wheel model at LOD 0, else (none on the disc) its race model there.
+    std::string label;
+    for (const auto& e : vol.entries())
+        if (e.path.rfind("menu/wheel/", 0) == 0 && vol.find("wheel/" + e.path.substr(11))) {
+            label = e.path.substr(11);
+            break;
+        }
+    CHECK(!label.empty());
+    if (label.empty()) return;
+    const Bytes menu_wheel = vol.read(*vol.find("menu/wheel/" + label)), race_wheel = vol.read(*vol.find("wheel/" + label));
+    CarModelOptions rf = ro, sf = so, mf = mo;
+    rf.wheel_override = sf.wheel_override = race_wheel;
+    sf.showroom_wheel = mf.wheel_override = menu_wheel;
+    const scene::Model race_fitted = load_car_model(race_file, rf, "mb0007"),
+                       showroom_fitted = load_car_model(race_file, sf, "mb0007"),
+                       menu_fitted = load_car_model(menu_file, mf, "mb0007");
+    CHECK(verts(showroom_fitted, "wheel_fl", 0) == verts(menu_fitted, "wheel_fl", 0));
+    CHECK(verts(showroom_fitted, "wheel_fl", 0) != verts(showroom, "wheel_fl", 0));
+    CHECK(verts(showroom_fitted, "wheel_fl", 1) == verts(race_fitted, "wheel_fl", 1));
+    sf.showroom_wheel = {};
+    const scene::Model no_menu_model = load_car_model(race_file, sf, "mb0007");
+    CHECK(verts(no_menu_model, "wheel_fl", 0) == verts(race_fitted, "wheel_fl", 0));
+    CHECK(verts(no_menu_model, "wheel_fl_tyre", 0) == verts(menu, "wheel_fl_tyre", 0));
 }

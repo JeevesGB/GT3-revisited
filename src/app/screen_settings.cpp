@@ -1,6 +1,6 @@
 // Settings: every user-facing config.ini option on tabbed pages (Display,
-// Audio, Controls, Rumble & feedback, Touch, Game disc, Online). Changes apply at once
-// where the engine can (volume, vsync, speed units, MSAA, anisotropic filtering, 3D
+// Audio, Controls, Rumble & feedback, Touch, Disc & saves, Online). Changes apply at once
+// where the engine can (volume, gamma, vsync, speed units, MSAA, anisotropic filtering, 3D
 // resolution, bindings, force feedback, touch layout) and are saved to config.ini
 // immediately. Only keys the engine reads are offered; see README "Settings" for
 // the key list.
@@ -13,8 +13,10 @@
 
 #include "base/file.h"
 #include "disc/region.h"
+#include "game/save_folder.h"
 #include "menu/flow/menu_sound.h"
 #include "net/session.h"
+#include "platform/document_tree.h"
 #include "platform/music_folder.h"
 #include "platform/recent_discs.h"
 #include "platform/render_scale.h"
@@ -38,10 +40,10 @@ namespace {
 
 #if GT3R_XR
 enum Tab { kDisplay, kAudio, kControls, kFfb, kTouch, kDisc, kOnline, kVr, kTabCount };
-const char* const kTabNames[kTabCount] = {"Display", "Audio", "Controls", "Rumble & feedback", "Touch", "Game disc", "Online", "VR"};
+const char* const kTabNames[kTabCount] = {"Display", "Audio", "Controls", "Rumble & feedback", "Touch", "Disc & saves", "Online", "VR"};
 #else
 enum Tab { kDisplay, kAudio, kControls, kFfb, kTouch, kDisc, kOnline, kTabCount };
-const char* const kTabNames[kTabCount] = {"Display", "Audio", "Controls", "Rumble & feedback", "Touch", "Game disc", "Online"};
+const char* const kTabNames[kTabCount] = {"Display", "Audio", "Controls", "Rumble & feedback", "Touch", "Disc & saves", "Online"};
 #endif
 
 struct Row {
@@ -89,12 +91,28 @@ public:
         if (const char* t = SDL_getenv("GT3R_SETTINGS_TAB"); t && *t) tab_ = std::clamp(std::atoi(t), 0, kTabCount - 1);
     }
 
+    bool clickable(float x, float y) const override {
+        if (confirm_.active) return confirm_.cancel_rect.contains(x, y) || confirm_.replace_rect.contains(x, y);
+        if (capture_.state != Capture::State::Idle) return false; // A is what the binding takes
+        if (lay_.back.contains(x, y) || tab_at(x, y) >= 0) return true;
+        if (!lay_.list.contains(x, y)) return false;
+        const int i = row_at(y);
+        return i >= 0 && rows_[size_t(i)].selectable() && rows_[size_t(i)].enabled;
+    }
+
     void on_event(App& app, const SDL_Event& e) override {
         // Back from Android's settings, where music access may have been allowed: the next pick
         // asks again.
-        if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) access_refused_ = false;
+        if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+            access_refused_ = false;
+            saves_view_.folder.clear(); // the save folder looked at again
+        }
         build(app);
+        float hx = 0, hy = 0;
+        const bool hover = xr_hover(e, hx, hy); // the VR pointer focuses what it is over (ui.h)
         if (confirm_.active) { // a tap answers the replace-Custom question
+            if (hover && confirm_.cancel_rect.contains(hx, hy)) confirm_.replace = false;
+            if (hover && confirm_.replace_rect.contains(hx, hy)) confirm_.replace = true;
             if (gesture_.feed(e) == Gesture::Result::Tap) {
                 if (confirm_.cancel_rect.contains(gesture_.x(), gesture_.y())) answer_confirm(false);
                 else if (confirm_.replace_rect.contains(gesture_.x(), gesture_.y())) answer_confirm(true);
@@ -125,6 +143,8 @@ public:
             follow_sel_ = false;
             return;
         }
+        if (hover && lay_.list.contains(hx, hy))
+            if (int i = row_at(hy); i >= 0 && rows_[i].selectable()) sel_ = i, focus_tabs_ = false;
         switch (gesture_.feed(e)) {
         case Gesture::Result::Down: {
             const float x = gesture_.x(), y = gesture_.y();
@@ -224,7 +244,7 @@ public:
         note_left_ -= dt;
         if (rumble_left_ > 0) { // Test rumble
             rumble_left_ -= dt;
-            app.input().set_rumble(rumble_player_, rumble_left_ > 0 ? PadRumble{true, 200} : PadRumble{});
+            app.input().set_rumble(rumble_player_, rumble_left_ > 0 ? PadRumble{200, 200} : PadRumble{});
         }
         if (capture_.state != Capture::State::Idle) {
             update_capture(app, dt);
@@ -524,6 +544,26 @@ private:
                    {"16:9", "4:3", "Fill screen"}, int(app.aspect()),
                    [a](int i) { a->set_aspect(platform::Aspect(i)); });
 
+        // [video] gamma (App::set_gamma), and a row back to 1 while it is not.
+        if (!vr) {
+            const float g = app.gamma();
+            const bool changed = render::gamma_changes(g);
+            char text[24];
+            std::snprintf(text, sizeof(text), changed ? "%.2f" : "%.2f (default)", double(g));
+            Row& gamma = slider("Gamma",
+                                "Lighter or darker shadows and middle tones over the whole picture, to suit your "
+                                "screen; black and white stay. Higher is brighter. 1.00: GT3's colors unchanged. "
+                                "Screenshots keep GT3's colors.",
+                                g, render::kGammaMin, render::kGammaMax, render::kGammaStep, text,
+                                [a](float v) { a->set_gamma(v); });
+            if (!app.gamma_available()) {
+                gamma.enabled = false;
+                gamma.desc = "Needs the 3D renderer (turn it on and restart).";
+            }
+            if (changed)
+                action("Reset gamma to 1.00", "Back to GT3's colors, unchanged.", "", [a] { a->set_gamma(1.0f); });
+        }
+
         bool vsync = cfg.get("video", "vsync").value_or("1") != "0";
         toggle("VSync", "Wait for the display refresh: no tearing. Off: lower input latency.", vsync, [a](bool v) {
             a->config().set("video", "vsync", v ? "1" : "0");
@@ -650,6 +690,26 @@ private:
                              });
         detail.enabled = scale.enabled;
         if (!detail.enabled) detail.desc = msaa.desc;
+
+        Row& rims = toggle("Showroom wheels in races",
+                           "Cars up close get the detailed rims and tires of the car menus. Off: GT3's race "
+                           "wheels, flat rims with painted spokes.",
+                           app.showroom_wheels(), [a](bool v) {
+                               a->config().set("video", "showroom_wheels", v ? "on" : "off");
+                               a->save_config();
+                           });
+        rims.enabled = scale.enabled;
+        if (!rims.enabled) rims.desc = msaa.desc;
+
+        // [video] heat_haze = on | off (default off; RaceScreen::add_screen_passes)
+        Row& haze = toggle("Heat haze in replays",
+                           "GT3's heat shimmer over some trackside camera shots in replays, on some courses.",
+                           to_lower(cfg.get("video", "heat_haze").value_or("off")) == "on", [a](bool v) {
+                               a->config().set("video", "heat_haze", v ? "on" : "off");
+                               a->save_config();
+                           });
+        haze.enabled = scale.enabled;
+        if (!haze.enabled) haze.desc = msaa.desc;
 
         // [video] gpu = auto | gles | gles_driver | 0 (App::init)
         const std::string gpu_cfg = to_lower(cfg.get("video", "gpu").value_or("auto"));
@@ -936,6 +996,86 @@ private:
                });
     }
 
+    // The save folder (game/save_folder.h): GT Mode's saves and the replays.
+    void build_saves(App& app) {
+        App* a = &app;
+        heading("Saves and replays");
+        const bool chosen = app.save_folder_chosen();
+        const bool mobile = platform::is_mobile();
+        const bool picked = platform::is_document_tree_path(app.save_folder()); // Android's
+        // Looked at again when the folder changes or the game comes back to the foreground (a
+        // picked folder's name and access are its provider's).
+        if (saves_view_.folder != app.save_folder()) {
+            saves_view_.folder = app.save_folder();
+            saves_view_.reachable = app.save_folder_reachable();
+            std::string shown = saves_view_.folder;
+            while (shown.size() > 1 && (shown.back() == '/' || shown.back() == '\\')) shown.pop_back();
+#if defined(SDL_PLATFORM_ANDROID)
+            if (picked) shown = platform::document_tree_name(platform::document_tree_of(shown));
+            if (picked && shown.empty()) shown = "Picked folder";
+#endif
+            // Phones and tablets: the chosen folder by its name, the game's as the Files app shows it.
+            if (mobile && !picked) shown = shown.substr(shown.find_last_of("/\\") + 1);
+            if (!chosen) shown = mobile ? "GT3 Revisited" : "Game's user data folder";
+            saves_view_.shown = std::move(shown);
+        }
+        Row& r = action("Save folder",
+                        to_game_ ? std::string("Change it in Settings from GT3 Revisited's main menu.")
+                                 : std::string("Cross: choose another folder for GT Mode saves and replays, such as one a sync "
+                                               "app keeps the same on your other devices. A folder without saves gets a copy "
+                                               "of yours; one with saves is used as it is."),
+                        saves_view_.shown, [this, a] { choose_save_folder(*a); });
+        r.enabled = !to_game_;
+        if (chosen && !saves_view_.reachable)
+            info("", "Can't be reached",
+                 "The folder is gone, its drive or memory card is out, or the game no longer has access to it. "
+                 "Choose it again, or go back to the game's folder.");
+        if (chosen) {
+            Row& back = action("Use the game's save folder",
+                               "Back to the game's user data folder: its saves and replays are used as they are (a copy of "
+                               "yours goes there if it has none).",
+                               "", [this, a] { use_save_folder(*a, ""); });
+            back.enabled = !to_game_;
+        }
+        // Phones and tablets open only the game's folder (in the Files app).
+        if (!picked && (!mobile || !chosen))
+            action("Open save folder",
+                   mobile ? "Opens it in the Files app (GT3 Revisited > saves)." : "Shows it in the file manager.", "",
+                   [this, a] {
+                       const std::string dir = a->save_folder() + "saves";
+                       host_make_dir(dir);
+                       if (platform::open_user_folder(dir, a->data_dir())) return;
+                       note_ = "Could not open " + dir;
+                       note_left_ = 4;
+                   });
+    }
+
+    void choose_save_folder(App& app) {
+        if (folder_picking_ || to_game_) return;
+        if (!platform::start_folder_pick(app.window(), app.save_folder_chosen() ? app.save_folder() : std::string(),
+                                         platform::FolderUse::Saves)) {
+            note_ = "Could not show a folder picker";
+            note_left_ = 4;
+            return;
+        }
+        folder_picking_ = true;
+        folder_use_ = platform::FolderUse::Saves;
+        app.input().hold_background(true); // macOS: the dialog's sheet takes the window's focus
+    }
+
+    void use_save_folder(App& app, const std::string& path) {
+        game::SaveFolderCopy copied;
+        if (!app.set_save_folder(path, &copied)) {
+            note_ = "Could not copy your saves and replays into that folder (nothing changed)";
+        } else if (copied.saves || copied.replays) {
+            note_ = "Copied in: " + std::to_string(copied.saves) + (copied.saves == 1 ? " save, " : " saves, ") +
+                    std::to_string(copied.replays) + (copied.replays == 1 ? " replay" : " replays");
+        } else {
+            note_ = path.empty() ? "Saves and replays are in the game's folder again" : "Saves and replays now go to this folder";
+        }
+        note_left_ = 6;
+    }
+
     void open_music_folder(App& app) {
         if (platform::open_user_folder(app.music_folder(), app.data_dir())) return;
         note_ = "Could not open " + app.music_folder();
@@ -950,6 +1090,7 @@ private:
             return;
         }
         folder_picking_ = true;
+        folder_use_ = platform::FolderUse::Music;
         app.input().hold_background(true); // macOS: the dialog's sheet takes the window's focus
     }
 
@@ -960,12 +1101,23 @@ private:
         folder_picking_ = false;
         app.input().hold_background(false);
         using Kind = platform::FolderAnswer::Kind;
+        if (folder_use_ == platform::FolderUse::Saves) {
+            switch (answer->kind) {
+            case Kind::Picked: use_save_folder(app, answer->path); return;
+            case Kind::Cancelled: return;
+            case Kind::NotKept: note_ = "That folder's app doesn't let the game keep using it: choose another"; break;
+            default: note_ = "Could not show a folder picker"; break;
+            }
+            note_left_ = 6;
+            return;
+        }
         access_refused_ = answer->kind == Kind::NoAccess;
         switch (answer->kind) {
         case Kind::Picked: app.set_music_folder(answer->path); return;
         case Kind::Cancelled: break;
         case Kind::NoAccess: note_ = "Music access not allowed: Allow music access opens Android's settings"; break;
         case Kind::Elsewhere: note_ = "Choose a folder on this device or its memory card (not in a cloud drive)"; break;
+        case Kind::NotKept: // (save folders only)
         case Kind::Failed: note_ = "Could not show a folder picker"; break;
         }
         if (answer->kind != Kind::Cancelled) note_left_ = 6;
@@ -1007,6 +1159,20 @@ private:
                            a->input().set_background(v);
                            a->save_config();
                        });
+#ifdef SDL_PLATFORM_WINDOWS
+            // [input] xbox_driver: SDL takes it at start (App::init).
+            {
+                Row& xbox = choice("Xbox controllers",
+                                   "Raw Input: impulse triggers. XInput: no impulse triggers; try it if an Xbox "
+                                   "controller misbehaves.",
+                                   {"Raw Input", "XInput"}, in.xbox_rawinput() ? 0 : 1, [a](int i) {
+                                       a->input().set_xbox_rawinput(i == 0);
+                                       a->save_config();
+                                   });
+                xbox.restart = in.xbox_rawinput() != SDL_GetHintBoolean(SDL_HINT_JOYSTICK_RAWINPUT, false);
+                if (xbox.restart) xbox.desc = "Takes effect after restarting GT3 Revisited.";
+            }
+#endif
         }
         for (int p = 0; p < InputManager::kMaxPlayers; ++p) {
             heading(p == 0 ? "Player 1" : "Player 2 (split screen)");
@@ -1075,6 +1241,20 @@ private:
                            a->input().set_keyboard(p, v);
                            a->save_config();
                        });
+            {
+                const float c = in.steering_curve(p);
+                char text[24];
+                std::snprintf(text, sizeof(text), std::fabs(c - 1.0f) < 0.005f ? "%.1f (linear)" : "%.1f", double(c));
+                slider(in.wheel_steering(p) ? "Wheel steering curve" : "Steering curve",
+                       "Races. 1.0 steers as far as you turn. Higher: finer near the centre (a wheel set to a small "
+                       "rotation). Lower: quicker off the centre (a large rotation). Full lock stays at the end. A "
+                       "wheel and other controllers each keep their own.",
+                       c, InputManager::kSteeringCurveMin, InputManager::kSteeringCurveMax, 0.1f, text,
+                       [a, p](float v) {
+                           a->input().set_steering_curve(p, v);
+                           a->save_config();
+                       });
+            }
             binding_rows(app, p);
         }
     }
@@ -1091,22 +1271,49 @@ private:
             t.button = b;
             return t;
         };
-        auto axis = [](PadAxis x) {
+        auto axis = [](PadAxis x, InputSource::Half half = InputSource::Half::Full) {
             PadTarget t;
             t.kind = PadTarget::Kind::Axis;
             t.axis = x;
+            t.half = half;
             return t;
         };
         const bool gt3 = in.race_uses_menu_pad(p);
         heading(who + "race controls").columns = true;
+        // Ours: the look around after Look back. Its stick on the whole axes, buttons and keys on
+        // Look left / right (RX's halves; behind is Look back's).
         for (const PadTarget& t : {button(PadButton::Cross), button(PadButton::Square), button(PadButton::R2),
                                    button(PadButton::L2), button(PadButton::Circle), button(PadButton::Triangle),
-                                   button(PadButton::R1), button(PadButton::L1), button(PadButton::Start),
+                                   button(PadButton::R1), button(PadButton::L1), axis(PadAxis::RX),
+                                   axis(PadAxis::RY), axis(PadAxis::RX, InputSource::Half::Negative),
+                                   axis(PadAxis::RX, InputSource::Half::Positive), button(PadButton::Start),
                                    axis(PadAxis::LX), button(PadButton::Left), button(PadButton::Right),
                                    button(PadButton::R3)}) {
-            Row& r = binding(app, p, true, t);
+            // Look left / right lists its stick only: its halves have rows of their own.
+            Row& r = binding(app, p, true, t, t.kind == PadTarget::Kind::Axis && t.axis == PadAxis::RX);
             if (!gt3) continue;
-            // GT3 original: the race reads the menu pad, so the menu button's inputs drive it.
+            // GT3 original: the race reads the menu pad, so the menu button's inputs drive it. R3 (the
+            // right stick's click) looks back as well as L1 (race::look_back_held), so no input shows
+            // the overlay.
+            const bool look_back = t.kind == PadTarget::Kind::Button && t.button == PadButton::L1;
+            if (look_back) {
+                auto with_r3 = [&](std::string& column, BindingSet s) {
+                    const std::string r3 = inputs(in, p, in.bindings(p, true, s), button(PadButton::R3));
+                    if (!r3.empty()) column += (column.empty() ? "" : ", ") + r3;
+                };
+                if (in.kind(p) != DeviceKind::Keyboard) with_r3(r.value, BindingSet::Controller);
+                with_r3(r.keys, BindingSet::Keyboard);
+                r.label += " (L1, R3)";
+                r.desc = "GT3 original: the race reads the menu buttons, so this is L1's and R3's (the right stick's "
+                         "click). Editing it makes custom race controls from GT3 original plus the change.";
+                continue;
+            }
+            if (t.kind == PadTarget::Kind::Button && t.button == PadButton::R3) {
+                r.value.clear(), r.keys.clear();
+                r.desc = "GT3 original: the menu buttons' R3 looks back, so nothing shows the overlay. Editing it "
+                         "makes custom race controls from GT3 original plus the change.";
+                continue;
+            }
             r.label += " (" + target_name(t) + ")";
             r.desc = "GT3 original: the race reads the menu buttons, so this is " + target_name(t) +
                      "'s. Editing it makes custom race controls from GT3 original plus the change.";
@@ -1138,26 +1345,33 @@ private:
 
     static std::string target_name(const PadTarget& t) {
         static const char* const kAxes[] = {"Left stick X", "Left stick Y", "Right stick X", "Right stick Y"};
-        if (t.kind == PadTarget::Kind::Axis) return kAxes[size_t(t.axis)];
+        if (t.kind == PadTarget::Kind::Axis)
+            return std::string(kAxes[size_t(t.axis)]) +
+                   (t.half == InputSource::Half::Negative ? " -" : t.half == InputSource::Half::Positive ? " +" : "");
         return std::string(pad_button_name(t.button));
     }
 
     // A control's inputs in one set, as the player's device names them ("Cross", "Right paddle").
-    static std::string inputs(const InputManager& in, int player, const Profile& prof, const PadTarget& t) {
+    // An axis lists its halves' inputs too ("-A, +D"), unless `exact`; a half lists its own.
+    static std::string inputs(const InputManager& in, int player, const Profile& prof, const PadTarget& t,
+                              bool exact = false) {
         std::string out;
         for (const Binding& b : prof.bindings) {
+            const bool same_half = t.kind == PadTarget::Kind::Axis && (exact || t.half != InputSource::Half::Full);
             const bool match = b.target.kind == t.kind &&
-                               (t.kind == PadTarget::Kind::Button ? b.target.button == t.button : b.target.axis == t.axis);
+                               (t.kind == PadTarget::Kind::Button ? b.target.button == t.button : b.target.axis == t.axis) &&
+                               (!same_half || b.target.half == t.half);
             if (!match) continue;
             if (!out.empty()) out += ", ";
-            if (b.target.kind == PadTarget::Kind::Axis && b.target.half != InputSource::Half::Full)
+            if (b.target.kind == PadTarget::Kind::Axis && b.target.half != InputSource::Half::Full && !same_half)
                 out += b.target.half == InputSource::Half::Positive ? "+" : "-";
             out += in.describe(player, b.source);
         }
         return out;
     }
 
-    Row& binding(App& app, int p, bool race, const PadTarget& t) {
+    // `exact`: an axis whose halves have rows of their own lists only its whole-axis inputs (inputs()).
+    Row& binding(App& app, int p, bool race, const PadTarget& t, bool exact = false) {
         App* a = &app;
         InputManager& in = app.input();
         const std::string label = race ? std::string(race_action_name(t)) : target_name(t);
@@ -1167,8 +1381,8 @@ private:
         r.player = p;
         r.race = race;
         r.target = t;
-        r.value = in.kind(p) == DeviceKind::Keyboard ? "" : inputs(in, p, in.bindings(p, race, BindingSet::Controller), t);
-        r.keys = inputs(in, p, in.bindings(p, race, BindingSet::Keyboard), t);
+        r.value = in.kind(p) == DeviceKind::Keyboard ? "" : inputs(in, p, in.bindings(p, race, BindingSet::Controller), t, exact);
+        r.keys = inputs(in, p, in.bindings(p, race, BindingSet::Keyboard), t, exact);
         r.activate = [a, this, p, race, t, label] {
             guard_edit(*a, p, race, [this, p, race, t, label] { start_capture(p, race, t, false, label); });
         };
@@ -1311,12 +1525,16 @@ private:
             end_capture(app);
             return;
         }
-        if (auto src = in.poll_capture()) {
-            const bool bound = capture_.race ? in.bind_race(capture_.player, capture_.target, *src, !capture_.append)
-                                             : in.bind(capture_.player, capture_.target, *src, !capture_.append);
+        if (auto c = in.poll_capture()) {
+            const bool bound =
+                capture_.race ? in.bind_race(capture_.player, capture_.target, c->source, !capture_.append, c->rest)
+                              : in.bind(capture_.player, capture_.target, c->source, !capture_.append, c->rest);
             if (!bound) {
-                note_ = capture_.race ? "A button or key can't steer both ways: bind it to Steer left or Steer right."
-                                      : "A button or key can't move a stick both ways: use the D-pad rows.";
+                const PadAxis axis = capture_.target.axis;
+                note_ = !capture_.race           ? "A button or key can't move a stick both ways: use the D-pad rows."
+                        : axis == PadAxis::RX ? "A button or key can't look both ways: bind it to Look left or Look right."
+                        : axis == PadAxis::RY ? "A button or key can't look both ways: bind it to Look back."
+                                              : "A button or key can't steer both ways: bind it to Steer left or Steer right.";
                 note_left_ = 4;
             }
         } else if (capture_.timer > 0 && in.capturing()) {
@@ -1371,16 +1589,15 @@ private:
         for (int p = 0; p < InputManager::kMaxPlayers; ++p) {
             heading(p == 0 ? "Player 1" : "Player 2 (split screen)");
             {
-                // Auto shows what it plays on the controller in use.
+                // Auto shows what it plays.
                 static const char* const kModes[] = {"auto", "modern", "gt3"};
                 const std::string& mode = in.rumble_mode(p);
                 const int midx = mode == "modern" ? 1 : mode == "gt3" ? 2 : 0;
-                const char* const autos = gt3_rumble("auto", in.dualsense(p)) ? "Auto: GT3 original" : "Auto: Modern";
                 choice("Rumble",
-                       "Modern: wall and car hits, curbs, off-road, wheelspin and slides. GT3 original: GT3's own "
-                       "rumble, which most controllers play much stronger than a DualShock 2. Auto: GT3 original on a "
-                       "DualSense.",
-                       {autos, "Modern", "GT3 original"}, midx, [a, p](int i) {
+                       "Modern: both grips, hits and off-road stronger in the left, curbs, wheelspin, slides and "
+                       "locked wheels in the right. GT3 original: GT3's own rumble, which most controllers play "
+                       "much stronger than a DualShock 2.",
+                       {"Auto: Modern", "Modern", "GT3 original"}, midx, [a, p](int i) {
                            a->input().set_rumble_mode(p, kModes[i]);
                            a->save_config();
                        });
@@ -1410,7 +1627,7 @@ private:
             apply(n);
         });
         size_t base = rows_.size();
-        toggle("Trigger effects", "DualSense brake resistance and ABS pulse; Xbox impulse triggers.", c.triggers,
+        toggle("Trigger effects", "DualSense brake resistance, ABS pulse and wheelspin buzz; Xbox impulse triggers.", c.triggers,
                           [apply, c](bool v) {
                               ForceFeedbackConfig n = c;
                               n.triggers = v;
@@ -1499,6 +1716,13 @@ private:
                    n.steer_range = v;
                    apply(n);
                });
+        toggle("Look around", "Drag sideways on the open screen, away from the controls, to turn the camera; "
+                              "drag farther to look behind. Let go and it turns back.",
+               c.look, [apply, c](bool v) {
+                   TouchConfig n = c;
+                   n.look = v;
+                   apply(n);
+               });
         slider("Tilt deadzone", "Tilt steering ignores this much turn around the centre.", c.tilt_deadzone, 0, 0.5f,
                0.01f, percent(c.tilt_deadzone), [apply, c](float v) {
                    TouchConfig n = c;
@@ -1566,8 +1790,12 @@ private:
         } else {
             info("Current disc", "None");
         }
-        action("Browse for a disc image...", "Pick a .iso made from your own Gran Turismo 3 A-Spec disc.", "",
+        action("Browse for a disc image...", "Pick a .iso or .chd made from your own Gran Turismo 3 A-Spec disc.", "",
                [a] { a->show_open_dialog(); });
+        if (!app.last_error().empty() && !app.failed_disc_path().empty())
+            info("Last error", app.last_error(), elide_middle(app.failed_disc_path(), 77));
+
+        build_saves(app);
 
         std::vector<std::string> recent = app.recent_discs();
         if (!recent.empty()) heading("Recent disc images");
@@ -1586,8 +1814,6 @@ private:
             r.dim = is_current;
             r.remove = [a, p] { a->forget_recent_disc(p); };
         }
-        if (!app.last_error().empty() && !app.failed_disc_path().empty())
-            info("Last error", app.last_error(), elide_middle(app.failed_disc_path(), 77));
 
         heading("Startup");
         bool hub = to_lower(cfg.get("app", "start").value_or("")) == "hub";
@@ -1892,7 +2118,12 @@ private:
     Press press_;
     Layout lay_;
     Capture capture_;    // a binding being captured (Controls)
-    bool folder_picking_ = false; // the music folder's picker is open
+    bool folder_picking_ = false; // a folder picker is open
+    platform::FolderUse folder_use_ = platform::FolderUse::Music; // the open picker's
+    struct SavesView {
+        std::string folder, shown; // App::save_folder() as of the last look, and its name
+        bool reachable = true;
+    } saves_view_;
     bool access_refused_ = false; // Android: music access refused at the last pick
     struct Confirm {
         bool active = false, replace = false; // replace: the focused answer (Cancel first)

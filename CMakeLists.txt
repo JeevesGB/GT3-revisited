@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GT3Revisited VERSION 0.6.0 LANGUAGES C CXX)
+project(GT3Revisited VERSION 0.6.1 LANGUAGES C CXX)
 
 # GT3 Revisited: an open reimplementation of the Gran Turismo 3 engine.
 # No game data is part of this project; everything is read at runtime from
@@ -42,7 +42,7 @@ file(GLOB_RECURSE GT3R_ENGINE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/
 list(FILTER GT3R_ENGINE_SOURCES EXCLUDE REGEX "/src/app/")
 add_library(gt3r_engine STATIC ${GT3R_ENGINE_SOURCES})
 target_include_directories(gt3r_engine PUBLIC src)
-target_link_libraries(gt3r_engine PUBLIC SDL3::SDL3 ZLIB::ZLIB)
+target_link_libraries(gt3r_engine PUBLIC SDL3::SDL3 ZLIB::ZLIB chdr-static)
 if(GT3R_LIBTOOL_QUIET)
   set_target_properties(gt3r_engine PROPERTIES STATIC_LIBRARY_OPTIONS ${GT3R_LIBTOOL_QUIET})
 endif()

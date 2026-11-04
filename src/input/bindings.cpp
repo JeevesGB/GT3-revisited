@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdlib>
 
 namespace gt3r {
@@ -382,7 +383,7 @@ void Profile::remove_target(const PadTarget& target) {
     std::erase_if(bindings, [&](const Binding& b) { return b.target == target; });
 }
 
-void Profile::bind(const PadTarget& target, const InputSource& source, bool replace) {
+void Profile::bind(const PadTarget& target, const InputSource& source, bool replace, AxisInfo axis) {
     // Clear both the full axis and its halves when replacing an axis binding.
     if (replace) {
         remove_target(target);
@@ -401,10 +402,18 @@ void Profile::bind(const PadTarget& target, const InputSource& source, bool repl
     b.target = target;
     b.source = source;
     // A full stick axis bound to a full pad axis drops the captured half.
-    if (target.kind == PadTarget::Kind::Axis && target.half == InputSource::Half::Full && source.is_analog())
-        b.source.half = InputSource::Half::Full;
-    if (source.kind == InputSource::Kind::PadAxis || source.kind == InputSource::Kind::JoyAxis)
-        if (target.kind == PadTarget::Kind::Axis) b.options.deadzone = 0.08f;
+    const bool whole_axis = target.kind == PadTarget::Kind::Axis && target.half == InputSource::Half::Full;
+    if (whole_axis && source.is_analog()) b.source.half = InputSource::Half::Full;
+    if (source.kind == InputSource::Kind::PadAxis || source.kind == InputSource::Kind::JoyAxis) {
+        if (!whole_axis && std::fabs(axis.rest) > 0.5f) {
+            // Resting at an end: its whole travel, not the half past the middle (issue 134).
+            b.source.half = InputSource::Half::Full;
+            b.options.pedal = true;
+            b.options.invert = axis.rest > 0;
+        } else if (!axis.wheel && target.kind == PadTarget::Kind::Axis) {
+            b.options.deadzone = kStickDeadzone;
+        }
+    }
     bindings.push_back(b);
     name = "custom";
 }
@@ -507,7 +516,7 @@ void add_modern_race_pad(Profile& p) {
     p.add("Down", "pad.dpdown");
     p.add("LX", "pad.leftx deadzone=0.08");
     p.add("LY", "pad.lefty deadzone=0.08");
-    p.add("RX", "pad.rightx deadzone=0.08");
+    p.add("RX", "pad.rightx deadzone=0.08"); // look around
     p.add("RY", "pad.righty deadzone=0.08");
 }
 
@@ -574,7 +583,16 @@ Profile make_race_preset(std::string_view layout, std::string_view device_preset
 }
 
 std::string_view race_action_name(const PadTarget& t) {
-    if (t.kind == PadTarget::Kind::Axis) return t.axis == PadAxis::LX ? "Steer" : "";
+    if (t.kind == PadTarget::Kind::Axis) {
+        using H = InputSource::Half;
+        switch (t.axis) {
+        case PadAxis::LX: return "Steer";
+        // Ours: the look around (race/camera_rig.h), the right stick's.
+        case PadAxis::RX: return t.half == H::Negative ? "Look left" : t.half == H::Positive ? "Look right" : "Look left / right";
+        case PadAxis::RY: return t.half == H::Full ? "Look ahead / behind" : "";
+        default: return "";
+        }
+    }
     if (t.kind != PadTarget::Kind::Button) return "";
     switch (t.button) {
     case PadButton::Cross: return "Accelerate";
@@ -862,6 +880,15 @@ void PlayerBindings::begin_custom(DeviceKind kind, bool race) {
     Profile keys = set(kind, race, BindingSet::Keyboard);
     std::optional<Profile> controller;
     if (kind != DeviceKind::Keyboard) controller = set(kind, race, BindingSet::Controller);
+    // Under "gt3" the menu's R3 looks back in races (race::look_back_held): the copies keep it there.
+    if (race && race_layout == "gt3") {
+        auto keep_look_back = [](Profile& p) {
+            for (Binding& b : p.bindings)
+                if (b.target.kind == PadTarget::Kind::Button && b.target.button == PadButton::R3) b.target.button = PadButton::L1;
+        };
+        keep_look_back(keys);
+        if (controller) keep_look_back(*controller);
+    }
     keys.name = "custom";
     slot(kind, race, BindingSet::Keyboard) = std::move(keys);
     if (controller) {
@@ -884,7 +911,7 @@ Profile PlayerBindings::combined(DeviceKind kind, bool race) const {
 }
 
 bool PlayerBindings::bind(DeviceKind kind, bool race, const PadTarget& target, const InputSource& source,
-                          bool replace) {
+                          bool replace, AxisInfo axis) {
     if (target.kind == PadTarget::Kind::Axis && target.half == InputSource::Half::Full && !source.is_analog())
         return false;
     begin_custom(kind, race);
@@ -892,7 +919,13 @@ bool PlayerBindings::bind(DeviceKind kind, bool race, const PadTarget& target, c
     if (s == BindingSet::Controller && kind == DeviceKind::Keyboard) kind = controller_kind(source);
     std::optional<Profile>& c = slot(kind, race, s);
     if (!c) c = set(kind, race, s); // as it stands (under "gt3", the menu's)
-    c->bind(target, source, replace);
+    // The race's RX halves are controls of their own (Look left / right): replacing the whole axis keeps them.
+    if (race && replace && target.kind == PadTarget::Kind::Axis && target.axis == PadAxis::RX &&
+        target.half == InputSource::Half::Full) {
+        c->remove_target(target);
+        replace = false;
+    }
+    c->bind(target, source, replace, axis);
     return true;
 }
 
@@ -926,6 +959,12 @@ void PlayerBindings::load(const IniDocument& cfg, const std::string& sec) {
                        read(sec + ".joystick.bindings", BindingSet::Controller)};
     controller_race = {read(sec + ".race", BindingSet::Controller), read(sec + ".wheel.race", BindingSet::Controller),
                        read(sec + ".joystick.race", BindingSet::Controller)};
+    for (std::optional<Profile>* p : {&controller_menu[1], &controller_race[1]})
+        if (*p)
+            for (Binding& b : (*p)->bindings)
+                if (b.source.kind == InputSource::Kind::JoyAxis && b.target.kind == PadTarget::Kind::Axis &&
+                    b.options.deadzone == kStickDeadzone)
+                    b.options.deadzone = 0;
     keyboard_menu = read(sec + ".keyboard.bindings", BindingSet::Keyboard);
     keyboard_race = read(sec + ".keyboard.race", BindingSet::Keyboard);
     race_custom_on = to_lower(cfg.get(sec, "race_custom").value_or("on")) != "off";
