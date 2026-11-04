@@ -617,6 +617,35 @@ def map_bounds(editable_dir: Path) -> tuple[float, float, float, float] | None:
     return min(xs) - pad, min(zs) - pad, max(xs) + pad, max(zs) + pad
 
 
+def zip_work_folder(editable_dir: Path, zip_path: Path) -> str:
+    """Zip an unpacked work folder for sharing / backup."""
+    import zipfile
+    editable_dir = Path(editable_dir)
+    zip_path = Path(zip_path)
+    if not (editable_dir / "manifest.json").is_file():
+        raise FileNotFoundError("not a work folder (missing manifest.json)")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in editable_dir.rglob("*"):
+            if p.is_file():
+                zf.write(p, p.relative_to(editable_dir).as_posix())
+    return f"zipped {editable_dir} -> {zip_path} ({zip_path.stat().st_size} bytes)"
+
+
+def unzip_work_folder(zip_path: Path, dest: Path) -> str:
+    import zipfile
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(dest)
+    if not (dest / "manifest.json").is_file():
+        # maybe single top-level folder inside zip
+        subs = [p for p in dest.iterdir() if p.is_dir()]
+        if len(subs) == 1 and (subs[0] / "manifest.json").is_file():
+            return f"unzipped -> {subs[0]}"
+        raise ValueError("zip does not look like a course work folder")
+    return f"unzipped -> {dest}"
+
+
 def main_cli(argv: list[str] | None = None) -> None:
     import argparse
 
@@ -645,6 +674,19 @@ def main_cli(argv: list[str] | None = None) -> None:
     p_bl.add_argument("outdir")
     p_bl.add_argument("--y-up", action="store_true", help="keep GT3 Y-up (default Z-up)")
 
+    p_obj = sub.add_parser("import-obj", help="write OBJ vertex positions into GTRW (same count)")
+    p_obj.add_argument("indir")
+    p_obj.add_argument("obj")
+    p_obj.add_argument("--y-up", action="store_true", help="OBJ is Y-up (default assumes Z-up Blender export)")
+
+    p_sc = sub.add_parser("export-scenery", help="export GTM1/scenery slots + heuristic point clouds")
+    p_sc.add_argument("indir")
+    p_sc.add_argument("outdir")
+
+    p_zip = sub.add_parser("zip-work", help="zip an unpacked work folder")
+    p_zip.add_argument("indir")
+    p_zip.add_argument("zipfile")
+
     args = ap.parse_args(argv)
     if args.cmd == "info":
         print(section_info_text(Path(args.course)))
@@ -659,6 +701,14 @@ def main_cli(argv: list[str] | None = None) -> None:
     elif args.cmd == "export-blender":
         from blender_export import export_for_blender
         print(export_for_blender(Path(args.indir), Path(args.outdir), z_up=not args.y_up))
+    elif args.cmd == "import-obj":
+        from mesh_io import import_obj_into_gtrw
+        print(import_obj_into_gtrw(Path(args.indir), Path(args.obj), from_z_up=not args.y_up))
+    elif args.cmd == "export-scenery":
+        from mesh_io import export_gtm1_scenery
+        print(export_gtm1_scenery(Path(args.indir), Path(args.outdir), z_up=True))
+    elif args.cmd == "zip-work":
+        print(zip_work_folder(Path(args.indir), Path(args.zipfile)))
 
 
 if __name__ == "__main__":

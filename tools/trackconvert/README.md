@@ -1,62 +1,37 @@
 # GT3 Course Tool
 
-Standalone unpack / preview / edit / pack utility for Gran Turismo 3 course files
-(as used by GT3-revisited).
-
-## Features
-
-| Area | What you can do |
-|------|------------------|
-| **Container** | Unpack/pack 48-slot course files; opaque blob round-trip |
-| **Start grid** | Edit positions + yaw (in-place, same count) |
-| **Checkpoints** | Edit sector/line segments |
-| **Markers** | Edit distance markers on the race line |
-| **AI lines** | Edit control points (x, z, radius, heading, flags) on lines 0–6 |
-| **Materials** | Read-only triangle material histogram |
-| **Map** | Top-down preview: grid, checkpoints, AI, sampled walls |
-
-## Layout
-
-```text
-tools/course_tool/
-  course_lib.py
-  course_tool_gui.py
-  build_exe.bat
-  README.md
-```
+Professional PyQt6 workspace for unpacking, map-editing, Blender export, and packing GT3 course files (GT3-revisited).
 
 ## Run
 
 ```bash
-python tools/course_tool/course_tool_gui.py
-
-# CLI
-python tools/course_tool/course_lib.py info course
-python tools/course_tool/course_lib.py unpack course out/work
-python tools/course_tool/course_lib.py patch-gtrw out/work
-python tools/course_tool/course_lib.py patch-ai out/work
-python tools/course_tool/course_lib.py pack out/work course_mod
+pip install PyQt6
+python tools/trackconvert/course_tool_qt.py
 ```
 
-## GUI workflow
+## Workspace features
 
-1. Browse course → **Unpack**
-2. **Map** tab to orient; toggle layers
-3. Edit tables → **Apply to row**
-4. **Patch GTRW** and/or **Patch AI**
-5. **Pack course** for GT3-revisited
+- Dark Fusion theme, dockable **Inspector / Overview / Output**
+- Persistent window layout, last paths, **recent courses** (`QSettings`)
+- Dirty-state tracking with save prompt on exit
+- Status bar: clean/modified · stats · work path
+- Map: zoom / pan / drag handles (grid, AI, checkpoints)
+- Background **batch** with progress + cancel
+- Full edit pipeline: JSON · Patch GTRW/AI · Pack · OBJ import/export
 
-## Standalone EXE
+## Modules
 
-```bat
-cd tools\course_tool
-build_exe.bat
+| File | Role |
+|------|------|
+| `course_tool_qt.py` | Main workspace GUI |
+| `course_lib.py` | Unpack / pack / patch / zip |
+| `blender_export.py` | Road OBJ + Blender helper |
+| `mesh_io.py` | OBJ→GTRW, scenery dump |
+| `course_tool_gui.py` | Legacy tkinter UI |
+
+## PyInstaller
+
+```bash
+pyinstaller --noconfirm --windowed --onefile --name GT3CourseTool ^
+  --paths tools/trackconvert tools/trackconvert/course_tool_qt.py
 ```
-
-→ `dist/GT3CourseTool.exe`
-
-## Limits
-
-- Cannot add/remove grid slots, checkpoints, markers, or AI points
-- Scenery / visibility / env: copy-through only
-- Always keep backups of original courses

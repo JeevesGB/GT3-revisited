@@ -52,6 +52,16 @@ class CourseToolApp(tk.Tk):
         self._ai_lines: list[dict] = []
         self._walls: list[dict] = []
 
+        # Map interaction (screen ↔ world)
+        self._map_tf: dict | None = None  # margin, scale, min_x, min_z, h
+        self._sel_grid: int | None = None
+        self._drag: dict | None = None  # {kind: grid|ai|cp, ...}
+        self._overview_text: tk.Text | None = None
+        self.map_tool = tk.StringVar(value="grid")  # grid | ai | checkpoint
+        self.cp_move_whole = tk.BooleanVar(value=False)
+        self._undo: list = []
+        self._redo: list = []
+
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -74,6 +84,12 @@ class CourseToolApp(tk.Tk):
             ("Patch AI", self._on_patch_ai),
             ("Pack course", self._on_pack),
             ("Export Blender", self._on_export_blender),
+            ("Import OBJ→GTRW", self._on_import_obj),
+            ("Export scenery", self._on_export_scenery),
+            ("Zip work", self._on_zip_work),
+            ("Batch…", self._on_batch),
+            ("Undo", self._on_undo),
+            ("Redo", self._on_redo),
             ("Redraw map", self._redraw_map),
         ):
             ttk.Button(act, text=text, command=cmd).pack(side="left", padx=2)
@@ -87,9 +103,11 @@ class CourseToolApp(tk.Tk):
         self.marker_frame = ttk.Frame(nb)
         self.ai_frame = ttk.Frame(nb)
         self.mat_frame = ttk.Frame(nb)
+        self.overview_frame = ttk.Frame(nb)
         self.log_frame = ttk.Frame(nb)
 
         nb.add(self.map_frame, text="Map")
+        nb.add(self.overview_frame, text="Overview")
         nb.add(self.grid_frame, text="Start grid")
         nb.add(self.cp_frame, text="Checkpoints")
         nb.add(self.marker_frame, text="Markers")
@@ -113,10 +131,37 @@ class CourseToolApp(tk.Tk):
         ttk.Spinbox(
             map_tools, from_=0, to=6, width=4, textvariable=self.ai_line_sel, command=self._redraw_map
         ).pack(side="left")
+        ttk.Label(map_tools, text="  Drag:").pack(side="left", padx=(12, 2))
+        for val, lab in (("grid", "Grid"), ("ai", "AI pts"), ("checkpoint", "CP ends")):
+            ttk.Radiobutton(
+                map_tools, text=lab, value=val, variable=self.map_tool, command=self._redraw_map
+            ).pack(side="left", padx=2)
+        ttk.Checkbutton(
+            map_tools, text="Move whole CP", variable=self.cp_move_whole
+        ).pack(side="left", padx=8)
+
+        ttk.Label(
+            self.map_frame,
+            text="Drag on map · arrow keys nudge selection (Shift=fine) · Undo/Redo · then Save JSON + Patch",
+        ).pack(anchor="w", padx=8)
+
+        self.bind("<Left>", lambda e: self._nudge(-1, 0, e))
+        self.bind("<Right>", lambda e: self._nudge(1, 0, e))
+        self.bind("<Up>", lambda e: self._nudge(0, 1, e))
+        self.bind("<Down>", lambda e: self._nudge(0, -1, e))
+        self.bind("<Control-z>", lambda e: self._on_undo())
+        self.bind("<Control-y>", lambda e: self._on_redo())
 
         self.canvas = tk.Canvas(self.map_frame, bg="#1a1d23", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=6, pady=4)
         self.canvas.bind("<Configure>", lambda _e: self._redraw_map())
+        self.canvas.bind("<Button-1>", self._map_click)
+        self.canvas.bind("<B1-Motion>", self._map_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._map_release)
+
+        # Overview
+        self._overview_text = tk.Text(self.overview_frame, height=20, wrap="word")
+        self._overview_text.pack(fill="both", expand=True, padx=6, pady=6)
 
         # Grid table
         self.grid_tree = self._make_tree(
@@ -333,6 +378,7 @@ class CourseToolApp(tk.Tk):
             self._fill_ai_tree()
             self._fill_mat_tree()
             self._redraw_map()
+            self._refresh_overview()
             self._log(
                 f"reloaded grid={len(self._grid_rows)} cp={len(self._cp_rows)} "
                 f"markers={len(self._marker_rows)} ai_lines={len(self._ai_lines)} walls={len(self._walls)}"
@@ -407,6 +453,43 @@ class CourseToolApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, msg)
         except Exception as e:
             self._err("Blender export failed", e)
+
+    def _on_import_obj(self) -> None:
+        wd = Path(self.work_dir.get().strip())
+        if not wd.is_dir():
+            messagebox.showwarning(APP_TITLE, "Unpack a course first.")
+            return
+        obj = filedialog.askopenfilename(
+            title="Road OBJ (same vertex count/order as export)",
+            filetypes=[("OBJ", "*.obj"), ("All", "*.*")],
+        )
+        if not obj:
+            return
+        try:
+            from mesh_io import import_obj_into_gtrw
+
+            msg = import_obj_into_gtrw(wd, Path(obj), from_z_up=True)
+            self._log(msg)
+            messagebox.showinfo(APP_TITLE, msg + "\n\nThen Pack course to use in-game.")
+        except Exception as e:
+            self._err("OBJ import failed", e)
+
+    def _on_export_scenery(self) -> None:
+        wd = Path(self.work_dir.get().strip())
+        if not wd.is_dir():
+            messagebox.showwarning(APP_TITLE, "Unpack a course first.")
+            return
+        out = filedialog.askdirectory(title="Scenery export folder")
+        if not out:
+            return
+        try:
+            from mesh_io import export_gtm1_scenery
+
+            msg = export_gtm1_scenery(wd, Path(out), z_up=True)
+            self._log(msg)
+            messagebox.showinfo(APP_TITLE, msg)
+        except Exception as e:
+            self._err("Scenery export failed", e)
 
     def _about(self) -> None:
         messagebox.showinfo(
@@ -634,6 +717,7 @@ class CourseToolApp(tk.Tk):
     def _redraw_map(self) -> None:
         c = self.canvas
         c.delete("all")
+        self._map_tf = None
         w, h = max(c.winfo_width(), 10), max(c.winfo_height(), 10)
         wd = Path(self.work_dir.get().strip())
         bounds = lib.map_bounds(wd) if wd.is_dir() else None
@@ -645,12 +729,18 @@ class CourseToolApp(tk.Tk):
         span_z = max(max_z - min_z, 1e-3)
         margin = 24
         scale = min((w - 2 * margin) / span_x, (h - 2 * margin) / span_z)
+        self._map_tf = {
+            "margin": margin,
+            "scale": scale,
+            "min_x": min_x,
+            "min_z": min_z,
+            "h": h,
+        }
 
         def sx(x: float) -> float:
             return margin + (x - min_x) * scale
 
         def sz(z: float) -> float:
-            # flip Z so +Z is up on canvas
             return h - margin - (z - min_z) * scale
 
         if self.map_show["walls"].get() and self._walls:
@@ -689,13 +779,19 @@ class CourseToolApp(tk.Tk):
                         width=2,
                     )
                 for p in pts:
+                    selected = (
+                        self._drag
+                        and self._drag.get("kind") == "ai"
+                        and int(self._drag.get("index", -1)) == int(p["index"])
+                    )
+                    r = 5 if selected else 2
                     c.create_oval(
-                        sx(p["x"]) - 2,
-                        sz(p["z"]) - 2,
-                        sx(p["x"]) + 2,
-                        sz(p["z"]) + 2,
-                        outline="#7ec8ff",
-                        fill="#2a6aa5",
+                        sx(p["x"]) - r,
+                        sz(p["z"]) - r,
+                        sx(p["x"]) + r,
+                        sz(p["z"]) + r,
+                        outline="#ffff88" if selected else "#7ec8ff",
+                        fill="#c0a020" if selected else "#2a6aa5",
                     )
 
         if self.map_show["checkpoints"].get():
@@ -708,20 +804,382 @@ class CourseToolApp(tk.Tk):
                     fill="#e6c07b",
                     width=2,
                 )
+                for end, key_x, key_z in (("0", "x0", "z0"), ("1", "x1", "z1")):
+                    selected = (
+                        self._drag
+                        and self._drag.get("kind") == "cp"
+                        and int(self._drag.get("index", -1)) == int(cp["index"])
+                        and self._drag.get("end") == end
+                    )
+                    r = 5 if selected else 3
+                    c.create_oval(
+                        sx(cp[key_x]) - r,
+                        sz(cp[key_z]) - r,
+                        sx(cp[key_x]) + r,
+                        sz(cp[key_z]) + r,
+                        outline="#fff" if selected else "#e6c07b",
+                        fill="#ffaa00" if selected else "#886622",
+                    )
 
         if self.map_show["grid"].get():
             for g in self._grid_rows:
                 x, z = sx(g["x"]), sz(g["z"])
-                c.create_oval(x - 4, z - 4, x + 4, z + 4, outline="#f0a0a0", fill="#c05050")
+                selected = (
+                    self._drag
+                    and self._drag.get("kind") == "grid"
+                    and int(self._drag.get("index", -1)) == int(g["index"])
+                ) or (self._sel_grid is not None and int(g["index"]) == self._sel_grid)
+                outline = "#ffff66" if selected else "#f0a0a0"
+                fill = "#e0c040" if selected else "#c05050"
+                r = 6 if selected else 4
+                c.create_oval(x - r, z - r, x + r, z + r, outline=outline, fill=fill)
                 c.create_text(x + 8, z, text=str(g["index"]), fill="#ddd", anchor="w")
 
+        tool = self.map_tool.get()
         c.create_text(
             8,
             8,
             anchor="nw",
             fill="#666",
-            text=f"bounds X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]  scale={scale:.3f}",
+            text=f"bounds X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]  drag={tool}",
         )
+
+    def _screen_to_world(self, sx: float, sy: float) -> tuple[float, float] | None:
+        tf = self._map_tf
+        if not tf:
+            return None
+        x = (sx - tf["margin"]) / tf["scale"] + tf["min_x"]
+        z = (tf["h"] - tf["margin"] - sy) / tf["scale"] + tf["min_z"]
+        return x, z
+
+    def _hit_point(self, sx: float, sy: float, x: float, z: float, radius_px: float) -> float | None:
+        tf = self._map_tf
+        if not tf:
+            return None
+        gx = tf["margin"] + (x - tf["min_x"]) * tf["scale"]
+        gz = tf["h"] - tf["margin"] - (z - tf["min_z"]) * tf["scale"]
+        d = ((sx - gx) ** 2 + (sy - gz) ** 2) ** 0.5
+        return d if d <= radius_px else None
+
+    def _map_click(self, event) -> None:
+        tool = self.map_tool.get()
+        self._push_undo()
+        self._drag = None
+        if tool == "grid":
+            best_i, best_d = None, 12.0
+            for g in self._grid_rows:
+                d = self._hit_point(event.x, event.y, float(g["x"]), float(g["z"]), 12.0)
+                if d is not None and d <= best_d:
+                    best_d, best_i = d, int(g["index"])
+            if best_i is not None:
+                self._sel_grid = best_i
+                self._drag = {"kind": "grid", "index": best_i}
+                try:
+                    self.grid_tree.selection_set(str(best_i))
+                    self.grid_tree.see(str(best_i))
+                except Exception:
+                    pass
+                self.status.set(f"Grid {best_i} — drag to move")
+        elif tool == "ai":
+            li = int(self.ai_line_sel.get())
+            line = next((L for L in self._ai_lines if int(L.get("line", -1)) == li), None)
+            best_i, best_d = None, 12.0
+            if line:
+                for p in line.get("points", []):
+                    d = self._hit_point(event.x, event.y, float(p["x"]), float(p["z"]), 12.0)
+                    if d is not None and d <= best_d:
+                        best_d, best_i = d, int(p["index"])
+            if best_i is not None:
+                self._drag = {"kind": "ai", "line": li, "index": best_i}
+                self.status.set(f"AI line {li} point {best_i} — drag to move")
+        elif tool == "checkpoint":
+            best, best_d = None, 12.0
+            for cp in self._cp_rows:
+                for end, kx, kz in (("0", "x0", "z0"), ("1", "x1", "z1")):
+                    d = self._hit_point(event.x, event.y, float(cp[kx]), float(cp[kz]), 12.0)
+                    if d is not None and d <= best_d:
+                        best_d = d
+                        best = {"kind": "cp", "index": int(cp["index"]), "end": end}
+            if best:
+                # store originals for whole-CP move
+                for cp in self._cp_rows:
+                    if int(cp["index"]) == best["index"]:
+                        best["ox0"], best["oz0"] = float(cp["x0"]), float(cp["z0"])
+                        best["ox1"], best["oz1"] = float(cp["x1"]), float(cp["z1"])
+                        if best["end"] == "0":
+                            best["anchor_x"], best["anchor_z"] = best["ox0"], best["oz0"]
+                        else:
+                            best["anchor_x"], best["anchor_z"] = best["ox1"], best["oz1"]
+                        break
+                self._drag = best
+                mode = "whole" if self.cp_move_whole.get() else f"end {best['end']}"
+                self.status.set(f"Checkpoint {best['index']} ({mode}) — drag")
+        self._redraw_map()
+
+    def _map_drag(self, event) -> None:
+        if not self._drag:
+            return
+        world = self._screen_to_world(event.x, event.y)
+        if not world:
+            return
+        x, z = world
+        kind = self._drag["kind"]
+        if kind == "grid":
+            for g in self._grid_rows:
+                if int(g["index"]) == self._drag["index"]:
+                    g["x"], g["z"] = x, z
+                    break
+        elif kind == "ai":
+            li, idx = self._drag["line"], self._drag["index"]
+            for L in self._ai_lines:
+                if int(L.get("line", -1)) != li:
+                    continue
+                for p in L.get("points", []):
+                    if int(p["index"]) == idx:
+                        p["x"], p["z"] = x, z
+                        p.pop("raw_x", None)
+                        p.pop("raw_z", None)
+                        break
+        elif kind == "cp":
+            idx, end = self._drag["index"], self._drag["end"]
+            for cp in self._cp_rows:
+                if int(cp["index"]) != idx:
+                    continue
+                if self.cp_move_whole.get() and "ox0" in self._drag:
+                    dx = x - self._drag["ox0"] if end == "0" else x - self._drag["ox1"]
+                    dz = z - self._drag["oz0"] if end == "0" else z - self._drag["oz1"]
+                    # use stored original mid-drag anchor from click
+                    ax = self._drag.get("anchor_x", x)
+                    az = self._drag.get("anchor_z", z)
+                    dx, dz = x - ax, z - az
+                    cp["x0"] = self._drag["ox0"] + dx
+                    cp["z0"] = self._drag["oz0"] + dz
+                    cp["x1"] = self._drag["ox1"] + dx
+                    cp["z1"] = self._drag["oz1"] + dz
+                elif end == "0":
+                    cp["x0"], cp["z0"] = x, z
+                else:
+                    cp["x1"], cp["z1"] = x, z
+                break
+        self._redraw_map()
+
+    def _map_release(self, _event) -> None:
+        if not self._drag:
+            return
+        kind = self._drag["kind"]
+        if kind == "grid":
+            self._fill_grid_tree()
+            self._log(f"grid {self._drag['index']} moved (Save JSON / Patch GTRW)")
+        elif kind == "ai":
+            self._fill_ai_tree()
+            self._log(
+                f"AI L{self._drag['line']} pt {self._drag['index']} moved (Save JSON / Patch AI)"
+            )
+        elif kind == "cp":
+            self._fill_cp_tree()
+            self._log(
+                f"checkpoint {self._drag['index']} end {self._drag['end']} moved (Save JSON / Patch GTRW)"
+            )
+        # keep selection highlight; clear active drag
+        self._drag = {**self._drag, "dragging": False}
+
+    def _refresh_overview(self) -> None:
+        if not self._overview_text:
+            return
+        wd = Path(self.work_dir.get().strip())
+        lines = [f"Work folder: {wd}", ""]
+        if not wd.is_dir():
+            lines.append("(no work folder)")
+        else:
+            man = wd / "manifest.json"
+            if man.is_file():
+                import json
+
+                m = json.loads(man.read_text(encoding="utf-8"))
+                lines.append(f"Source: {m.get('source', '?')}")
+                lines.append(f"Format: {m.get('format', '?')}  size={m.get('size', '?')}")
+                lines.append("")
+                lines.append("Slots:")
+                for s in m.get("slots", []):
+                    lines.append(
+                        f"  [{s.get('slot'):2}] {s.get('tag') or '-':4}  {s.get('size', 0):8} B  {s.get('hint', '')}"
+                    )
+            summary = wd / "road" / "summary.json"
+            if summary.is_file():
+                import json
+
+                s = json.loads(summary.read_text(encoding="utf-8"))
+                lines.append("")
+                lines.append("Road (GTRW):")
+                for k in (
+                    "course_id",
+                    "length",
+                    "segments",
+                    "triangles",
+                    "wall_points",
+                    "grid_count",
+                    "checkpoint_count",
+                    "marker_count",
+                ):
+                    if k in s:
+                        lines.append(f"  {k}: {s[k]}")
+            ai = wd / "ai" / "summary.json"
+            if ai.is_file():
+                import json
+
+                a = json.loads(ai.read_text(encoding="utf-8"))
+                lines.append("")
+                lines.append(f"AI build: {a.get('build', '')}")
+                for L in a.get("lines", []):
+                    lines.append(f"  line {L.get('line')}: {L.get('count')} pts  closed={L.get('closed')}")
+        self._overview_text.delete("1.0", "end")
+        self._overview_text.insert("1.0", "\n".join(lines))
+
+    def _snapshot(self) -> dict:
+        import copy
+
+        return {
+            "grid": copy.deepcopy(self._grid_rows),
+            "cp": copy.deepcopy(self._cp_rows),
+            "markers": copy.deepcopy(self._marker_rows),
+            "ai": copy.deepcopy(self._ai_lines),
+        }
+
+    def _restore(self, snap: dict) -> None:
+        self._grid_rows = snap["grid"]
+        self._cp_rows = snap["cp"]
+        self._marker_rows = snap["markers"]
+        self._ai_lines = snap["ai"]
+        self._fill_grid_tree()
+        self._fill_cp_tree()
+        self._fill_marker_tree()
+        self._fill_ai_tree()
+        self._redraw_map()
+
+    def _push_undo(self) -> None:
+        self._undo.append(self._snapshot())
+        if len(self._undo) > 50:
+            self._undo.pop(0)
+        self._redo.clear()
+
+    def _on_undo(self, _event=None) -> None:
+        if not self._undo:
+            self.status.set("Nothing to undo")
+            return
+        self._redo.append(self._snapshot())
+        self._restore(self._undo.pop())
+        self._log("undo")
+
+    def _on_redo(self, _event=None) -> None:
+        if not self._redo:
+            self.status.set("Nothing to redo")
+            return
+        self._undo.append(self._snapshot())
+        self._restore(self._redo.pop())
+        self._log("redo")
+
+    def _nudge(self, dx: int, dz: int, event=None) -> None:
+        if not self._drag:
+            return
+        step = 0.25 if (event and event.state & 0x1) else 1.0  # Shift = fine
+        self._push_undo()
+        kind = self._drag["kind"]
+        if kind == "grid":
+            for g in self._grid_rows:
+                if int(g["index"]) == self._drag["index"]:
+                    g["x"] = float(g["x"]) + dx * step
+                    g["z"] = float(g["z"]) + dz * step
+                    break
+            self._fill_grid_tree()
+        elif kind == "ai":
+            li, idx = self._drag["line"], self._drag["index"]
+            for L in self._ai_lines:
+                if int(L.get("line", -1)) != li:
+                    continue
+                for p in L.get("points", []):
+                    if int(p["index"]) == idx:
+                        p["x"] = float(p["x"]) + dx * step
+                        p["z"] = float(p["z"]) + dz * step
+                        p.pop("raw_x", None)
+                        p.pop("raw_z", None)
+                        break
+            self._fill_ai_tree()
+        elif kind == "cp":
+            idx = self._drag["index"]
+            for cp in self._cp_rows:
+                if int(cp["index"]) != idx:
+                    continue
+                if self.cp_move_whole.get():
+                    cp["x0"] = float(cp["x0"]) + dx * step
+                    cp["z0"] = float(cp["z0"]) + dz * step
+                    cp["x1"] = float(cp["x1"]) + dx * step
+                    cp["z1"] = float(cp["z1"]) + dz * step
+                elif self._drag.get("end") == "0":
+                    cp["x0"] = float(cp["x0"]) + dx * step
+                    cp["z0"] = float(cp["z0"]) + dz * step
+                else:
+                    cp["x1"] = float(cp["x1"]) + dx * step
+                    cp["z1"] = float(cp["z1"]) + dz * step
+                break
+            self._fill_cp_tree()
+        self._redraw_map()
+
+    def _on_zip_work(self) -> None:
+        wd = Path(self.work_dir.get().strip())
+        if not wd.is_dir():
+            messagebox.showwarning(APP_TITLE, "No work folder.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Zip work folder",
+            defaultextension=".zip",
+            filetypes=[("ZIP", "*.zip")],
+        )
+        if not path:
+            return
+        try:
+            # persist JSON first
+            lib.save_grid(wd, self._grid_rows)
+            lib.save_checkpoints(wd, self._cp_rows)
+            lib.save_markers(wd, self._marker_rows)
+            lib.save_ai_lines(wd, self._ai_lines)
+            msg = lib.zip_work_folder(wd, Path(path))
+            self._log(msg)
+            messagebox.showinfo(APP_TITLE, msg)
+        except Exception as e:
+            self._err("Zip failed", e)
+
+    def _on_batch(self) -> None:
+        """Batch unpack and/or Blender-export a folder of course files."""
+        src_dir = filedialog.askdirectory(title="Folder of course files")
+        if not src_dir:
+            return
+        out_root = filedialog.askdirectory(title="Output root (work + blender subfolders)")
+        if not out_root:
+            return
+        do_blender = messagebox.askyesno(APP_TITLE, "Also export Blender folders for each course?")
+        src_path = Path(src_dir)
+        out_path = Path(out_root)
+        # Files with no extension or any file that looks like a course when read
+        candidates = [p for p in src_path.iterdir() if p.is_file()]
+        ok, fail = 0, 0
+        for course in sorted(candidates):
+            try:
+                data = course.read_bytes()
+                if not lib.looks_like_course(data):
+                    continue
+                work = out_path / "work" / course.name
+                msg = lib.unpack_course(course, work)
+                self._log(msg)
+                if do_blender:
+                    from blender_export import export_for_blender
+
+                    bdir = out_path / "blender" / course.name
+                    self._log(export_for_blender(work, bdir, z_up=True))
+                ok += 1
+            except Exception as e:
+                self._log(f"FAIL {course.name}: {e}")
+                fail += 1
+        messagebox.showinfo(APP_TITLE, f"Batch done: {ok} courses, {fail} failures")
 
 
 def main() -> None:
