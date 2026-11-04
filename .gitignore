@@ -32,3 +32,4 @@ CMakeSettings.json
 *.keystore
 /tools/trackconvert/data/courses
 /tools/trackconvert/
+/tools/update-from-upstream.bat
