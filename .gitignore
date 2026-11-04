@@ -31,3 +31,4 @@ CMakeSettings.json
 *.jks
 *.keystore
 /tools/trackconvert/data/courses
+/tools/trackconvert/
