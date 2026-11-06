@@ -1,11 +1,12 @@
 @echo off
-REM Build GT3CourseTool.exe with PyInstaller (run from repo root or this folder)
-setlocal
+REM Build standalone Course Tool exe (requires PyInstaller)
 cd /d "%~dp0"
-
-python -m pip install --upgrade pyinstaller
-python -m PyInstaller --noconfirm --windowed --onefile --name GT3CourseTool --paths . course_tool_gui.py
-
+py -m pip install -r requirements.txt pyinstaller
+py -m PyInstaller --noconfirm --windowed --name GT3CourseTool ^
+  --paths . ^
+  --add-data "icons;icons" ^
+  --add-data "blender;blender" ^
+  --icon icons\app_256.png ^
+  main.py
 echo.
-echo Output: dist\GT3CourseTool.exe
-endlocal
+echo Output: dist\GT3CourseTool\GT3CourseTool.exe

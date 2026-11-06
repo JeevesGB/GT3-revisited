@@ -1,3 +1,3 @@
 @echo off 
-python course_tool_qt.py 
+python main.py 
 pause 
