@@ -1,9 +1,10 @@
 // VR headsets (docs/dev/VR.md): the race in stereo while driving. The headset's seated space
 // (origin at the player's head, -z ahead) is placed in the world at the view's eye point: in
-// the in-car views at the car's camera point 0, turning with the car (or with its heading
-// only, [vr] level_horizon); in the chase views at the chase camera, level, turning with its
-// lagged heading. Each eye is that placement times the eye's tracked pose. Replays, the
-// pre-race shot, 2P split screen and the debug cameras stay on the virtual screen.
+// the in-car views at the car's camera point 0 ([vr] seat_forward, seat_height from there),
+// turning with the car (or with its heading only, [vr] level_horizon); in the chase views at
+// the chase camera, level, turning with its lagged heading. Each eye is that placement times
+// the eye's tracked pose. Replays, the pre-race shot, 2P split screen and the debug cameras
+// stay on the virtual screen.
 // (Race screen code map: docs/dev/RACE.md.)
 
 #include "app/screen_race_impl.h"
@@ -27,21 +28,16 @@ bool RaceScreen::vr_stereo(App& app, bool split) const {
 render::Mat4 RaceScreen::vr_base(const xr::Settings& st) const {
     const sim::Quat& q = render_state_.orientation;
     const render::Vec3 eye = camera_.eye();
-    float yaw = 0;
-    if (camera_.onboard()) {
-        if (!st.level_horizon) { // the car's full attitude
-            render::Mat4 rot = render::rotate_quat(q.w, q.x, q.y, q.z);
-            if (camera_.look_back()) rot = rot * render::rotate_y(kPi);
-            return render::translate(eye) * rot;
-        }
-        sim::Vec3 f = rotate(q, {0, 0, -1});
-        yaw = std::atan2(-f.x, -f.z);
-        if (camera_.look_back()) yaw += kPi;
-    } else { // chase: the rig's lagged heading (look-back included), level
-        sim::Vec3 f = cam_forward(camera_);
-        yaw = std::atan2(-f.x, -f.z);
+    if (camera_.onboard()) { // the car's full attitude or its heading, the seat moved within the car
+        const sim::Vec3 f = rotate(q, {0, 0, -1});
+        const render::Mat4 car = st.level_horizon ? render::rotate_y(std::atan2(-f.x, -f.z))
+                                                  : render::rotate_quat(q.w, q.x, q.y, q.z);
+        const render::Mat4 seat = render::translate(eye) * car * render::translate({0, st.seat_height, -st.seat_forward});
+        return camera_.look_back() ? seat * render::rotate_y(kPi) : seat;
     }
-    return render::translate(eye) * render::rotate_y(yaw);
+    // Chase: the rig's lagged heading (look-back included), level.
+    const sim::Vec3 f = cam_forward(camera_);
+    return render::translate(eye) * render::rotate_y(std::atan2(-f.x, -f.z));
 }
 
 void RaceScreen::render_vr_eyes(App& app, Ui& ui, const render::DrawOptions& o) {
@@ -69,10 +65,10 @@ void RaceScreen::render_vr_eyes(App& app, Ui& ui, const render::DrawOptions& o) 
         for (size_t i = player_items_[0]; i < player_items_[1]; ++i) items_[i].single_sided = true;
     const float fovy = std::atan(e0.tan_up) - std::atan(e0.tan_down);
     const float sun_v = sun_visibility(head_pos, fovy, float(e0.height));
-    auto occl = [this](const render::Vec3& a, const render::Vec3& b) {
-        return course_scene_ && course_scene_->occluder().segment_blocked(a, b);
-    };
-    const std::vector<CarLampGlows::Car> lamp_list = car_lamps_.active() ? lamp_cars() : std::vector<CarLampGlows::Car>{};
+    // The glows of the cars as the flat view has them: on board, not the own car's (its body here is
+    // seen from inside, so it hides nothing either).
+    const GlowCars glow = has_glows() ? glow_cars(!camera_.onboard(), true, -1) : GlowCars{};
+    auto occl = [&](const render::Vec3& a, const render::Vec3& b) { return glow_blocked(glow, a, b); };
     // The sky domes centred on each eye, not on the head between them: they are small (Route
     // 11's is 33-51 m), so a shared centre put the sky at that distance in stereo, nearer than
     // the scenery drawn over it. Centred on the eye it has no parallax: at infinity.
@@ -105,7 +101,7 @@ void RaceScreen::render_vr_eyes(App& app, Ui& ui, const render::DrawOptions& o) 
         remove_wet_road(wet_items); // (the wet road's frame items belong to this eye only)
         sun_.draw(r, full, view, fr, sun_v);
         lamps_.draw(r, full, view, eye, fr, occl);
-        if (car_lamps_.active()) car_lamps_.draw(r, full, view, eye, fr, lamp_list, occl);
+        if (car_lamps_.active()) car_lamps_.draw(r, full, view, eye, fr, glow.lamps, occl);
         if (exit_transition_ > kExitHold) { // the race -> menu grey wash, over the whole view (presentation §C1)
             const SDL_FColor w = menu::flow::ScreenTransition::delay_fadeout_cover(exit_transition_);
             SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
