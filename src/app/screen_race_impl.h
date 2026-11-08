@@ -674,6 +674,7 @@ private:
     std::optional<sim::exact::Conductor> solo_conductor() const;
     bool build_exact_solo(App& app);
     void load_opponent_cars(App& app, const RaceField& f);
+    void build_player_visual(App& app, const std::string& model, ByteSpan car_file);
     void exact_solo_step();      // after each step: the run's end and result from the race flow
     bool exact_solo() const { return solo_field_ != nullptr; }
     RaceField* exact_field() const { return field_ ? field_.get() : solo_field_.get(); }
@@ -826,6 +827,8 @@ private:
     bool dof_off_ = SDL_getenv("GT3R_NO_DOF") != nullptr; // compare without the replay depth of field
     bool dof_pyramid_ = false; // [video] depth_of_field = standard (App::depth_of_field)
     bool heat_haze_ = false; // [video] heat_haze = on (default off): replays' heat haze lenses
+    bool vignette_ = true;   // [video] replay_vignette = off (default on): no replay vignette
+    bool trail_ = true;      // [video] replay_trail = off (default on): no trail in replay view mode 1
     LampGlows lamps_;
     // The passes between the 3D scene and the grade, and the replay vignette (presentation §L6):
     // the heat haze lenses (stepped every 60 Hz tick), and this frame's batches for View3D.
@@ -916,6 +919,11 @@ private:
     int last_shot_ = -2; // the director's cut the shot filter was rolled for
     u32 paint_seed_ = GameRandom::kBootSeed;   // race_info_random() before this race's paint draw
     std::optional<u32> paint_seed_override_;     // the next build re-runs a replay's paint draw
+    // The paint draw of this race (GT3 draws it once into the race's entries, which every run of the race uses: the
+    // pre-race backdrop, free practice, retries): the entries it was drawn for, their paints and the seed it started from.
+    std::vector<PaintEntry> drawn_paint_entries_;
+    std::vector<int> drawn_paints_;
+    u32 drawn_paint_seed_ = GameRandom::kBootSeed;
     SDL_FRect frame_rect_{0, 0, 0, 0}; // the 3D frame's rectangle last drawn (UI units)
 
     CarSetup car_;
@@ -996,8 +1004,9 @@ private:
     std::string race_event_;
     std::vector<std::string> race_opponents_;
     // Quick race's custom race (GameRequest::opponent_paints / opponent_skills / no_rubber_band / laps / player_slot); a
-    // replay's paints.
+    // replay's paints; a championship's field after its first round (its paints).
     std::vector<int> race_opponent_paints_;
+    std::vector<u32> race_opponent_color_ids_; // opponents drawn here from a pool: each entry's paint (race::pool_color_id)
     std::vector<std::string> race_opponent_skills_;
     bool race_no_rubber_band_ = false;
     int race_chosen_laps_ = 0, race_player_slot_ = -1;
@@ -1028,7 +1037,8 @@ private:
     std::array<LapList, 2> lap_lists_{};
     long long session_best_ms_ = -1;
     std::string license_event_;   // licence test event ("" = not a licence test)
-    u32 event_paint_id_ = 0xFFFFFFFFu; // licence test: the event's slot-0 colour id (0xFFFFFFFF = none)
+    u32 event_paint_id_ = 0xFFFFFFFFu; // licence test, attract demo: the slot-0 car's colour id (0xFFFFFFFF = none)
+    bool draw_player_paint_ = false;   // attract demo: the slot-0 car has no colour id, so the paint draw gives it one
     // Machine tests (presentation §B7): the test (the event's test byte) and the run's timing
     // points; machine_time_ is the time to the goal (s since GO), -1 before it.
     std::optional<MachineTest> machine_;

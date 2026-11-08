@@ -731,6 +731,25 @@ private:
         haze.enabled = scale.enabled;
         if (!haze.enabled) haze.desc = msaa.desc;
 
+        // [video] replay_vignette = on | off (default on; RaceScreen::add_screen_passes)
+        Row& vig = toggle("Vignette in replays", "GT3's darker picture corners in replays and demos, on some courses.",
+                          to_lower(cfg.get("video", "replay_vignette").value_or("on")) != "off", [a](bool v) {
+                              a->config().set("video", "replay_vignette", v ? "on" : "off");
+                              a->save_config();
+                          });
+        vig.enabled = scale.enabled;
+        if (!vig.enabled) vig.desc = msaa.desc;
+
+        // [video] replay_trail = on | off (default on; RaceScreen's DrawOptions::trail)
+        Row& trail = toggle("Motion trail in replays",
+                            "GT3's fading afterimage after some camera cuts in replays, so moving cars smear.",
+                            to_lower(cfg.get("video", "replay_trail").value_or("on")) != "off", [a](bool v) {
+                                a->config().set("video", "replay_trail", v ? "on" : "off");
+                                a->save_config();
+                            });
+        trail.enabled = scale.enabled;
+        if (!trail.enabled) trail.desc = msaa.desc;
+
         // [video] depth_of_field = off | standard | high (App::depth_of_field)
         static const char* const kDof[] = {"off", "standard", "high"};
         const std::string dof = app.depth_of_field();
@@ -1838,6 +1857,12 @@ private:
                c.look, [apply, c](bool v) {
                    TouchConfig n = c;
                    n.look = v;
+                   apply(n);
+               });
+        slider("Tilt range", "Tilt steering: roll the device this far for full lock.", c.tilt_range, 10, 90,
+               1.0f, std::to_string(int(std::lround(c.tilt_range))) + " deg", [apply, c](float v) {
+                   TouchConfig n = c;
+                   n.tilt_range = v;
                    apply(n);
                });
         slider("Tilt deadzone", "Tilt steering ignores this much turn around the centre.", c.tilt_deadzone, 0, 0.5f,

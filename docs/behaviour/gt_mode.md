@@ -858,7 +858,7 @@ remembers the value it had then.
 | auto-level (computed gearboxes) | transmission +0x2A–0x2B | "Level n" |
 | gears 1–n | see below | three decimals |
 | downforce F / R | body +0x11–0x12 / +0x3A–0x3B | ×0.01 |
-| ASCC | 1 … stability control +0x11 | "Level n" |
+| ASCC | 1 … stability control +0x11 | "Level n − 1" (the lowest step is "Level 0") |
 | TCS | traction control +0x12 steps, reversed | "Level 0" = TCS off |
 | VCD | drivetrain +0x11–0x12 | "%" |
 
@@ -926,8 +926,10 @@ cameras follow. A demo that names its own car keeps it in slot 0 and draws only 
 race in which the computer drives every car, slot 0 included; it records nothing and any
 button ends it.
 
-Known difference: the followed car keeps its default paint, because the engine builds
-its look before the paint draw.
+Paint: the followed car takes its pool entry's color when the event gives one (the course
+and F1 demos with fixed liveries), and is otherwise painted by the race's paint draw along
+with the others, first in entry order (§20.4). The same holds for GT Mode's Preview, the
+same kind of race on the event the player picked.
 
 ## §16 Arcade progression
 
@@ -1247,6 +1249,8 @@ prize-model flag (§3.2).
 - every candidate of the set stands on a slowly turning carousel, each turning on its own spot
   and shown as a black silhouette. A light on the floor marks the car the roulette is on: it
   comes on at once and fades out over 20 frames when the roulette moves on;
+- each car's floor shadow (the showrooms', see [menus.md](menus.md) §9.5) is drawn twice
+  under it, the second copy 2 cm above the first, so it is darker than in the showrooms;
 - the roulette rests on the first candidate for 120 frames, then moves from car to car at 0.1
   car a frame for 60 frames, then slows down (never below one car every 60 frames). It travels
   whole turns of the carousel (12 cars' worth for 2, 3 or 4 candidates) plus the way to the car
@@ -1414,6 +1418,15 @@ Who draws:
 - **Arcade Single Race** draws the same way (`screen_race_launch.cpp`).
 - **The attract demo** draws every slot (§15).
 
+**Paint.** Each drawn car takes its pool entry's color id (event +0x110 + 4 × entry; it
+goes with the entry, not the grid slot). Right after the draw, every car still without
+one gets a paint from the same state, in entry order with the player first (the attract
+demo's followed car too, when its entry gives none), each pick
+steering away from colors close to the others' (docs/dev/RACE.md "Paint colours"). No
+GT-mode or arcade event on the US, PAL or Japanese disc gives an entry a color; the
+licence tests and some attract demos do. The cars keep their paints for the whole race:
+the pre-race screen, free practice, retries and replays.
+
 ## §21 Licenses
 
 There are six licenses, each with 8 tests: B, A, IB, IA, S and R (rally; menu id `d`).
@@ -1528,7 +1541,10 @@ A championship series has a `set_race_code_champ` item named after its own code
 
 1. **Start.** Choosing the championship starts round 1, the item's code + 1. It costs
    one day (§2). The field, cars − 1 opponents, is drawn once from round 1's pool, and
-   every entrant's points start at 0 (`start_championship`). Every round starts on the
+   every entrant's points start at 0 (`start_championship`). Round 1 draws their paints
+   (§20.4), and every later round keeps them: each opponent races the whole championship
+   in the same color, also after the game is saved and loaded between rounds (an older
+   save keeps the paints its next round draws). Every round starts on the
    grid of §22.1, so with the same cars the grid is the same each round.
 2. **Each round** pays its own place prize, sets cup bits and keeps best places like a
    single race, but gives no prize car (`record_round`). Points of 10, 6, 4, 3, 2 and 1

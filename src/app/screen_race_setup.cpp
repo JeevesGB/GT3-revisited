@@ -29,6 +29,8 @@ void RaceScreen::start(App& app, const Replay* replay) {
     full_car_detail_ = app.full_car_detail();
     showroom_wheels_ = app.showroom_wheels();
     heat_haze_ = to_lower(app.config().get("video", "heat_haze").value_or("off")) == "on";
+    vignette_ = to_lower(app.config().get("video", "replay_vignette").value_or("on")) != "off";
+    trail_ = to_lower(app.config().get("video", "replay_trail").value_or("on")) != "off";
     dof_off_ = dof_off_ || app.depth_of_field() == "off";
     dof_pyramid_ = app.depth_of_field() == "standard";
     // [video] original_res = on: the 3D scene at the PS2's 640x448 in a 4:3 frame,
@@ -101,15 +103,6 @@ void RaceScreen::start(App& app, const Replay* replay) {
             }
         wheel_tracks_.clear();
         ghost_wheel_track_ = {};
-        // GT mode: the garage car's bought wheels.
-        std::optional<Bytes> wheel_file;
-        std::string wheel_label;
-        if (from_menu_ || online_)
-            [&](const auto& rq) {
-                if constexpr (requires { rq.car_wheel; })
-                    if (!rq.car_wheel.empty())
-                        wheel_file = app.vfs()->read("wheel/" + rq.car_wheel), wheel_label = rq.car_wheel;
-            }(launch_.request);
         {
             render::Vec3 p0{0, -0.8f, 0}, p1{0, -1.5f, -6.0f};
             if (!car_camera_points(*car_file, p0, p1)) LOG_INFO("Race: %s has no camera points (fallbacks)", model.c_str());
@@ -119,15 +112,7 @@ void RaceScreen::start(App& app, const Replay* replay) {
         }
         if (event_paint_id_ != 0xFFFFFFFFu)
             if (int k = colors_.index_of(model, event_paint_id_); k >= 0) preset_.paint = k;
-        CarBodyMod body_mod = body_mod_for_car(db_, car_.label, preset_.paint);
-        if (!wheel_file && !body_mod.wheel.empty())
-            wheel_file = app.vfs()->read("wheel/" + body_mod.wheel), wheel_label = body_mod.wheel;
-        const ShowroomFiles showroom = read_showroom(app, model, wheel_file ? wheel_label : "");
-        car_visual_ = std::make_unique<CarVisual>(*app.gpu(), *car_file, model, car_.wheels, preset_.paint,
-                                                  wheel_file ? ByteSpan(*wheel_file) : ByteSpan{}, body_mod,
-                                                  showroom.car_span(), showroom.wheel_span(), showroom.stand_in);
-        car_visual_->set_full_detail(full_car_detail_);
-        if (brake_parts_) car_visual_->set_brake_parts(*brake_parts_);
+        build_player_visual(app, model, *car_file);
         course_name_ = ce.name;
         // The start title shows the course table's name as it is: licence sections have their
         // own ("Grand Valley Test Section"), and a course without one shows no title.
@@ -702,19 +687,44 @@ bool RaceScreen::build_vehicle(App& app) {
     return build_exact_solo(app);
 }
 
-// The opponents' cars as drawn and heard (a race's field, a free practice's): their paints (the event's slot ids, else the
+// The player's car as drawn: `model` in its paint (preset_.paint), with GT mode's bought wheel or a mod car's own body and
+// rim.
+void RaceScreen::build_player_visual(App& app, const std::string& model, ByteSpan car_file) {
+    // GT mode: the garage car's bought wheels.
+    std::optional<Bytes> wheel_file;
+    std::string wheel_label;
+    if (from_menu_ || online_)
+        [&](const auto& rq) {
+            if constexpr (requires { rq.car_wheel; })
+                if (!rq.car_wheel.empty())
+                    wheel_file = app.vfs()->read("wheel/" + rq.car_wheel), wheel_label = rq.car_wheel;
+        }(launch_.request);
+    CarBodyMod body_mod = body_mod_for_car(db_, car_.label, preset_.paint);
+    if (!wheel_file && !body_mod.wheel.empty())
+        wheel_file = app.vfs()->read("wheel/" + body_mod.wheel), wheel_label = body_mod.wheel;
+    const ShowroomFiles showroom = read_showroom(app, model, wheel_file ? wheel_label : "");
+    car_visual_ = std::make_unique<CarVisual>(*app.gpu(), car_file, model, car_.wheels, preset_.paint,
+                                              wheel_file ? ByteSpan(*wheel_file) : ByteSpan{}, body_mod,
+                                              showroom.car_span(), showroom.wheel_span(), showroom.stand_in);
+    car_visual_->set_full_detail(full_car_detail_);
+    if (brake_parts_) car_visual_->set_brake_parts(*brake_parts_);
+}
+
+// The opponents' cars as drawn and heard (a race's field, a free practice's): their paints (the event's entry ids, else the
 // game's draw), models and engine notes.
 void RaceScreen::load_opponent_cars(App& app, const RaceField& f) {
     opp_visuals_.clear();
-    // Paint colours: player first, then the opponents (event slot ids or the game's draw).
+    // Paint colours: player first, then the opponents (event entry ids or the game's draw). The attract demo's race has no
+    // player car: its slot-0 car is drawn like the others when its entry gives no paint.
     std::vector<PaintEntry> entries;
     std::string player_model = launch_model_.empty() ? cars_[size_t(car_sel_)].model : launch_model_;
-    entries.push_back({player_model, colors_.id_at(player_model, preset_.paint)});
+    entries.push_back({player_model, draw_player_paint_ ? 0xFFFFFFFFu : colors_.id_at(player_model, preset_.paint)});
     const data::Event* pev = db_.event(race_event_);
     for (int i = 0; i < f.opponents(); ++i) {
         PaintEntry e{f.opponent_model(i)};
-        if (pev && race_opponents_ == pev->entries && pev->bytes.size() >= 0x110 + 4 * size_t(i + 1))
-            e.id = rd32(pev->bytes, 0x110 + 4 * size_t(i));
+        if (pev && race_opponents_ == pev->entries) // the event's own field: slot i is pool entry i
+            e.id = race::pool_color_id(*pev, i);
+        if (size_t(i) < race_opponent_color_ids_.size()) e.id = race_opponent_color_ids_[size_t(i)];
         if (online_ && size_t(i) < net_.paint.size()) // the colour that player chose
             e.id = colors_.id_at(f.opponent_model(i), net_.paint[size_t(i)]);
         if (size_t(i) < race_opponent_paints_.size() && race_opponent_paints_[size_t(i)] >= 0) // the colour the grid gives it
@@ -722,12 +732,34 @@ void RaceScreen::load_opponent_cars(App& app, const RaceField& f) {
         entries.push_back(e);
     }
     // The race module's generator, as left by the opponent draw; a replay re-runs
-    // the draw from the state its race had.
-    GameRandom replay_rng{paint_seed_override_.value_or(GameRandom::kBootSeed)};
-    GameRandom& rng = paint_seed_override_ ? replay_rng : race_info_random();
-    paint_seed_ = rng.x;
+    // the draw from the state its race had. The race's other runs keep the paints drawn for it.
+    std::vector<int> paints;
+    const bool kept = !paint_seed_override_ && entries == drawn_paint_entries_;
+    if (kept) {
+        paints = drawn_paints_;
+        paint_seed_ = drawn_paint_seed_;
+    } else {
+        GameRandom replay_rng{paint_seed_override_.value_or(GameRandom::kBootSeed)};
+        GameRandom& rng = paint_seed_override_ ? replay_rng : race_info_random();
+        paint_seed_ = rng.x;
+        paints = assign_paints(colors_, entries, rng);
+        if (!paint_seed_override_) drawn_paint_entries_ = entries, drawn_paints_ = paints, drawn_paint_seed_ = paint_seed_;
+    }
+    {
+        std::string list;
+        for (size_t i = 1; i < paints.size(); ++i) list += (i > 1 ? " " : "") + std::to_string(paints[i]);
+        LOG_INFO("Race: opponent paints %s (%s)", list.c_str(),
+                 kept ? "kept for this race" : paint_seed_override_ ? "the replay's draw" : "drawn");
+    }
     paint_seed_override_.reset();
-    std::vector<int> paints = assign_paints(colors_, entries, rng);
+    if (draw_player_paint_) {
+        LOG_INFO("Race: the demo's own car %s in paint %d", player_model.c_str(), paints[0]);
+        if (paints[0] >= 0 && paints[0] != preset_.paint) { // (the car was built in paint 0 before the draw)
+            preset_.paint = paints[0];
+            if (std::optional<Bytes> cf = read_car(app, player_model); cf && !cf->empty())
+                build_player_visual(app, player_model, *cf);
+        }
+    }
     std::map<std::pair<std::string, int>, std::shared_ptr<CarVisual>> by_model;
     for (int i = 0; i < f.opponents(); ++i) {
         const std::string& model = f.opponent_model(i);

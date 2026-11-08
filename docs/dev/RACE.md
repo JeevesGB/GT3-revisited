@@ -1469,12 +1469,17 @@ table):
 `database/carcolor.db`: per model (id_hash) a list of colour ids, plus colour
 definitions (id -> RGB). A car's paint index is the position of its colour id
 in its model's list. Variant records carry no colour; the event record has
-colour ids at +0x110 (u32 per slot, 0xFFFFFFFF = choose). Licence tests: slot 0
+colour ids at +0x110 (u32 per pool entry, 0xFFFFFFFF = choose): a car drawn from the
+pool takes its entry's id whatever slot it lands in (`race::pool_color_id`; only the
+licence tests and some attract demos set any). Licence tests: slot 0
 is the test car (entry 0) and gives its paint (e.g. B-2 Viper GTS 0x101, red
 with silver stripes; 31 of the 48 tests set one, all in the model's list; the
 rally tests and most race cars are 0xFFFFFFFF). Race reads it for `go_license` and
-`tt_event=L…` (test `race_license_car_paint_disc`). Machine tests, arcade time
-trials (`AT…`) and the attract demo's player slot are 0xFFFFFFFF. Unset
+`tt_event=L…` (test `race_license_car_paint_disc`). Machine tests and arcade time
+trials (`AT…`) are 0xFFFFFFFF. The attract demo (and GT Mode's Preview) has no player
+car: its slot-0 car takes its pool entry's id (`event_paint_id_`) or, without one, is drawn
+as entry 0 with the others (`draw_player_paint_`; the car, built before the draw, is built
+again in its paint by `build_player_visual`). Unset
 cars get a colour at race start in entry order (player first): each candidate
 weighted 0.984375^j, divided by 1 + similarity to every other car's
 candidates (fixed colours: 10000 sim^64), sorted ascending, then picked with
@@ -1485,6 +1490,12 @@ pool draw of the same race (GT mode, arcade Single Race). A replay stores the
 state the paint draw started from (`Replay::paint_seed`, format v6; older
 replays use 0x87654321, which is what they were recorded with) and re-runs the
 draw from it.
+
+The draw happens once per race (`RaceScreen::drawn_paints_`): GT3 draws it into the race's
+entries, which every run of that race uses, so the pre-race backdrop, free practice, retries
+and the race show the same paints. A championship keeps its field's paints from round 1
+for the later rounds and in saves (`Championship::paints`, handed to the race as fixed
+paints; GameResult::opponent_paints brings them back).
 
 ## Ghost
 
@@ -2109,7 +2120,10 @@ filling the options each frame:
   with `GT3R_RACE="auto=1,warp=30,watch=1"`, `--screen quickrace`), as the original's does.
 - **Vignette** (`DrawOptions::vignette`, `race::add_vignette`): replays and demonstrations
   (`!live_view()`) on Env0 0x40 courses, drawn after the graded picture in the post pass, under
-  the dissolve and the trail.
+  the dissolve and the trail. Off with `[video] replay_vignette = off` (Settings → Display →
+  Vignette in replays).
+- **Trail** (`DrawOptions::trail`, presentation §G16): replay view mode 1's afterimage. Off with
+  `[video] replay_trail = off` (Settings → Display → Motion trail in replays).
 - **2P halves**: no grade (and no haze or vignette).
 - Not reproduced: the original copies its 640 × 448 picture into 640 × 224 interlaced fields,
   with a vertical 2-tap filter on the fields of one parity; our original-resolution frame is

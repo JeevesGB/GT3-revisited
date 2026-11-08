@@ -303,16 +303,31 @@ TEST(touch_tilt_steering) {
     cfg.steering = TouchConfig::Steering::Tilt;
     cfg.mode = TouchConfig::Mode::On;
     TouchControls t = driving(cfg);
-    t.update(0.016, 0.02f); // inside the deadzone
+    t.update(0.016, 0.02f); // ~1 degree of roll: inside the deadzone
     CHECK(t.pad().axis(PadAxis::LX) == 128);
-    t.update(0.016, -1.0f);
+    t.update(0.016, -1.0f); // past the 45-degree range: full lock
     CHECK(t.pad().axis(PadAxis::LX) == 0);
-    t.update(0.016, 0.52f);
+    t.update(0.016, 0.52f * 0.785398f); // 0.52 of the range: half lock
     CHECK(std::fabs(t.pad().axis_f(PadAxis::LX) - 0.5f) < 0.02f);
     // A finger in the (unused) steering zone does nothing in tilt mode.
     t.finger_down(1, 100, 300, 1.0f);
     t.update(0.016, 0.0f);
     CHECK(t.pad().axis(PadAxis::LX) == 128);
+
+    // The range is adjustable: 22.5 degrees reaches full lock at half the roll.
+    TouchConfig narrow = cfg;
+    narrow.tilt_range = 22.5f;
+    TouchControls n = driving(narrow);
+    n.update(0.016, 0.3f); // ~17 degrees of the 22.5-degree range
+    CHECK(n.pad().axis_f(PadAxis::LX) > 0.7f);
+    n.update(0.016, 0.4f); // ~23 degrees: full lock
+    CHECK(n.pad().axis(PadAxis::LX) == 255);
+    // Wider: 90 degrees needs twice the roll.
+    TouchConfig wide = cfg;
+    wide.tilt_range = 90.0f;
+    TouchControls w = driving(wide);
+    w.update(0.016, 0.785398f); // 45 degrees: half of the range
+    CHECK(std::fabs(w.pad().axis_f(PadAxis::LX) - 0.5f) < 0.05f);
 }
 
 // Button steering: Left / Right press the race pad's d-pad at full pressure, which GT3's pad read
@@ -423,8 +438,8 @@ TEST(touch_left_handed_mirrors) {
 
 TEST(touch_config_roundtrip) {
     IniDocument ini = IniDocument::parse(
-        "[touch]\nmode = on\nsteering = tilt\npedals = area\npedal_min = 0.2\nsteer_range = 9\nopacity = 0.8\n"
-        "size = 1.2\nleft_handed = on\nlook = off\n");
+        "[touch]\nmode = on\nsteering = tilt\npedals = area\npedal_min = 0.2\nsteer_range = 9\ntilt_range = 30\n"
+        "opacity = 0.8\nsize = 1.2\nleft_handed = on\nlook = off\n");
     TouchConfig c = TouchConfig::load(ini);
     CHECK(!c.look && TouchConfig::load(IniDocument{}).look);
     CHECK(c.mode == TouchConfig::Mode::On);
@@ -432,12 +447,14 @@ TEST(touch_config_roundtrip) {
     CHECK(c.pedals == TouchConfig::Pedals::Area);
     CHECK(std::fabs(c.pedal_min - 0.2f) < 1e-6f);
     CHECK(c.steer_range == 0.5f); // clamped
+    CHECK(std::fabs(c.tilt_range - 30.0f) < 1e-6f);
     CHECK(c.left_handed);
     IniDocument out;
     c.save(out);
     TouchConfig d = TouchConfig::load(out);
     CHECK(d.mode == c.mode && d.steering == c.steering && d.pedals == c.pedals && d.left_handed && !d.look);
     CHECK(std::fabs(d.size - 1.2f) < 1e-3f && std::fabs(d.opacity - 0.8f) < 1e-3f);
+    CHECK(std::fabs(d.tilt_range - 30.0f) < 1e-3f && std::fabs(TouchConfig{}.tilt_range - 45.0f) < 1e-6f);
     TouchConfig def = TouchConfig::load(IniDocument{});
     CHECK(def.mode == TouchConfig::Mode::Auto && def.steering == TouchConfig::Steering::Drag);
 }
@@ -1043,6 +1060,20 @@ TEST(input_wheel_identified) {
     CHECK(is_wheel(SDL_JOYSTICK_TYPE_UNKNOWN, true));
     CHECK(!is_wheel(SDL_JOYSTICK_TYPE_UNKNOWN, false));
     CHECK(!is_wheel(SDL_JOYSTICK_TYPE_GAMEPAD, true) && !is_wheel(SDL_JOYSTICK_TYPE_FLIGHT_STICK, true));
+}
+
+// SDL's Logitech driver (macOS, Linux, Android) sends a G29's, G27's or G25's pedals as axes 2 gas,
+// 3 brake, 1 clutch; the wheel layout's are 1 gas, 2 brake, as on Windows, where SDL leaves the
+// wheel to DirectInput. Read through that driver, the clutch accelerated and the gas braked.
+TEST(input_logitech_driver_pedals) {
+    CHECK(logitech_driver_pedals(0x046d, 0xc24f, 'h')); // G29
+    CHECK(logitech_driver_pedals(0x046d, 0xc29b, 'h') && logitech_driver_pedals(0x046d, 0xc299, 'h')); // G27, G25
+    CHECK(!logitech_driver_pedals(0x046d, 0xc24f, 0));     // the same wheel through the system's input
+    CHECK(!logitech_driver_pedals(0x046d, 0xc29a, 'h'));   // Driving Force GT: gas 1, brake 2 already
+    CHECK(!logitech_driver_pedals(0x346e, 0xc24f, 'h'));   // another maker
+    CHECK(logitech_driver_axis(0) == 0);                   // steering
+    CHECK(logitech_driver_axis(1) == 2 && logitech_driver_axis(2) == 3 && logitech_driver_axis(3) == 1);
+    CHECK(logitech_driver_axis(4) == 4);
 }
 
 // A wheel earlier versions took for a joystick keeps what was bound on it, without the stick's dead

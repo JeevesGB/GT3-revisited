@@ -71,6 +71,13 @@ bool App::init(int argc, char** argv) {
     // Silent switch, and other apps' music paused while the game plays. SDL's own default there
     // (Playback, mixed with others) played on with the switch on silent.
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "AVAudioSessionCategorySoloAmbient");
+#ifdef SDL_PLATFORM_ANDROID
+    // Logitech wheels' force feedback (G29 in PS3 mode, G27, G25, Driving Force GT): Android plays none
+    // for them, so SDL's Logitech driver talks to the wheel over USB itself. SDL leaves its USB drivers
+    // off on Android, where opening one asks the player for permission; this one alone is on. Refused,
+    // the wheel steers as before, without force feedback.
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_LG4FF, "1");
+#endif
 #ifdef SDL_PLATFORM_WINDOWS
     // Xbox pads through SDL's RAWINPUT driver, for their impulse triggers, unless [input] xbox_driver = xinput:
     // SDL takes it as it starts its joysticks, so it is read from the config here.
@@ -959,7 +966,10 @@ SDL_AppResult App::event(const SDL_Event& e) {
     if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED && limit_60fps()) apply_frame_limit(); // another refresh rate
     // Songs copied in while the game was away (the Files app on phones), and music access
     // allowed or taken back in Android's settings meanwhile.
-    if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) follow_music_folder(true);
+    if (e.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+        follow_music_folder(true);
+        if (audio_) audio_->retry(); // pick up an output device whose open failed earlier
+    }
     // Phones and tablets: no songs measured while the game is in the background.
     if (platform::is_mobile() && (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND || e.type == SDL_EVENT_DID_ENTER_FOREGROUND))
         music_.set_away(e.type == SDL_EVENT_WILL_ENTER_BACKGROUND);
