@@ -125,7 +125,7 @@ void RaceScreen::start(App& app, const Replay* replay) {
         const ShowroomFiles showroom = read_showroom(app, model, wheel_file ? wheel_label : "");
         car_visual_ = std::make_unique<CarVisual>(*app.gpu(), *car_file, model, car_.wheels, preset_.paint,
                                                   wheel_file ? ByteSpan(*wheel_file) : ByteSpan{}, body_mod,
-                                                  showroom.car_span(), showroom.wheel_span());
+                                                  showroom.car_span(), showroom.wheel_span(), showroom.stand_in);
         car_visual_->set_full_detail(full_car_detail_);
         if (brake_parts_) car_visual_->set_brake_parts(*brake_parts_);
         course_name_ = ce.name;
@@ -250,8 +250,8 @@ void RaceScreen::start(App& app, const Replay* replay) {
         crss_player_.load(sfx_.banks(), sfx_.index());
     }
     // Wind (rn_01.es), in-car, whine and turbo for the followed cars.
-    extra_.stop(sfx_, app.audio().voices());
-    extra2_.stop(sfx_, app.audio().voices());
+    extra_.stop(app.audio().voices());
+    extra2_.stop(app.audio().voices());
     extra_.reset();
     extra2_.reset();
     extra_.load(*app.vfs());
@@ -686,7 +686,7 @@ bool RaceScreen::build_vehicle(App& app) {
                         const ShowroomFiles sh2 = read_showroom(app, m2, w2 ? bm2.wheel : "");
                         car2_visual_ = std::make_unique<CarVisual>(*app.gpu(), *f2, m2, ws2, paint2,
                                                                    w2 ? ByteSpan(*w2) : ByteSpan{}, bm2,
-                                                                   sh2.car_span(), sh2.wheel_span());
+                                                                   sh2.car_span(), sh2.wheel_span(), sh2.stand_in);
                         car2_visual_->set_full_detail(full_car_detail_);
                         if (brake_parts_) car2_visual_->set_brake_parts(*brake_parts_);
                     }
@@ -751,7 +751,7 @@ void RaceScreen::load_opponent_cars(App& app, const RaceField& f) {
                 if (f && !f->empty()) {
                     const ShowroomFiles sh = read_showroom(app, model, wf ? bm.wheel : "");
                     v = std::make_shared<CarVisual>(*app.gpu(), *f, model, ws, paint, wf ? ByteSpan(*wf) : ByteSpan{}, bm,
-                                                    sh.car_span(), sh.wheel_span());
+                                                    sh.car_span(), sh.wheel_span(), sh.stand_in);
                     v->set_full_detail(full_car_detail_);
                     if (brake_parts_) v->set_brake_parts(*brake_parts_);
                 }
@@ -761,8 +761,10 @@ void RaceScreen::load_opponent_cars(App& app, const RaceField& f) {
         }
         opp_visuals_.push_back(v);
     }
-    // Engine notes of the opponents (their base car's sound bank).
+    // Engine notes of the opponents (their base car's sound bank) and their extra sounds.
     std::vector<OpponentEngines::Car> sounds;
+    for (OpponentSound& o : opp_sound_) o.extra.stop(app.audio().voices());
+    opp_sound_.clear();
     for (int i = 0; i < f.opponents(); ++i) {
         const std::string& l = f.opponent_label(i);
         std::string car = db_.car(l) ? l : "";
@@ -771,8 +773,11 @@ void RaceScreen::load_opponent_cars(App& app, const RaceField& f) {
         if (car.empty())
             for (const data::CarVariant& v : db_.arcade_cars())
                 if (v.label == l) car = v.car;
+        OpponentSound& o = opp_sound_.emplace_back();
+        o.facts = f.opponent_facts(i).value_or(CarFacts{});
+        o.car = car_sound_facts(l);
         OpponentEngines::Car c;
-        c.cd = car_sound_facts(l).cd;
+        c.cd = o.car.cd;
         if (const data::Car* dc = db_.car(car)) {
             data::CarDatabase::EngineSound es = db_.engine_sound(*dc);
             c.sound_id = es.id, c.variant = es.variant;
@@ -873,6 +878,9 @@ std::optional<Bytes> RaceScreen::read_car(App& app, const std::string& model) co
 
 RaceScreen::ShowroomFiles RaceScreen::read_showroom(App& app, const std::string& model, const std::string& wheel) const {
     ShowroomFiles s;
+    s.stand_in = [&app, model, wheel] {
+        return menu_rim([&app](const std::string& p) { return app.vfs()->read(p); }, model, wheel);
+    };
     if (!showroom_wheels_) return s;
     s.car = app.vfs()->read("menu/cars/" + model);
     if (s.car && !wheel.empty()) s.wheel = app.vfs()->read("menu/wheel/" + wheel);

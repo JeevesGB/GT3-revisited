@@ -28,7 +28,7 @@ disk or redistributed.
 | **Modern display** | any resolution and aspect ratio, widescreen, high refresh rates (or a 60 fps limit), MSAA, dynamic resolution, or the original 640×448 look |
 | **VR** | Meta Quest: the menus on a large virtual screen, races in stereo from the driver's seat, Touch controllers (sticks and analog triggers, or grab a steering wheel) |
 | **Controllers** | keyboard, any gamepad, wheels and pedals, all remappable; analog pressure buttons, DualSense adaptive triggers, Xbox impulse triggers, wheel force feedback, tilt steering, touch controls on phones and tablets (move, resize or hide each one) |
-| **Mods** | replace any game file, add music, add new cars (electric ones too) to the dealers |
+| **Mods** | replace any game file, add music, add new cars (electric ones too) to the dealers, texture packs at any resolution (PCSX2 packs convert) |
 
 ## How it's built
 
@@ -117,9 +117,11 @@ You can also drag the `.iso` or `.chd` onto the window. On Android and the Quest
 **Open disc image** and pick the file ([android/README.md](android/README.md)). On
 iOS, **Open disc image** shows the Files app's picker: the image can be anywhere it
 reaches (On My iPhone, a network share, another app's folder) and is read where it
-is, never copied. The path is remembered, with the last five discs you opened. If the remembered disc
+is, never copied. Every disc you open joins the disc library (**Discs...** in the main menu,
+or Settings > Disc & saves), which remembers what each one is; picking another disc there
+goes straight to its title menu. If the remembered disc
 is missing at startup (moved, or on a drive that isn't connected), the first
-screen says which file failed and offers the recent discs that still exist.
+screen says which file failed and offers the library's discs that are there.
 
 The game starts like GT3: the opening movie (skip with Cross/Start), then the
 title menu. Press **Select** on the title menu, or click/tap the **GT3R
@@ -138,7 +140,7 @@ game:
 | Movie theater | the game's movies |
 | Car database | specs, torque curves, upgrades and events |
 | Save editor | change a GT Mode save (below) |
-| Change disc image... | recent discs, or browse |
+| Discs... | your disc library: switch discs, or add one |
 | Developer options | asset browser, viewers and test screens for working on the project |
 | Quit | |
 
@@ -165,8 +167,8 @@ beside it instead. Saves and replays can go in another folder of your choice
 | In the folder | |
 |---|---|
 | `config.ini` | settings (below) |
-| `saves/` | GT Mode saves (below), unless Settings chooses another save folder |
-| `replays/` | saved replays (`.gt3replay`), listed by the Replay Theater and Time trial; in the save folder too |
+| `saves/` | GT Mode saves (below), unless Settings chooses another save folder; a folder per region and per disc of its own ([COMPATIBILITY](docs/COMPATIBILITY.md#the-disc-library)) |
+| `replays/` | saved replays (`.gt3replay`), listed by the Replay Theater and Time trial; in the save folder too, by disc as `saves/` |
 | `mods/` | installed mods ([MODDING](docs/MODDING.md)) |
 | `music/` | your own race music (below), unless Settings chooses another folder |
 | `music_playlist.txt` | your songs' playlist (their order and check marks) |
@@ -194,7 +196,8 @@ are only there:
 | Section / key | Values | |
 |---|---|---|
 | `[game] disc` | path | disc opened at startup |
-| `[game] recent1`..`recent5` | paths | recently opened discs, newest first |
+| `[game] recent1`..`recent32` | paths | the disc library, most recently opened first |
+| `[disc_library]` | | what each library disc is, as of when it was last opened |
 | `[app] start` | `game` / `hub` | start with the game, or in Developer options |
 | `[video] fullscreen` | `on` / `off` | desktop window mode (F11) |
 | `[video] aspect` | `16:9` / `4:3` / `fill` | the game's picture: 16:9 (default), 4:3 like on a 4:3 TV, or the whole screen (races use its full width; menus and movies stay 4:3) |
@@ -235,7 +238,7 @@ are only there:
 | `[online] server` | host name | relay server (default `gt3r.gameversions.com`; set in the lobby) |
 | `[online] update_check` | `on` / `off` | ask the relay server for a newer version at startup (Settings → Online) |
 | `[options]` | | the game's own Options menu (set in game); ours: `music_source` (`original` / `custom` / `both`; unset: `custom`) and `music_mix` (Both's `order` / `shuffle`), the music list's tabs |
-| `[mods]` | | see [MODDING](docs/MODDING.md) |
+| `[mods.<disc key>]`, `[mods]` | | each disc's mod choices, and earlier versions' ([MODDING](docs/MODDING.md)) |
 
 ### Saves
 
@@ -358,7 +361,10 @@ the .zip onto the window on a computer), turns them on and off, and removes
 them. Mods live in `mods/` in the user data folder; **Open folder** opens it
 (on Android and iOS, in the Files app). A mod can replace any file of the game, add
 music, or add cars, defined in small text files, that appear at the dealers,
-in the arcade and online. See [MODDING](docs/MODDING.md).
+in the arcade and online. Texture packs replace the game's textures with PNG
+pictures at any size: **Save textures** saves the disc's textures to start from,
+and **PCSX2 pack** turns a texture pack made for PCSX2 into a mod. The car and
+course viewers export models for Blender. See [MODDING](docs/MODDING.md).
 
 ## Differences from the original
 
@@ -455,6 +461,8 @@ gt3tool info    <iso>                      identify the disc
 gt3tool ls      <iso> [dir]                list GT3.VOL
 gt3tool extract <iso> <prefix> <outdir>    extract files (decompressed)
 gt3tool tex     <iso> <vol-path> <outdir>  textures to PNG
+gt3tool tex-dump <iso> <outdir>            every texture, named for texture packs
+gt3tool model   <iso> <vol-path> <outdir> --gltf  a car model for Blender (glb)
 gt3tool wav     <iso> <vol-path> <out.wav> music to WAV
 gt3tool bgm     <iso>                      list soundtrack
 gt3tool car     <iso> <label>              a car's catalogue specs

@@ -272,9 +272,12 @@ private:
     sim::EngineCondition live_condition() const;
     std::optional<Bytes> read_car(App& app, const std::string& model) const;
     // [video] showroom_wheels: the model's menu/cars file and a fitted wheel's
-    // menu/wheel/<label> (CarVisual's showroom_car, showroom_wheel); none when off.
+    // menu/wheel/<label> (CarVisual's showroom_car, showroom_wheel); none when off. `stand_in`: the
+    // menus' rim, read only for a race rim with nothing to draw, whatever the setting
+    // (CarModelOptions::stand_in_rim).
     struct ShowroomFiles {
         std::optional<Bytes> car, wheel;
+        std::function<std::optional<Bytes>()> stand_in;
         ByteSpan car_span() const { return car ? ByteSpan(*car) : ByteSpan{}; }
         ByteSpan wheel_span() const { return wheel ? ByteSpan(*wheel) : ByteSpan{}; }
     };
@@ -417,9 +420,22 @@ private:
     void update_course_ambience(App& app);
     // Every car's tyre loops and the followed cars' collision one-shots, each physics step (sound §7.6).
     void update_tyre_sounds(App& app, const sim::VehicleState& s);
+    // The race sounds' listener on camera_ (sound §6-§8): its eye and axes, the eye's velocity (the
+    // listener's motion for the Doppler), the camera's sound kind and its target, the car it
+    // follows (0 the player's, i + 1 opponent i; -1 none: a replay aimed at a pair of cars).
+    struct SoundListener {
+        sim::Vec3 eye, right, forward, velocity;
+        CameraSound kind = CameraSound::Other;
+        int target = 0;
+        float doppler(const sim::VehicleState& s) const; // the car's Doppler factor
+    };
+    SoundListener sound_listener() const;
+    // Every car's engine and extra sounds, once per displayed frame (sound §6-§8; player 2's from its own camera).
+    void update_car_sounds(App& app, double dt);
     SoundCar car_sound_facts(const std::string& label) const;
+    // The extra sounds' inputs of a car (sound §7.2-§7.5) in `view`; the caller places them.
     static CarExtraSounds::Frame extra_frame(const CarFacts& facts, const sim::VehicleTelemetry& t, const sim::VehicleState& s,
-                                             const SoundCar& car, bool onboard, float x, float z, SoundView view);
+                                             const SoundCar& car, SoundView view);
     void silence(App& app);
     // The original's global SE gain: race SE in live play, replay SE in replays and demos. The race behind a quick
     // menu (the backdrop, the licence preview box) is silent: the race drivers turn records off around their quick
@@ -554,9 +570,9 @@ private:
     void apply_post_pass(render::DrawOptions& o) const;
     // The replay depth of field (presentation §G17) for the full-frame view.
     void apply_depth_of_field(render::DrawOptions& o) const;
-    // The disc region's replays (race::replay_dir).
+    // The disc's replays (race::replay_dir, by its disc key).
     std::string replay_dir(App& app) const {
-        return race::replay_dir(app.save_folder(), app.vfs() ? app.vfs()->region().region : Region::America);
+        return race::replay_dir(app.save_folder(), app.vfs() ? app.vfs()->disc_key() : region_key(Region::America));
     }
 
     // After a run (screen_race_post_run.cpp; race/post_run.h): the race-exit transition, the
@@ -944,8 +960,16 @@ private:
     CarSfx car_sfx_, car_sfx2_;
     std::vector<CarSfx> opp_sfx_; // every other car's tyre loops (sound §7.6)
     float ffb_wall_ = 0, ffb_car_ = 0, ffb_wall2_ = 0, ffb_car2_ = 0; // strongest hits since the last frame
-    CarExtraSounds extra_{"p1_"}, extra2_{"p2_"};
+    CarExtraSounds extra_, extra2_;
     SoundCar sound_car_, sound_car2_;
+    // The other cars' extra sounds (their wind is OpponentEngines'): heard as the camera's target in
+    // a replay car mount (turbo, whine, in-car), else a gearbox whine on the TV cameras.
+    struct OpponentSound {
+        CarFacts facts;
+        SoundCar car;
+        CarExtraSounds extra;
+    };
+    std::vector<OpponentSound> opp_sound_;
     CourseAmbience crss_;
     CourseAmbiencePlayer crss_player_;
     bool crss_ok_ = false;
