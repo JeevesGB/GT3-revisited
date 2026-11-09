@@ -1,40 +1,52 @@
-# GT3 Course Tool
+# GT3 Track Extractor
 
-Unpack, view, edit, and export Gran Turismo 3 course files.
+Extract Gran Turismo 3 course files to **glTF / Blender**, edit, and **pack back** into game-compatible files.
 
-## Layout
+Lives in the GT3-revisited tree under `tools/trackconvert`.
+
+## Setup
+
+```bat
+cd tools\trackconvert
+install_requirements.bat
+```
+
+## CLI
+
+```bat
+REM Inspect a course
+python -m gt3course info path\to\testcourse.gz
+
+REM Extract → work/ + blender/ (road.gltf, road.obj, scenery, textures)
+python -m gt3course extract path\to\testcourse.gz out\testcourse
+
+REM Pack work folder → game file (applies Blender road/scenery OBJs if present)
+python -m gt3course pack out\testcourse\work out\testcourse.gz
+```
+
+## GUI
+
+```bat
+run.bat
+```
+
+## Round-trip rules (game load)
+
+- Unpack writes `structure_lock.json` with exact per-slot sizes.
+- Pack **fails** if any slot size changes — geometry write-back is **in-place only**.
+- Prefer editing positions (use `road_positions.f32` or keep topology when using OBJ).
+- Full from-scratch tracks still need a valid template course (clone structure, reshape geometry).
+
+## Layout after extract
 
 ```
-trackconvert/
-  main.py                 # launch: python main.py
-  requirements.txt
-  build_exe.bat
-  icons/
+out/<name>/
+  work/                 unpacked 48-slot blobs + road/ + ai/ + structure_lock.json
   blender/
-    import_gt3_course.py  # Blender helper script
-  gt3course/
-    core/                 # formats only
-      course.py           # unpack / pack / grid / AI / CP
-      tex1.py             # Tex1 texture decode
-      mesh_io.py          # OBJ write-back helpers
-    export/
-      blender.py          # track package (OBJ + MTL)
-      gltf.py             # glTF 2.0
-      gtm1.py             # scenery mesh + textures
-    ui/
-      app.py              # main window
-      map_view.py         # top-down map editor
-      viewer.py           # 3D orbit viewer
-      batch.py
-      theme.py
+    road.gltf + .bin    road mesh for Blender
+    road.obj            alternate mesh
+    road_positions.f32  exact game-space verts (best write-back)
+    scenery/            GTM1 scenery OBJ + textures
+    textures/
+  extract_summary.json
 ```
-
-## Run
-
-```bash
-cd tools/trackconvert
-pip install -r requirements.txt
-python main.py
-```
-
-Or: `python -m gt3course`
