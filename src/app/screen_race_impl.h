@@ -6,6 +6,7 @@
 // are in screen_race.h and screen_online.h.
 
 #include "app/app.h"
+#include "app/camera_editor.h"
 #include "app/screen_gtmode.h"
 #include "app/screen_touch_overlay.h"
 #include "app/screen_registry.h"
@@ -29,6 +30,7 @@
 #include "race/camera_rig.h"
 #include "race/controls.h"
 #include "race/field.h"
+#include "race/scenery_fade.h"
 #include "race/exact_field.h"
 #include "race/exact_setup.h"
 #include "race/car_sfx.h"
@@ -87,6 +89,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -95,10 +98,12 @@ namespace gt3r::race_screen {
 using namespace race;
 
 // GT3 keeps each player's last change-view choice for the next race (the options object,
-// written every frame by the camera manager); a new game starts in the in-car view.
+// written every frame by the camera manager); a new game starts in the in-car view. Ours: a
+// custom camera by its id (race/custom_cameras.h).
 struct LastView {
     race::CameraMode mode = race::CameraMode::Bumper;
     bool mirror = true;
+    int custom = 0;
 };
 extern LastView g_last_view[2];
 
@@ -203,6 +208,8 @@ public:
     explicit RaceScreen(MenuLaunch l);
     // Online battle (docs/dev/ONLINE.md): the session's race; leaving returns to the lobby.
     explicit RaceScreen(const OnlineLaunch& l);
+    // Settings -> Cameras: the camera editor over the request's race (screen_race_camera_editor.cpp).
+    RaceScreen(MenuLaunch l, CustomCamera edit, bool is_new);
     ~RaceScreen() override;
 
     void update(App& app, double dt) override;
@@ -212,6 +219,7 @@ public:
     // The game area of Settings -> Display -> Aspect ratio, except the developer race list.
     bool follows_aspect() const override;
     void render(App& app, Ui& ui) override;
+    bool clickable(float x, float y) const override { return editor_ && editor_->clickable(x, y); }
 
 private:
     // ===== Types =====
@@ -360,6 +368,13 @@ private:
     bool update_env_cube();
     void draw_mirror(App& app, Ui& ui, const SDL_FRect& frame, const render::DrawOptions& main, bool p2 = false,
                      bool half = false);
+    SDL_FRect mirror_rect(const SDL_FRect& frame, bool half, const CustomCamera* custom) const;
+    // The main view's own-car opacity (CameraRig::body_blocks_view): eased to 0 while `blocks`, back
+    // to 1 after, over kCarFade seconds of wall time; 0 = not drawn.
+    float own_car_fade(bool blocks);
+    static constexpr double kCarFade = 0.25;
+    float car_fade_ = 1;
+    Uint64 car_fade_ns_ = 0;
     CarShadowParams shadow_params() const;
     void draw_car_icon(App& app, int car, const SDL_FRect& rc, size_t slot, bool on_bar = false);
     // `slot`: 0 the player, 1 player 2, 2 + i opponent i (as brake_lamps_).
@@ -367,13 +382,23 @@ private:
     int car_lamp_index(const sim::VehicleState& s, size_t slot) const;
     static TyreSmoke::View smoke_view(const CameraRig& c, float aspect, float fovy);
     // The view items are collected for: the main view, a 2P half, the rear-view mirror (its own
-    // sky; CourseScene::add_items). They differ in the course draw's flags (Env0 +0xF30 / +0xF34 /
-    // +0xF38: the billboards), the sun disc (not in the mirror) and the mirror's passes (presentation
-    // §H2, §I6, §I7).
-    enum class ItemsView { Main = 0, Split = 1, Mirror = 2 };
+    // sky; CourseScene::add_items) and a 2P half's mirror. They differ in the course draw's flags
+    // (Env0 +0xF30 / +0xF34 / +0xF38: the billboards; both mirrors +0xF38), the scenery's
+    // visibility lists (course::SceneryView), the sun disc (not in the mirror) and the mirror's
+    // passes (presentation §H2, §I6, §I7).
+    enum class ItemsView { Main = 0, Split = 1, Mirror = 2, SplitMirror = 3 };
     // `smoke_v.forward` is also the camera's view direction for the sun disc (none when zero).
+    // `seat`: 0 player 1's views (the 1P view, VR, the licence preview), 1 player 2's (the
+    // scenery's fades, scenery_fades_).
     void collect_items(const render::Vec3& eye, const sim::Vec3& right = {1, 0, 0}, bool player = true,
-                       bool second = true, const TyreSmoke::View& smoke_v = {}, ItemsView view = ItemsView::Main);
+                       bool second = true, const TyreSmoke::View& smoke_v = {}, ItemsView view = ItemsView::Main,
+                       int seat = 0);
+    // The scenery's fades between visibility lists (race::SceneryFade): [seat] the main views,
+    // [2 + seat] the mirrors; each stepped once a frame by frame_dt_ (fade_frames_: the frame it was).
+    std::array<race::SceneryFade, 4> scenery_fades_;
+    std::array<u64, 4> fade_frames_{};
+    u64 frame_serial_ = 0;
+    double frame_dt_ = 0;
     size_t player_items_[2] = {0, 0}; // collect_items: the player's car is items_[first, end)
     size_t scenery_items_ = 0;          // collect_items: the course's items are items_[0, end)
     HudData hud_data(int player);
@@ -438,9 +463,10 @@ private:
                                              const SoundCar& car, SoundView view);
     void silence(App& app);
     // The original's global SE gain: race SE in live play, replay SE in replays and demos. The race behind a quick
-    // menu (the backdrop, the licence preview box) is silent: the race drivers turn records off around their quick
-    // menus, which mutes the race's car and course sounds (presentation §C5).
-    bool se_on() const { return backdrop_ || preview_ ? false : replaying_ || demo_ || attract_ ? replay_se_ : race_se_; }
+    // menus, which mutes the race's car and course sounds (presentation §C5). The camera editor's frozen race is silent.
+    bool se_on() const {
+        return backdrop_ || preview_ || editor_ ? false : replaying_ || demo_ || attract_ ? replay_se_ : race_se_;
+    }
 
     // Selection (screen_race_select.cpp)
     void update_select(App& app);
@@ -483,7 +509,6 @@ private:
     void update_panel(App& app);
     void open_records(App& app);
     void draw_panel(App& app, const SDL_FRect& dst);
-    bool results_panel_up() const { return field_ && finished_ && !replaying_ && !two_player_ && finish_wait_ >= 5.0; }
     bool championship() const { return from_menu_ && launch_.request.champ_round > 0; }
     // Which result list rule applies (race::result_menu_list): a championship round, a GT race
     // (its qm_gt_result menu), or any other run.
@@ -614,6 +639,19 @@ private:
     void logger_seek(App& app, float d);
     bool update_logger(App& app, double dt);
 
+    // The camera editor (screen_race_camera_editor.cpp): the race a few seconds after its start (the
+    // computer drives), frozen, seen through the camera being edited; nothing of it is kept.
+    static constexpr double kEditorSceneTime = 5.0; // seconds after the start signal
+    std::unique_ptr<CameraEditor> editor_;
+    sim::VehicleState editor_still_; // the frozen moment (render_state_ rocks round it: CameraEditor::rocking)
+    double rock_time_ = 0;
+    void start_camera_editor(App& app);
+    void update_camera_editor(App& app, double dt);
+    void apply_editor_camera();
+    CameraEditor::Scene editor_scene() const;
+    // A live race's car and course, for the editor's scene ([cameras] preview_*).
+    void remember_editor_scene(App& app) const;
+
     // Online (screen_race_online.cpp)
     void configure_online_field(FieldConfig& cfg);
     int net_index(u8 player) const;
@@ -675,6 +713,10 @@ private:
     bool build_exact_solo(App& app);
     void load_opponent_cars(App& app, const RaceField& f);
     void build_player_visual(App& app, const std::string& model, ByteSpan car_file);
+    // The rig's bonnet-camera mounts (race/hood_camera.h) from the car it looks at: bound when
+    // the car visual behind camera_ / camera2_ changes (player 2, a replay's followed opponent).
+    void bind_hood(CameraRig& cam, std::optional<const CarVisual*>& bound, const CarVisual* v);
+    std::optional<const CarVisual*> hood_bound_, hood_bound2_;
     void exact_solo_step();      // after each step: the run's end and result from the race flow
     bool exact_solo() const { return solo_field_ != nullptr; }
     RaceField* exact_field() const { return field_ ? field_.get() : solo_field_.get(); }
