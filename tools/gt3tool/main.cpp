@@ -1,68 +1,90 @@
-// gt3tool: inspect and extract data from a user-supplied Gran Turismo 3 disc
-// image. Output is for personal use (modding, research); never redistribute
-// extracted game data. Commands live in cmd_*.cpp and register themselves.
+// gt3tool — command-line utilities for GT3 Revisited.
 
-#include "tool.h"
+#include "formats/course/course_file.h"
+#include "formats/course/course_import.h"
+#include "formats/course/course_rebuild.h"
+#include "formats/course/course_ai_edit.h"
+#include "formats/course/course_pack.h"
 
-#include <SDL3/SDL_filesystem.h>
-#include <SDL3/SDL_main.h>
-
-#include <algorithm>
 #include <cstdio>
-
-namespace gt3r::tool {
-
-std::vector<Command>& commands() {
-    static std::vector<Command> c;
-    return c;
-}
-
-bool save(const std::string& path, ByteSpan data) {
-    for (size_t i = 1; i < path.size(); ++i)
-        if (path[i] == '/') SDL_CreateDirectory(path.substr(0, i).c_str());
-    if (!write_host_file(path, data)) {
-        std::fprintf(stderr, "failed to write %s\n", path.c_str());
-        return false;
-    }
-    return true;
-}
-
-const Volume::Entry& need(Volume& vol, const std::string& path) {
-    const Volume::Entry* e = vol.find(path);
-    if (!e) throw FormatError("not found in GT3.VOL: " + path);
-    return *e;
-}
-
-} // namespace gt3r::tool
+#include <exception>
+#include <string>
 
 using namespace gt3r;
-using namespace gt3r::tool;
+using namespace gt3r::course;
 
 static int usage() {
-    std::puts("usage: gt3tool <command> <disc.iso|disc.chd> [args]\n");
-    auto cmds = commands();
-    std::sort(cmds.begin(), cmds.end(), [](const Command& a, const Command& b) { return std::string(a.name) < b.name; });
-    for (const Command& c : cmds) {
-        std::string head = std::string(c.name) + " <iso> " + c.usage;
-        std::printf("  %-44s %s\n", head.c_str(), c.help);
-    }
-    return 1;
+    std::fprintf(stderr,
+                 "gt3tool — GT3 Revisited utilities\n\n"
+                 "Course import (edited GLB from Course viewer R2 export):\n"
+                 "  gt3tool course import  <original.gz|bin> <edited.glb> <out.gz|bin>\n\n"
+                 "Also:\n"
+                 "  gt3tool course info    <course>\n"
+                 "  gt3tool course extract <course> <out_dir>\n"
+                 "  gt3tool course pack    <work_dir> <out>\n"
+                 "  gt3tool course gltf    <work_dir|GTRW.bin> <out.gltf>\n                 "  gt3tool course rebuild-road <original> <road.glb> <out>\n                 "  gt3tool course ai-export   <course> <out.json>\n                 "  gt3tool course ai-import   <course> <in.json> <out>\n                 "  gt3tool course ai-from-glb <course> <line.glb> <out> [lineIndex]\n\n"
+                 "Import writes positions back into GTRW/GTM1 in-place (same section sizes).\n");
+    return 2;
+}
+
+static int course_info(const std::string& path) {
+    Bytes data = load_course_bytes(path);
+    CourseFile f = CourseFile::parse(data);
+    std::printf("file: %s\nraw_size: %zu\nsections: %zu\n", path.c_str(), data.size(), f.sections().size());
+    for (const CourseSection& s : f.sections())
+        std::printf("  slot %2d  %-4s  %9u B\n", s.slot, s.tag.empty() ? "-" : s.tag.c_str(), s.size);
+    return 0;
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) return usage();
-    std::string name = argv[1];
-    for (const Command& c : commands()) {
-        if (name != c.name) continue;
-        Args args(argv + 3, argv + argc);
-        if (args.size() < c.min_args) return usage();
-        try {
-            auto disc = Disc::open(argv[2]);
-            return c.run(*disc, args);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "error: %s\n", e.what());
-            return 1;
+    if (argc < 2) return usage();
+    try {
+        if (std::string(argv[1]) != "course" || argc < 3) return usage();
+        std::string cmd = argv[2];
+        if (cmd == "info" && argc >= 4) return course_info(argv[3]);
+        if (cmd == "extract" && argc >= 5) {
+            std::puts(unpack_course(argv[3], argv[4]).c_str());
+            try {
+                std::puts(export_road_gltf(argv[4], std::string(argv[4]) + "/blender/road.gltf", true).c_str());
+            } catch (const std::exception& e) {
+                std::printf("gltf: %s\n", e.what());
+            }
+            return 0;
         }
+        if (cmd == "pack" && argc >= 5) {
+            std::puts(pack_course(argv[3], argv[4]).c_str());
+            return 0;
+        }
+        if (cmd == "gltf" && argc >= 5) {
+            std::puts(export_road_gltf(argv[3], argv[4], true).c_str());
+            return 0;
+        }
+        if (cmd == "import" && argc >= 6) {
+            CourseImportOptions opt;
+            std::puts(import_course_files(argv[3], argv[4], argv[5], opt).c_str());
+            return 0;
+        }
+        if (cmd == "rebuild-road" && argc >= 6) {
+            RoadRebuildOptions opt;
+            std::puts(rebuild_course_road_files(argv[3], argv[4], argv[5], opt).c_str());
+            return 0;
+        }
+        if (cmd == "ai-export" && argc >= 5) {
+            std::puts(export_ai_json(argv[3], argv[4]).c_str());
+            return 0;
+        }
+        if (cmd == "ai-import" && argc >= 6) {
+            std::puts(import_ai_json(argv[3], argv[4], argv[5]).c_str());
+            return 0;
+        }
+        if (cmd == "ai-from-glb" && argc >= 6) {
+            int li = argc >= 7 ? std::atoi(argv[6]) : 0;
+            std::puts(import_ai_from_glb(argv[3], argv[4], argv[5], li).c_str());
+            return 0;
+        }
+        return usage();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
     }
-    return usage();
 }

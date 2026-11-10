@@ -8,6 +8,10 @@
 #include "base/file.h"
 #include "base/log.h"
 #include "formats/model/gltf_export.h"
+#include "formats/course/course_import.h"
+#include "formats/course/course_rebuild.h"
+#include "formats/course/course_pack.h"
+#include "vfs/vfs.h"
 #include "render/test_models.h"
 #include "render/view3d.h"
 
@@ -106,8 +110,40 @@ public:
             debug_export_ = false;
             save_glb(app, loaded_ >= 0 ? loaded_ : sel_);
         }
+        // Course viewer: L2 opens moddedtracks picker; Cross converts selected GLB into game format.
+        if (exports_.folder == "courses") {
+            if (modded_menu_open_) {
+                if (m.pressed(PadButton::Triangle) || m.pressed(PadButton::Circle)) {
+                    modded_menu_open_ = false;
+                } else if (!modded_tracks_.empty()) {
+                    int v = m.vertical();
+                    if (v) {
+                        const int ntracks = static_cast<int>(modded_tracks_.size());
+                        modded_sel_ = (modded_sel_ + v) % ntracks;
+                        if (modded_sel_ < 0) modded_sel_ += ntracks;
+                    }
+                    if (m.pressed(PadButton::Cross) || m.pressed(PadButton::Start)) {
+                        const int course_idx = loaded_ >= 0 ? loaded_ : sel_;
+                        const std::string path = modded_tracks_[size_t(modded_sel_)].path;
+                        modded_menu_open_ = false;
+                        try {
+                            // Prefer rebuild (new topology from edited GLB). Hold Select for position-only import.
+                            if (m.held(PadButton::Select)) try_import(app, course_idx, path);
+                            else try_rebuild(app, course_idx, path);
+                        } catch (const std::exception& e) {
+                            notice_ = std::string("Convert failed: ") + e.what();
+                            notice_time_ = 8;
+                            notice_bad_ = true;
+                            LOG_WARN("Viewer: %s", notice_.c_str());
+                        }
+                    }
+                }
+            } else if (m.pressed(PadButton::L2) && n > 0) {
+                open_modded_tracks_menu(app);
+            }
+        }
         if (notice_time_ > 0) notice_time_ -= dt;
-        camera_.update(pad, dt);
+        if (!modded_menu_open_) camera_.update(pad, dt);
     }
 
     void on_event(App& app, const SDL_Event& e) override {
@@ -167,8 +203,11 @@ public:
 
         if (!fullscreen_) draw_list(ui);
         draw_stats(app, ui, vr);
-        ui.footer(fullscreen_ ? "Stick: orbit L1/R1: zoom X: spin []: wire Sel: LOD Start: cull R2: export Tri: back"
-                              : "Up/Down: select  Cross: view  Square: wireframe  L1/R1: zoom  R2: export  Triangle: back");
+        if (modded_menu_open_) draw_modded_tracks_menu(ui);
+        ui.footer(modded_menu_open_
+                      ? "Up/Down: pick track  Cross: convert to game format  Select+Cross: positions only  Triangle: cancel"
+                      : (fullscreen_ ? "Stick: orbit L1/R1: zoom X: spin []: wire Sel: LOD Start: cull R2: export L2: modded tracks Tri: back"
+                                     : "Up/Down: select  Cross: view  R2: export  L2: modded tracks  Triangle: back"));
     }
 
 private:
@@ -264,6 +303,236 @@ private:
         return out.empty() ? std::string("model") : out.substr(0, 64);
     }
 
+
+
+    static std::string modded_tracks_dir(App& app) { return app.data_dir() + "moddedtracks"; }
+
+    void open_modded_tracks_menu(App& app) {
+        modded_tracks_.clear();
+        modded_sel_ = 0;
+        const std::string dir = modded_tracks_dir(app);
+        host_make_dir(dir);
+        for (const HostDirEntry& e : host_dir_entries(dir)) {
+            if (e.dir) continue;
+            std::string lower = e.name;
+            for (char& c : lower)
+                if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+            const bool ok = lower.size() >= 4 &&
+                            (lower.compare(lower.size() - 4, 4, ".glb") == 0 ||
+                             lower.compare(lower.size() - 5, 5, ".gltf") == 0);
+            if (!ok) continue;
+            ModdedTrackItem item;
+            item.name = e.name;
+            item.path = dir + "/" + e.name;
+            modded_tracks_.push_back(std::move(item));
+        }
+        std::sort(modded_tracks_.begin(), modded_tracks_.end(),
+                  [](const ModdedTrackItem& a, const ModdedTrackItem& b) { return a.name < b.name; });
+        if (modded_tracks_.empty()) {
+            notice_ = "No .glb in moddedtracks — save edits to: " + dir;
+            notice_time_ = 8;
+            notice_bad_ = true;
+            modded_menu_open_ = false;
+            return;
+        }
+        modded_menu_open_ = true;
+        notice_ = "Choose a modded track to convert for: " + items_[size_t(loaded_ >= 0 ? loaded_ : sel_)];
+        notice_time_ = 4;
+        notice_bad_ = false;
+    }
+
+    void draw_modded_tracks_menu(Ui& ui) {
+        const float w = 320.f;
+        const float h = std::min(220.f, 40.f + 14.f * float(modded_tracks_.size() + 2));
+        const float x = (Ui::kWidth - w) * 0.5f;
+        const float y = (Ui::kHeight - h) * 0.5f;
+        ui.fill(x - 2, y - 2, w + 4, h + 4, colors::kBackground);
+        ui.fill(x, y, w, h, colors::kPanel);
+        ui.text(x + 8, y + 8, "Modded tracks", colors::kAccent);
+        ui.text(x + 8, y + 20, "Convert into game course for selection", colors::kDim);
+        float row = y + 36;
+        const int max_rows = int((h - 48) / 14);
+        int first = 0;
+        if (modded_sel_ >= max_rows) first = modded_sel_ - max_rows + 1;
+        for (int i = 0; i < max_rows && first + i < int(modded_tracks_.size()); ++i) {
+            const int idx = first + i;
+            const bool on = idx == modded_sel_;
+            if (on) ui.fill(x + 4, row - 1, w - 8, 13, colors::kHighlight);
+            ui.text(x + 10, row, Ui::clip(modded_tracks_[size_t(idx)].name, w - 24),
+                    on ? colors::kText : colors::kDim);
+            row += 14;
+        }
+    }
+
+    void begin_course_import(App& app, int index) {
+        notice_time_ = 6;
+        notice_bad_ = false;
+        if (!app.vfs()) {
+            notice_ = "No disc loaded";
+            notice_bad_ = true;
+            return;
+        }
+        const std::string name = file_name(items_[size_t(index)]);
+        const std::string exported = app.data_dir() + "exports/courses/" + name + ".glb";
+        if (host_path_exists(exported)) {
+            pending_import_glb_ = exported;
+            pending_import_index_ = index;
+            notice_ = "Importing " + name + ".glb…";
+            return;
+        }
+        static const SDL_DialogFileFilter kGlbFilters[] = {
+            {"glTF binary (GLB)", "glb"},
+            {"All files", "*"},
+        };
+        // Callback must only store the path — SDL may call it off the main thread.
+        struct User {
+            ModelViewerScreen* self;
+            int index;
+        };
+        auto* user = new User{this, index};
+        auto cb = [](void* userdata, const char* const* filelist, int /*filter*/) {
+            std::unique_ptr<User> u(static_cast<User*>(userdata));
+            if (!filelist || !filelist[0] || !filelist[0][0]) {
+                u->self->notice_ = "Import cancelled";
+                u->self->notice_time_ = 4;
+                u->self->notice_bad_ = true;
+                return;
+            }
+            u->self->pending_import_glb_ = filelist[0];
+            u->self->pending_import_index_ = u->index;
+            u->self->notice_ = "Importing…";
+            u->self->notice_time_ = 6;
+            u->self->notice_bad_ = false;
+        };
+        SDL_ShowOpenFileDialog(cb, user, app.window(), kGlbFilters, SDL_arraysize(kGlbFilters), nullptr, false);
+        notice_ = "Pick edited course GLB…";
+    }
+
+    void try_import(App& app, int index, const std::string& glb_path) {
+        notice_time_ = 8;
+        notice_bad_ = true;
+        Vfs* vfs = app.vfs();
+        if (!vfs) throw FormatError("no disc");
+        const std::string label = items_[size_t(index)];
+        const std::string vol_path = course_file_path(*vfs, label);
+        if (vol_path.empty()) throw FormatError("course not on disc: " + label);
+        auto original = vfs->read(vol_path);
+        if (!original) throw FormatError("cannot read " + vol_path);
+        auto glb = read_host_file(glb_path);
+        if (!glb) throw FormatError("cannot read " + glb_path);
+
+        course::CourseImportOptions opt;
+        Bytes packed = course::import_course_glb(*original, *glb, opt);
+        if (packed.size() != original->size()) throw FormatError("import changed course size");
+
+        const std::string mod_root = app.data_dir() + "mods/course_import/";
+        const std::string dest = mod_root + "files/" + vol_path;
+        host_make_dir(mod_root);
+        host_make_dir(mod_root + "files");
+        {
+            std::string dir = dest;
+            auto slash = dir.find_last_of("/\\");
+            if (slash != std::string::npos) host_make_dir(dir.substr(0, slash));
+        }
+        const std::string ini =
+            "[mod]\nname = Course import\nversion = 1.0\ndescription = Edited courses from Course viewer import\n"
+            "priority = 50\n";
+        write_host_file(mod_root + "mod.ini",
+                        ByteSpan{reinterpret_cast<const u8*>(ini.data()), ini.size()});
+        if (!write_host_file(dest, packed)) throw FormatError("could not write " + dest);
+
+        notice_ = "Imported -> mods/course_import/files/" + vol_path;
+        notice_bad_ = false;
+        LOG_INFO("Viewer: course import %s (%zu bytes)", dest.c_str(), packed.size());
+        load(app, index);
+    }
+
+
+    void begin_course_rebuild(App& app, int index) {
+        notice_time_ = 6;
+        notice_bad_ = false;
+        if (!app.vfs()) {
+            notice_ = "No disc loaded";
+            notice_bad_ = true;
+            return;
+        }
+        const std::string name = file_name(items_[size_t(index)]);
+        const std::string exported = app.data_dir() + "exports/courses/" + name + ".glb";
+        pending_rebuild_ = true;
+        if (host_path_exists(exported)) {
+            pending_import_glb_ = exported;
+            pending_import_index_ = index;
+            notice_ = "Rebuilding road from " + name + ".glb…";
+            return;
+        }
+        static const SDL_DialogFileFilter kGlbFilters[] = {
+            {"glTF binary (GLB)", "glb"},
+            {"All files", "*"},
+        };
+        struct User {
+            ModelViewerScreen* self;
+            int index;
+        };
+        auto* user = new User{this, index};
+        auto cb = [](void* userdata, const char* const* filelist, int) {
+            std::unique_ptr<User> u(static_cast<User*>(userdata));
+            if (!filelist || !filelist[0] || !filelist[0][0]) {
+                u->self->notice_ = "Rebuild cancelled";
+                u->self->notice_time_ = 4;
+                u->self->notice_bad_ = true;
+                u->self->pending_rebuild_ = false;
+                return;
+            }
+            u->self->pending_import_glb_ = filelist[0];
+            u->self->pending_import_index_ = u->index;
+            u->self->pending_rebuild_ = true;
+            u->self->notice_ = "Rebuilding road…";
+            u->self->notice_time_ = 6;
+            u->self->notice_bad_ = false;
+        };
+        SDL_ShowOpenFileDialog(cb, user, app.window(), kGlbFilters, SDL_arraysize(kGlbFilters), nullptr, false);
+        notice_ = "Pick road GLB to rebuild…";
+    }
+
+    void try_rebuild(App& app, int index, const std::string& glb_path) {
+        notice_time_ = 8;
+        notice_bad_ = true;
+        Vfs* vfs = app.vfs();
+        if (!vfs) throw FormatError("no disc");
+        const std::string label = items_[size_t(index)];
+        const std::string vol_path = course_file_path(*vfs, label);
+        if (vol_path.empty()) throw FormatError("course not on disc: " + label);
+        auto original = vfs->read(vol_path);
+        if (!original) throw FormatError("cannot read " + vol_path);
+        auto glb = read_host_file(glb_path);
+        if (!glb) throw FormatError("cannot read " + glb_path);
+
+        course::RoadRebuildOptions opt;
+        opt.generate_walls_from_boundary = true;
+        Bytes packed = course::rebuild_course_road_from_glb(*original, *glb, opt);
+
+        const std::string mod_root = app.data_dir() + "mods/course_import/";
+        const std::string dest = mod_root + "files/" + vol_path;
+        host_make_dir(mod_root);
+        host_make_dir(mod_root + "files");
+        {
+            std::string dir = dest;
+            auto slash = dir.find_last_of("/\\");
+            if (slash != std::string::npos) host_make_dir(dir.substr(0, slash));
+        }
+        const std::string ini =
+            "[mod]\nname = Course import\nversion = 1.0\ndescription = Edited courses from Course viewer\n"
+            "priority = 50\n";
+        write_host_file(mod_root + "mod.ini",
+                        ByteSpan{reinterpret_cast<const u8*>(ini.data()), ini.size()});
+        if (!write_host_file(dest, packed)) throw FormatError("could not write " + dest);
+
+        notice_ = "Rebuilt road -> mods/course_import/files/" + vol_path;
+        notice_bad_ = false;
+        LOG_INFO("Viewer: course rebuild-road %s (%zu bytes)", dest.c_str(), packed.size());
+        load(app, index);
+    }
+
     void save_glb(App& app, int index) {
         notice_time_ = 6;
         notice_bad_ = true;
@@ -335,6 +604,16 @@ private:
     std::vector<std::string> items_;
     ModelLoader load_;
     ModelExport exports_;
+    std::string pending_import_glb_;
+    int pending_import_index_ = -1;
+    bool pending_rebuild_ = false;
+    struct ModdedTrackItem {
+        std::string name;
+        std::string path;
+    };
+    bool modded_menu_open_ = false;
+    int modded_sel_ = 0;
+    std::vector<ModdedTrackItem> modded_tracks_;
     std::string notice_; // the last export's result, shown for notice_time_ seconds
     double notice_time_ = 0;
     bool notice_bad_ = false;

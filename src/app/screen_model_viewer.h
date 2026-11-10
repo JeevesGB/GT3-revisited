@@ -17,6 +17,7 @@
 //
 // R2 saves the item as binary glTF (formats/model/gltf_export.h) at the LOD shown, in
 // <user data>/exports/<ModelExport::folder>/, for 3D software.
+// Course viewer: L2 imports an edited .glb back into the course (mods/course_import).
 
 #include "scene/model.h"
 

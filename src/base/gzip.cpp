@@ -45,4 +45,56 @@ Bytes deflate_zlib(ByteSpan src) {
     return out;
 }
 
+Bytes inflate_gzip_auto(ByteSpan src) {
+    Bytes out(std::max<size_t>(src.size() * 4, 4096));
+    z_stream zs{};
+    if (inflateInit2(&zs, MAX_WBITS + 16) != Z_OK) throw FormatError("inflateInit2 failed");
+    zs.next_in = const_cast<Bytef*>(src.data());
+    zs.avail_in = static_cast<uInt>(src.size());
+    size_t produced = 0;
+    int rc = Z_OK;
+    for (;;) {
+        if (produced + 1 >= out.size()) out.resize(out.size() * 2);
+        zs.next_out = out.data() + produced;
+        zs.avail_out = static_cast<uInt>(out.size() - produced);
+        rc = inflate(&zs, Z_NO_FLUSH);
+        produced = size_t(zs.next_out - out.data());
+        if (rc == Z_STREAM_END) break;
+        if (rc == Z_OK) continue;
+        if (rc == Z_BUF_ERROR && zs.avail_in == 0) break;
+        inflateEnd(&zs);
+        throw FormatError("gzip inflate failed");
+    }
+    inflateEnd(&zs);
+    if (rc != Z_STREAM_END) throw FormatError("gzip inflate incomplete");
+    out.resize(produced);
+    return out;
+}
+
+Bytes deflate_gzip(ByteSpan src) {
+    z_stream zs{};
+    if (deflateInit2(&zs, 6, Z_DEFLATED, MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        throw FormatError("deflateInit2 failed");
+    zs.next_in = const_cast<Bytef*>(src.data());
+    zs.avail_in = static_cast<uInt>(src.size());
+    Bytes out(compressBound(static_cast<uLong>(src.size())) + 64);
+    size_t produced = 0;
+    int rc = Z_OK;
+    for (;;) {
+        if (produced + 64 >= out.size()) out.resize(out.size() * 2);
+        zs.next_out = out.data() + produced;
+        zs.avail_out = static_cast<uInt>(out.size() - produced);
+        rc = deflate(&zs, Z_FINISH);
+        produced = size_t(zs.next_out - out.data());
+        if (rc == Z_STREAM_END) break;
+        if (rc != Z_OK && rc != Z_BUF_ERROR) {
+            deflateEnd(&zs);
+            throw FormatError("gzip deflate failed");
+        }
+    }
+    deflateEnd(&zs);
+    out.resize(produced);
+    return out;
+}
+
 } // namespace gt3r
