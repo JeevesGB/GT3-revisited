@@ -205,7 +205,7 @@ public:
         draw_stats(app, ui, vr);
         if (modded_menu_open_) draw_modded_tracks_menu(ui);
         ui.footer(modded_menu_open_
-                      ? "Up/Down: pick track  Cross: convert to game format  Select+Cross: positions only  Triangle: cancel"
+                      ? "Up/Down: pick GLB  Cross: convert to .gz course  Select+Cross: prefer positions  Triangle: cancel"
                       : (fullscreen_ ? "Stick: orbit L1/R1: zoom X: spin []: wire Sel: LOD Start: cull R2: export L2: modded tracks Tri: back"
                                      : "Up/Down: select  Cross: view  R2: export  L2: modded tracks  Triangle: back"));
     }
@@ -408,7 +408,62 @@ private:
         notice_ = "Pick edited course GLB…";
     }
 
-    void try_import(App& app, int index, const std::string& glb_path) {
+
+    // Write a full 48-slot course container as a game-loadable .gz (same form as
+    // https://github.com/JeevesGB/gt3-files data/courses/<region>/<name>.gz).
+    void install_converted_course(App& app, const std::string& vol_path, ByteSpan packed) {
+        // 1) Game-format dump next to the user's moddedtracks folder
+        const std::string converted_root = app.data_dir() + "moddedtracks/converted/";
+        std::string gz_rel = vol_path;
+        // ensure .gz suffix
+        if (gz_rel.size() < 3 || gz_rel.substr(gz_rel.size() - 3) != ".gz") gz_rel += ".gz";
+        const std::string gz_path = converted_root + gz_rel;
+        {
+            std::string dir = gz_path;
+            auto slash = dir.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                // mkdir parents
+                std::string cur = converted_root;
+                host_make_dir(cur);
+                std::string rest = gz_rel.substr(0, slash == std::string::npos ? 0 : gz_rel.find_last_of("/\\"));
+                size_t start = 0;
+                while (start < rest.size()) {
+                    size_t n = rest.find_first_of("/\\", start);
+                    if (n == std::string::npos) n = rest.size();
+                    cur += rest.substr(start, n - start) + "/";
+                    host_make_dir(cur);
+                    start = n + 1;
+                }
+            }
+        }
+        course::save_course_bytes(gz_path, packed, true);
+
+        // 2) Live mod override for GT3R (raw or gz — VFS reads either)
+        const std::string mod_root = app.data_dir() + "mods/course_import/";
+        const std::string dest = mod_root + "files/" + vol_path;
+        host_make_dir(mod_root);
+        host_make_dir(mod_root + "files");
+        {
+            std::string dir = dest;
+            auto slash = dir.find_last_of("/\\");
+            if (slash != std::string::npos) host_make_dir(dir.substr(0, slash));
+        }
+        const std::string ini =
+            "[mod]\nname = Course import\nversion = 1.0\ndescription = Converted courses from Course viewer\n"
+            "priority = 50\n";
+        write_host_file(mod_root + "mod.ini",
+                        ByteSpan{reinterpret_cast<const u8*>(ini.data()), ini.size()});
+        // Prefer .gz under mods too when original was gzipped on disc
+        course::save_course_bytes(dest + ".gz", packed, true);
+        write_host_file(dest, packed); // raw fallback
+
+        notice_ = "Game course written: moddedtracks/converted/" + gz_rel;
+        notice_bad_ = false;
+        LOG_INFO("Viewer: converted course %s (%zu raw bytes) -> %s", vol_path.c_str(), packed.size(),
+                 gz_path.c_str());
+    }
+
+    void try_convert(App& app, int index, const std::string& glb_path, bool force_rebuild) {
         notice_time_ = 8;
         notice_bad_ = true;
         Vfs* vfs = app.vfs();
@@ -421,116 +476,41 @@ private:
         auto glb = read_host_file(glb_path);
         if (!glb) throw FormatError("cannot read " + glb_path);
 
-        course::CourseImportOptions opt;
-        Bytes packed = course::import_course_glb(*original, *glb, opt);
-        if (packed.size() != original->size()) throw FormatError("import changed course size");
-
-        const std::string mod_root = app.data_dir() + "mods/course_import/";
-        const std::string dest = mod_root + "files/" + vol_path;
-        host_make_dir(mod_root);
-        host_make_dir(mod_root + "files");
-        {
-            std::string dir = dest;
-            auto slash = dir.find_last_of("/\\");
-            if (slash != std::string::npos) host_make_dir(dir.substr(0, slash));
+        Bytes packed;
+        std::string mode;
+        if (!force_rebuild) {
+            try {
+                course::CourseImportOptions opt;
+                packed = course::import_course_glb(*original, *glb, opt);
+                if (packed.size() == original->size()) {
+                    mode = "positions";
+                } else {
+                    packed.clear();
+                }
+            } catch (...) {
+                packed.clear();
+            }
         }
-        const std::string ini =
-            "[mod]\nname = Course import\nversion = 1.0\ndescription = Edited courses from Course viewer import\n"
-            "priority = 50\n";
-        write_host_file(mod_root + "mod.ini",
-                        ByteSpan{reinterpret_cast<const u8*>(ini.data()), ini.size()});
-        if (!write_host_file(dest, packed)) throw FormatError("could not write " + dest);
+        if (packed.empty()) {
+            course::RoadRebuildOptions opt;
+            opt.generate_walls_from_boundary = true;
+            packed = course::rebuild_course_road_from_glb(*original, *glb, opt);
+            mode = "rebuild-road";
+        }
 
-        notice_ = "Imported -> mods/course_import/files/" + vol_path;
-        notice_bad_ = false;
-        LOG_INFO("Viewer: course import %s (%zu bytes)", dest.c_str(), packed.size());
+        // Validate container still parses as a course
+        course::CourseFile::parse(packed);
+        install_converted_course(app, vol_path, packed);
+        notice_ = notice_ + " (" + mode + ")";
         load(app, index);
     }
 
-
-    void begin_course_rebuild(App& app, int index) {
-        notice_time_ = 6;
-        notice_bad_ = false;
-        if (!app.vfs()) {
-            notice_ = "No disc loaded";
-            notice_bad_ = true;
-            return;
-        }
-        const std::string name = file_name(items_[size_t(index)]);
-        const std::string exported = app.data_dir() + "exports/courses/" + name + ".glb";
-        pending_rebuild_ = true;
-        if (host_path_exists(exported)) {
-            pending_import_glb_ = exported;
-            pending_import_index_ = index;
-            notice_ = "Rebuilding road from " + name + ".glb…";
-            return;
-        }
-        static const SDL_DialogFileFilter kGlbFilters[] = {
-            {"glTF binary (GLB)", "glb"},
-            {"All files", "*"},
-        };
-        struct User {
-            ModelViewerScreen* self;
-            int index;
-        };
-        auto* user = new User{this, index};
-        auto cb = [](void* userdata, const char* const* filelist, int) {
-            std::unique_ptr<User> u(static_cast<User*>(userdata));
-            if (!filelist || !filelist[0] || !filelist[0][0]) {
-                u->self->notice_ = "Rebuild cancelled";
-                u->self->notice_time_ = 4;
-                u->self->notice_bad_ = true;
-                u->self->pending_rebuild_ = false;
-                return;
-            }
-            u->self->pending_import_glb_ = filelist[0];
-            u->self->pending_import_index_ = u->index;
-            u->self->pending_rebuild_ = true;
-            u->self->notice_ = "Rebuilding road…";
-            u->self->notice_time_ = 6;
-            u->self->notice_bad_ = false;
-        };
-        SDL_ShowOpenFileDialog(cb, user, app.window(), kGlbFilters, SDL_arraysize(kGlbFilters), nullptr, false);
-        notice_ = "Pick road GLB to rebuild…";
+    void try_import(App& app, int index, const std::string& glb_path) {
+        try_convert(app, index, glb_path, /*force_rebuild=*/false);
     }
 
     void try_rebuild(App& app, int index, const std::string& glb_path) {
-        notice_time_ = 8;
-        notice_bad_ = true;
-        Vfs* vfs = app.vfs();
-        if (!vfs) throw FormatError("no disc");
-        const std::string label = items_[size_t(index)];
-        const std::string vol_path = course_file_path(*vfs, label);
-        if (vol_path.empty()) throw FormatError("course not on disc: " + label);
-        auto original = vfs->read(vol_path);
-        if (!original) throw FormatError("cannot read " + vol_path);
-        auto glb = read_host_file(glb_path);
-        if (!glb) throw FormatError("cannot read " + glb_path);
-
-        course::RoadRebuildOptions opt;
-        opt.generate_walls_from_boundary = true;
-        Bytes packed = course::rebuild_course_road_from_glb(*original, *glb, opt);
-
-        const std::string mod_root = app.data_dir() + "mods/course_import/";
-        const std::string dest = mod_root + "files/" + vol_path;
-        host_make_dir(mod_root);
-        host_make_dir(mod_root + "files");
-        {
-            std::string dir = dest;
-            auto slash = dir.find_last_of("/\\");
-            if (slash != std::string::npos) host_make_dir(dir.substr(0, slash));
-        }
-        const std::string ini =
-            "[mod]\nname = Course import\nversion = 1.0\ndescription = Edited courses from Course viewer\n"
-            "priority = 50\n";
-        write_host_file(mod_root + "mod.ini",
-                        ByteSpan{reinterpret_cast<const u8*>(ini.data()), ini.size()});
-        if (!write_host_file(dest, packed)) throw FormatError("could not write " + dest);
-
-        notice_ = "Rebuilt road -> mods/course_import/files/" + vol_path;
-        notice_bad_ = false;
-        LOG_INFO("Viewer: course rebuild-road %s (%zu bytes)", dest.c_str(), packed.size());
-        load(app, index);
+        try_convert(app, index, glb_path, /*force_rebuild=*/true);
     }
 
     void save_glb(App& app, int index) {

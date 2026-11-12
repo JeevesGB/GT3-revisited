@@ -5,6 +5,7 @@
 
 #include "base/log.h"
 #include "disc/region.h"
+#include "disc/volume.h"
 #include "gt3r_version.h"
 #include "formats/png_writer.h"
 #include "formats/texture_pack.h"
@@ -691,6 +692,7 @@ void App::show_open_dialog() {
     SDL_ShowOpenFileDialog(on_dialog, this, window_, kDiscFilters, SDL_arraysize(kDiscFilters), nullptr, false);
 }
 
+
 void App::set_dialog_result(std::string path) {
     SDL_LockMutex(dialog_mutex_);
     dialog_result_ = std::move(path);
@@ -748,16 +750,6 @@ SDL_AppResult App::iterate() {
     }
 #endif
     double dt = frame_s;
-    // With vsync every frame is shown a whole number of refreshes after the last: step by
-    // those (the clock at a frame's start wanders against them, an unevenness that shows as a
-    // vibration while the view turns). A headset's display times above are already even.
-    int vsync = 0;
-    if (renderer_ && SDL_GetRenderVSync(renderer_, &vsync) && vsync != 0) {
-#if GT3R_XR
-        if (!xr_)
-#endif
-            dt = pacer_.step(frame_s);
-    }
     last_ticks_ = now;
     idle_cursor(now);
     ++fps_frames_, fps_time_ += frame_s;
@@ -773,9 +765,9 @@ SDL_AppResult App::iterate() {
     chosen.swap(dialog_result_);
     SDL_UnlockMutex(dialog_mutex_);
     if (!chosen.empty()) {
-        const bool switching = disc_ != nullptr; // from the library: straight to the title menu
+        const bool switching = disc_ != nullptr;
         last_error_ = open_disc(chosen);
-        if (disc_ && last_error_.empty()) { // a disc that failed leaves the open one as it was
+        if (disc_ && last_error_.empty()) {
             screens_.clear();
             push(make_hub_screen());
             push_game_start(!switching);

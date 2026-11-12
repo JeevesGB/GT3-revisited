@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -38,10 +39,18 @@ public:
         u32 stored_size = 0; // bytes on disc
         bool compressed = false;
         u8 part = 0; // which of the set's volumes holds it (add_part)
+        // Host-folder mode: absolute path to the file on disk (read instead of VOL sectors).
+        std::string host_path;
     };
 
     // `base_offset` is the byte offset of GT3.VOL within the disc Reader `file`.
     Volume(Reader& file, u64 base_offset, u64 length);
+
+    // Open an extracted game tree (VOL-relative layout: courses/, cars/, …).
+    // Accepts a folder that contains those paths, or a parent with data/courses/.
+    // Files ending in .gz are registered without the suffix and decompressed on read
+    // (matches gt3-files dumps and in-VOL gzip entries).
+    static std::unique_ptr<Volume> open_host(const std::string& root_dir);
     // Another volume of the set in the same disc Reader (whose files are spread over several *.VOL files): its entries
     // join this one's, a path already here staying this one's.
     void add_part(u64 base_offset, u64 length);
@@ -80,7 +89,9 @@ private:
     std::string disc_key_, serial_;
     static std::string node_name(ByteSpan toc, u32 offset);
 
-    Reader& file_;
+    explicit Volume() = default; // host mode
+
+    Reader* file_ = nullptr; // null in host mode
     struct Part {
         u64 base, length;
     };
