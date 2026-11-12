@@ -14,6 +14,7 @@
 #include "formats/db/gt_db.h"
 #include "game/gt_save.h"
 #include "race/backend.h"
+#include "race/billboards.h"
 #include "race/camera_rig.h"
 #include "race/controls.h"
 #include "race/demo_replay.h"
@@ -93,6 +94,26 @@ PadState pad_with(PadButton b, u8 pressure) {
 }
 
 } // namespace
+
+TEST(race_billboard_corners_stand_upright) {
+    // Issue 278. BLBd sprite types list their corners' UVs in either order; the corners stand where
+    // their UVs put them in the picture. Corner 0 is on the left, the smaller t on top.
+    auto check = [](const float (&s)[4], const float (&t)[4], const float (&wx)[4], const float (&wy)[4]) {
+        float cx[4], cy[4];
+        race::sprite_corners(s, t, cx, cy);
+        for (int c = 0; c < 4; ++c) CHECK(cx[c] == wx[c] && cy[c] == wy[c]);
+    };
+    // Super Speedway's poplars (types 4..9): by column, top-left, bottom-left, top-right, bottom-right.
+    check({0.010f, 0.010f, 0.736f, 0.736f}, {0.008f, 0.992f, 0.008f, 0.992f}, {-1, -1, 1, 1}, {1, 0, 1, 0});
+    // Tahiti Maze type 0: by row, bottom-left, bottom-right, top-left, top-right.
+    check({0.012f, 0.988f, 0.012f, 0.988f}, {0.988f, 0.988f, 0.012f, 0.012f}, {-1, 1, -1, 1}, {0, 0, 1, 1});
+    // Tahiti Maze type 1: by column from the foot, bottom-left, top-left, bottom-right, top-right.
+    check({0.012f, 0.012f, 0.988f, 0.988f}, {0.988f, 0.012f, 0.988f, 0.012f}, {-1, -1, 1, 1}, {0, 1, 0, 1});
+    // Tahiti Maze type 379: by row from the right: mirrored.
+    check({0.988f, 0.012f, 0.988f, 0.012f}, {0.988f, 0.988f, 0.012f, 0.012f}, {-1, 1, -1, 1}, {0, 0, 1, 1});
+    // Smokey Mountain South: slightly turned UVs, by column from the right (mirrored).
+    check({1.002f, 0.998f, 0.002f, -0.002f}, {0.002f, 1.002f, -0.002f, 0.998f}, {-1, -1, 1, 1}, {1, 0, 1, 0});
+}
 
 TEST(race_stick_mapping) {
     ControlConfig cfg;
@@ -326,17 +347,50 @@ TEST(race_camera_look) {
     CHECK(near(std::fabs(back.look_yaw()), kPi, 0.02f) && forward(back).z > 0.99f);
     CHECK(up.look_yaw() == 0 && nudge.look_yaw() == 0);
     CHECK(near(diagonal.look_yaw(), kPi / 4, 0.01f));
-    // Straight back with the stick wobbling either side: the view keeps to one side (never swings
+    // Straight back with the stick wobbling either side: the view stays behind (never swings
     // round through ahead).
+    auto turned = [&](float from, float to) { return std::fabs(std::remainder(to - from, 2 * kPi)); };
     CameraRig wobble;
-    float last = 0;
-    int flips = 0;
+    float last = 0, most_step = 0;
     for (int i = 0; i < 120; ++i) {
         run(wobble, i % 2 ? 0.02f : -0.02f, 1, 1);
-        if (wobble.look_yaw() * last < 0) ++flips;
+        if (i >= 30) most_step = std::max(most_step, turned(last, wobble.look_yaw())); // once it is behind
         last = wobble.look_yaw();
     }
-    CHECK(flips == 0 && near(std::fabs(last), kPi, 0.05f));
+    CHECK(most_step < 0.05f && near(std::fabs(last), kPi, 0.05f) && forward(wobble).z > 0.99f);
+    // Rolling the stick round (issue 200): the view turns round with it, twice either way, never
+    // more than a small step a frame, and ends where the stick points. Past 225 degrees it once
+    // swung a whole turn back the other way.
+    for (float dir : {1.0f, -1.0f}) {
+        CameraRig circle;
+        float prev = 0, biggest = 0;
+        constexpr int kFrames = 480; // two turns in 8 s
+        float a = 0;
+        for (int i = 1; i <= kFrames; ++i) {
+            a = dir * 4 * kPi * float(i) / kFrames;
+            run(circle, std::sin(a), -std::cos(a), 1);
+            biggest = std::max(biggest, turned(prev, circle.look_yaw()));
+            prev = circle.look_yaw();
+        }
+        run(circle, std::sin(a), -std::cos(a), 30);
+        CHECK(biggest < 0.2f && turned(a, circle.look_yaw()) < 0.02f);
+    }
+    // Let go turned 225 degrees round: back to the front the short way (135 degrees), never through behind.
+    CameraRig past;
+    for (int i = 1; i <= 75; ++i) {
+        const float a = 1.25f * kPi * float(i) / 75;
+        run(past, std::sin(a), -std::cos(a), 1);
+    }
+    run(past, std::sin(1.25f * kPi), -std::cos(1.25f * kPi), 30);
+    CHECK(near(past.look_yaw(), -0.75f * kPi, 0.02f));
+    float was = past.look_yaw();
+    bool short_way = true;
+    for (int i = 0; i < 90; ++i) {
+        run(past, 0, 0, 1);
+        short_way &= past.look_yaw() >= was && past.look_yaw() <= 0;
+        was = past.look_yaw();
+    }
+    CHECK(short_way && past.look_yaw() == 0);
     // The chase views go round the car: looking right, the eye is on its left.
     CameraRig chase, far;
     chase.set_mode(CameraMode::Chase);
@@ -367,6 +421,18 @@ TEST(race_camera_look) {
     r3.buttons = u16(1u << unsigned(PadButton::R3));
     CHECK(look_back_held(l1, false) && look_back_held(l1, true));
     CHECK(look_back_held(r3, true) && !look_back_held(r3, false) && !look_back_held(PadState{}, true));
+}
+
+// Another window in front on a computer (issue 200): the race pauses unless the controllers are read in
+// the background; online it can't, so only the motors go still. Phones and tablets: their own pause.
+TEST(race_focus_loss) {
+    using race::FocusLoss;
+    CHECK(race::focus_loss(true, false, false) == FocusLoss::Pause);
+    CHECK(race::focus_loss(true, true, false) == FocusLoss::None);  // driving from another window
+    CHECK(race::focus_loss(true, false, true) == FocusLoss::Quiet); // online: never paused
+    CHECK(race::focus_loss(true, true, true) == FocusLoss::None);
+    CHECK(race::focus_loss(false, false, false) == FocusLoss::None); // phones: the background pause
+    CHECK(race::focus_loss(false, false, true) == FocusLoss::None);
 }
 
 // The car LOD by camera distance (< 30 m, < 80 m, beyond; at most the model's levels), and
@@ -1104,6 +1170,107 @@ TEST(race_results_text) {
     CHECK(result_time_text(false, true, 400, 344, 1) == "+1 lap");
     CHECK(result_time_text(false, true, 400, 344, 3) == "+3 laps");
     CHECK(result_time_text(false, false, 0, 344, 0) == "Running...");
+}
+
+// presentation §B2 (the result arcade, the result championship): when the results panel turns its
+// pages and when the race ends. Driven in 60 Hz steps like the race screen.
+TEST(race_result_panel_pages) {
+    constexpr double kStep = 1.0 / 60.0;
+    const size_t rows = 6;
+    const double shown = race::ResultsOverlay::fully_shown_time(rows); // 7.72 s after the finish
+    CHECK(std::abs(shown - 7.72) < 1e-9);
+    CHECK(std::abs(race::ResultsOverlay::fully_shown_time(rows, 0.0) - 2.72) < 1e-9);
+    // Frames (60 Hz) from `from` until update() reports the end (its time), else -1 at `limit`. Every car has
+    // finished from frame `all_done_at`; confirm is pressed on frame `confirm_at` (-1 none).
+    auto run = [&](race::ResultPanelFlow& f, int from, int all_done_at, int confirm_at, int limit) {
+        for (int i = from; i < limit; ++i)
+            if (f.update(i * kStep, rows, i >= all_done_at, i == confirm_at)) return i * kStep;
+        return -1.0;
+    };
+    auto near_time = [&](double t, double want) { return std::abs(t - want) < 4 * kStep; }; // (frame rounding of each wait)
+    constexpr int kNever = 1 << 30;
+    // Arcade / GT race: confirm counts only once the panel is fully shown.
+    race::ResultPanelFlow f;
+    f.reset(false);
+    CHECK(run(f, 0, kNever, 420, 1800) < 0); // 7 s: too early, ignored; and no timer while cars run
+    f.reset(false);
+    CHECK(near_time(run(f, 0, kNever, 480, 1800), 8.0));
+    // Every car finished before the panel was shown: 15 s from the panel being shown, not from the last finish.
+    f.reset(false);
+    CHECK(near_time(run(f, 0, 180, -1, 2400), shown + 15.0));
+    // The last car finishes after it: 15 s from then.
+    f.reset(false);
+    CHECK(near_time(run(f, 0, 720, -1, 2400), 27.0));
+    CHECK(f.page() == race::ResultPage::Results);
+
+    // Championship round: RACE RESULTS (10 s) -> 0.5 s fade -> POINTS (10 s) -> fade -> TOTAL POINT (15 s) -> end.
+    f.reset(true);
+    int i = 0;
+    for (; i < 6000 && f.page() == race::ResultPage::Results; ++i) CHECK(!f.update(i * kStep, rows, true, false));
+    const double points_open = (i - 1) * kStep;
+    CHECK(near_time(points_open, shown + 10.5));
+    race::ResultPanelView v = f.view(points_open);
+    CHECK(v.page == race::ResultPage::Points && v.t == 0 && v.delay == 0 && v.alpha == 1);
+    for (; i < 6000 && f.page() == race::ResultPage::Points; ++i) CHECK(!f.update(i * kStep, rows, true, false));
+    const double total_open = (i - 1) * kStep;
+    CHECK(near_time(total_open - points_open, 2.72 + 10.5));
+    CHECK(near_time(run(f, i, 0, -1, 6000) - total_open, 2.72 + 15.0));
+
+    // Confirm turns each page as soon as it is shown, with the fade-out between; POINTS runs no timer while cars are
+    // racing, TOTAL POINT always does.
+    f.reset(true);
+    CHECK(run(f, 0, kNever, 480, 481) < 0);
+    CHECK(f.page() == race::ResultPage::Results);
+    CHECK(std::abs(f.view(8.25).alpha - 0.5f) < 1e-3);
+    CHECK(run(f, 481, kNever, -1, 1800) < 0);
+    CHECK(f.page() == race::ResultPage::Points);
+    CHECK(run(f, 1800, kNever, 1980, 1981) < 0); // confirm on POINTS at 33 s
+    CHECK(near_time(run(f, 1981, kNever, -1, 6000), 33.0 + 0.5 + 2.72 + 15.0));
+    CHECK(f.page() == race::ResultPage::TotalPoints);
+}
+
+// presentation §B2: the championship's points pages (points by place, texts, totals).
+TEST(race_championship_points_pages) {
+    const int expect[8] = {10, 6, 4, 3, 2, 1, 0, 0};
+    for (int p = 0; p < 8; ++p) CHECK(race::championship_points(p) == expect[p]);
+    CHECK(race::championship_points(-1) == 0);
+    CHECK(race::result_points_text('+', 10) == "+10pts");
+    CHECK(race::result_points_text('+', 1) == "+1pt");
+    CHECK(race::result_points_text('+', 0) == "+0pt");
+    CHECK(race::result_points_text(' ', 26) == " 26pts");
+    CHECK(race::result_points_text('+', 10, "BR") == "+10pts");
+    CHECK(race::result_points_text('+', 10, "JP") == "+10 pt");
+    CHECK(race::result_points_text(' ', 1, "JP") == " 1 pt");
+    // Round 1: the totals are the round's points, in finishing order.
+    std::vector<int> totals;
+    std::vector<size_t> order = race::total_points_order(std::vector<int>(6, 0), totals);
+    CHECK((order == std::vector<size_t>{0, 1, 2, 3, 4, 5}));
+    CHECK((totals == std::vector<int>{10, 6, 4, 3, 2, 1}));
+    // A later round: each row's points before it (finishing order). The 4th (10 + 3 = 13) leads; the winner (1 + 10)
+    // and the 6th (10 + 1) tie on 11 and stay in finishing order.
+    order = race::total_points_order(std::vector<int>{1, 2, 3, 10, 0, 10}, totals);
+    CHECK((totals == std::vector<int>{11, 8, 7, 13, 2, 11}));
+    CHECK((order == std::vector<size_t>{3, 0, 5, 1, 2, 4}));
+}
+
+// result1.pmb's page has the three title bars a championship round's results switch between.
+TEST(race_result_panel_titles_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    Vfs vfs(&disc->volume());
+    std::optional<Bytes> b = vfs.read("menu/US/result1.pmb");
+    CHECK(b.has_value());
+    if (!b) return;
+    menu::PmbFile f = menu::PmbFile::parse(*b);
+    CHECK(!f.pages.empty());
+    if (f.pages.empty()) return;
+    std::set<std::string> names;
+    for (const menu::Layer& l : f.pages[0].layers) {
+        for (const menu::Element& e : l.elements) names.insert(e.name);
+        for (const menu::Element& e : l.widgets) names.insert(e.name);
+    }
+    for (const menu::Element& e : f.pages[0].items) names.insert(e.name);
+    for (const char* t : {"b_title_result", "b_title_point", "b_title_total_point"}) CHECK(names.count(t) == 1);
 }
 
 // The race screens' car names keep the database's game text (escapes and JIS pairs) for the game
@@ -2403,8 +2570,8 @@ TEST(race_flare_disc_mesh) {
     for (size_t i = 0; i < b.verts.size(); ++i) CHECK(b.verts[i].depth == (i < 28 ? 0.25f : 1.0f));
 }
 
-// The glows' ray test against a car body (in its own frame): rays from far outside its grid
-// still meet it; glass (no depth writes) and rays past, over or short of it do not.
+// The glows' ray test against a car body (in its own frame): rays from far outside it still
+// meet it; glass (no depth writes) and rays past, over or short of it do not.
 TEST(race_occluder_car_body) {
     scene::Model car;
     scene::Mesh& mesh = car.meshes.emplace_back();
@@ -2425,7 +2592,7 @@ TEST(race_occluder_car_body) {
     quad(2, scene::kAlphaBlend | scene::kNoDepthWrite);
     race::Occluder o;
     o.add(car);
-    o.build(0.25f);
+    o.build();
     CHECK(o.triangles() == 2);
     CHECK(o.segment_blocked({0, 0.5f, -100}, {0, 0.5f, 100}));
     CHECK(o.segment_blocked({0.5f, 1, 80}, {-0.5f, 0.2f, -60}));
@@ -2433,6 +2600,72 @@ TEST(race_occluder_car_body) {
     CHECK(!o.segment_blocked({5, 0.5f, -100}, {5, 0.5f, 100}));  // past its side
     CHECK(!o.segment_blocked({0, 2, -100}, {0, 2, 100}));        // over it
     CHECK(!o.segment_blocked({0, 0.5f, 1}, {0, 0.5f, 10}));      // through the glass only
+}
+
+// The course occluder's tree answers as a test of every triangle: random rays and segments
+// through a dense heap of triangles, segments ending just past one included.
+TEST(race_occluder_matches_every_triangle) {
+    scene::Model m;
+    scene::Mesh& mesh = m.meshes.emplace_back();
+    u32 seed = 12345;
+    auto rnd = [&] { return float((seed = seed * 1664525u + 1013904223u) >> 8) / float(1u << 24); };
+    std::vector<render::Vec3> tri;
+    for (int i = 0; i < 3000; ++i) {
+        const render::Vec3 c{rnd() * 400 - 200, rnd() * 60, rnd() * 400 - 200};
+        const float s = i % 50 == 0 ? 80.0f : 3.0f; // a few large ones over many small ones
+        for (int k = 0; k < 3; ++k) {
+            scene::Vertex v{};
+            v.pos[0] = c.x + (rnd() - 0.5f) * s, v.pos[1] = c.y + (rnd() - 0.5f) * s, v.pos[2] = c.z + (rnd() - 0.5f) * s;
+            if (i % 7 == 0) v.pos[1] = c.y; // flat ones: boxes with no height
+            mesh.vertices.push_back(v);
+            mesh.indices.push_back(u32(mesh.indices.size()));
+            tri.push_back({v.pos[0], v.pos[1], v.pos[2]});
+        }
+    }
+    scene::Primitive pr;
+    pr.first_index = 0, pr.index_count = u32(mesh.indices.size());
+    mesh.primitives.push_back(pr);
+    race::Occluder o;
+    o.add(m);
+    o.build();
+    CHECK(o.triangles() == 3000);
+    auto brute = [&](const render::Vec3& a, const render::Vec3& b) {
+        render::Vec3 d = b - a;
+        const float len = std::sqrt(dot(d, d));
+        d = d * (1.0f / len);
+        for (size_t i = 0; i < tri.size(); i += 3) {
+            const render::Vec3 e1 = tri[i + 1] - tri[i], e2 = tri[i + 2] - tri[i];
+            const render::Vec3 pv = cross(d, e2);
+            const float det = dot(e1, pv);
+            if (std::fabs(det) < 1e-8f) continue;
+            const float inv = 1.0f / det;
+            const render::Vec3 tv = a - tri[i];
+            const float u = dot(tv, pv) * inv;
+            if (u < 0 || u > 1) continue;
+            const render::Vec3 qv = cross(tv, e1);
+            const float v = dot(d, qv) * inv;
+            if (v < 0 || u + v > 1) continue;
+            const float dist = dot(e2, qv) * inv;
+            if (dist > 0.05f && dist < len) return true;
+        }
+        return false;
+    };
+    int mismatches = 0, hits = 0;
+    for (int i = 0; i < 4000; ++i) {
+        const render::Vec3 a{rnd() * 500 - 250, rnd() * 80 - 10, rnd() * 500 - 250};
+        render::Vec3 b{rnd() * 500 - 250, rnd() * 80 - 10, rnd() * 500 - 250};
+        if (i % 2) { // to just past a triangle's centre: hits in the segment's last metre
+            const size_t t = size_t(rnd() * 2999) * 3;
+            const render::Vec3 c = (tri[t] + tri[t + 1] + tri[t + 2]) * (1.0f / 3.0f), d = c - a;
+            b = c + d * (0.5f / std::sqrt(dot(d, d)));
+        }
+        const bool want = brute(a, b);
+        hits += want;
+        mismatches += o.segment_blocked(a, b) != want;
+    }
+    CHECK(mismatches == 0);
+    CHECK(hits > 1000);
+    CHECK(!o.blocked({0, 500, 0}, {0, 1, 0}, 6000)); // straight up from over the heap
 }
 
 // The sun disc (presentation §I6): its colours from Env0, 10 m out along the sun in the

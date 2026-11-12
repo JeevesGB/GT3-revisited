@@ -248,11 +248,23 @@ passes also write the texel alpha to the frame buffer, and the
 reflection passes (normal in the UV slot, env map from a runtime slot) are
 blended Cs·Ad + Cd: reflection weighted by that alpha.
 `Options::weighted_reflection` turns these into `kAdditive | kEnvironmentMap |
-kUnlit | kNoDepthWrite` primitives. Reflection triangles whose three corners
-come from the same textured pass get that pass's texture and UVs, and the renderer
-weights the reflection per pixel by the texel alpha (0 in the cut-outs, so the
-reflection doesn't haze over the wheels in the arches). The remaining triangles
-are untextured with a per-vertex weight. Glass is a nearly uniform dark texture
+kUnlit | kNoDepthWrite` primitives. A reflection triangle that an earlier pass drew
+exactly (the same three corners) gets the texture and UVs of the last such pass, and
+the renderer weights the reflection per pixel by its texel alpha. Where that pass
+is alpha-tested, its failing texels write nothing on the GS, so the alpha that lay
+there before stays: the primitive carries the test's reference and that earlier
+alpha (`scene::Primitive::under_ref` / `under_alpha`; the triangle's own under it,
+else the mean of its corners', in five steps), and the renderer weights texels at or
+below the reference with it. In the wheel arches that is
+usually 0, so the reflection doesn't haze over the wheels; in the windows the roof
+and pillar passes cut out, it is the alpha-only shell's 0x80 (the Alto Works,
+`sz0004`: issue 278). Otherwise, triangles whose three corners come from the same
+textured pass get that pass's texture and UVs; the remaining triangles are
+untextured with a per-vertex weight. Matching corners alone took a triangle that
+spans two overlapping packets (the MR2 G-Limited's hood, `ty0076`) or a window cut
+into a pass as that pass's own, which left flat patches and unreflecting glass.
+Checked in a GS dump of the original's garage (Alto Works): the reflection over
+its windows draws on the frame alpha the shell wrote. Glass is a nearly uniform dark texture
 with GS alpha ≈ 0x73, drawn with normal blending and the alpha channel
 write-masked, so it is ~90 % dark plus the reflection on top. The glass's own
 texture is used as its reflectivity because the real Ad (whatever lies
@@ -546,6 +558,25 @@ blur (wheel spin blur, below) is made for a flat rim's image: the races blur a
 modelled rim with turned copies of it instead (docs/dev/RACE.md). The menus' and the race files' GTTR repeats,
 flags and shininess are the same on every car, so the tread blur reads the
 menus' tyre as it does the race's.
+
+The menus' rims carry their light in the image: they are drawn with ambient 1,
+diffuse 1 and no specular on nearly flat faces, and most stock rims have one side
+of the spokes painted brighter. The menus never turn a rim, so that light stays
+put; in races the rim turns and the painted light would turn with it. Races
+(ours, `CarModelOptions::even_menu_rim_light`, `formats/model/rim_light.h`) take a
+menus' rim with its images evened out round the axis: each texel's place on the
+rim comes from the triangles drawing it (its position in their UVs carried to
+their corners, so the axis's place in the image is wherever the layout puts it,
+usually the image's centre), and on each ring of texels one texel wide the first
+angular harmonic of each channel (one bright side) is divided out, fitted with
+the rings two either side and alpha-weighted, keeping the ring's mean, the spokes
+and the alpha. Texels a triangle samples as a single spot (a spoke's side or the
+barrel in one flat colour), texels two triangles put at different places, rings
+within 2 texels of the axis and rings covered on one side only are left as they
+are. Measured as the first harmonic of luminance against each ring's mean, over
+the mean luminance, NTSC-U 1.10's 287 stock rims go from 0.044 to 0.003 on
+average (277 at or under 0.015) and the wheel shop's 181 from 0.015 to 0.002. A
+rim standing still in a race looks a little flatter than in the menus.
 
 ## Brake parts (menus)
 

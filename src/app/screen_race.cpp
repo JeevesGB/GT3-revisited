@@ -20,7 +20,9 @@
 // (Race screen code map: docs/dev/RACE.md.)
 
 #include "app/screen_race_impl.h"
+#include "game/gt_catalog.h"
 #include "game/language_rules.h"
+#include "platform/render_scale.h"
 
 namespace gt3r::race_screen {
 
@@ -161,6 +163,26 @@ void RaceScreen::on_event(App& app, const SDL_Event& e) {
     else menu_pointer_.clear();
     // Mobile: going to the background pauses the race, like the console.
     if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND && stage_ == Stage::Drive && !paused_) open_pause(app);
+    // Ours, computers: another window in front (race::focus_loss). Only while the player drives (replays,
+    // demonstrations and the menus over the race play no rumble); the pause stays on when the window is back.
+    if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) focus_quiet_ = false;
+    if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+        // (VR builds read controllers in the background: the headset's own focus pauses, App::iterate.)
+        const bool desktop = !platform::is_mobile();
+        const bool driving = stage_ == Stage::Drive && !paused_ && !quick_ && !replaying_ && !demo_ && !attract_ &&
+                             !race_preview_ && exit_transition_ < 0;
+        switch (race::focus_loss(desktop, app.input().reads_background(), online_)) {
+        case race::FocusLoss::Pause:
+            if (driving) LOG_INFO("Race: paused, the window lost the focus"), open_pause(app);
+            break;
+        case race::FocusLoss::Quiet:
+            if (!focus_quiet_) LOG_INFO("Race: rumble and force feedback off while the window is away (online)");
+            focus_quiet_ = true;
+            for (int p = 0; p < 2; ++p) app.input().set_rumble(p, {}), app.input().stop_force_feedback(p);
+            break;
+        case race::FocusLoss::None: break;
+        }
+    }
 }
 
 // Phones: driving touch controls while racing, menu controls otherwise (the quick menus
@@ -170,6 +192,11 @@ TouchLayout RaceScreen::touch_layout() const {
     // (A demonstration plays like a replay, the Preview is the computer's: the menu buttons end them.)
     return stage_ == Stage::Drive && !paused_ && !replaying_ && !demo_ && !race_preview_ && !quick_ ? TouchLayout::Driving
                                                                                                      : TouchLayout::Menu;
+}
+
+bool RaceScreen::touch_fades() const {
+    // (Not the pause menu over a replay, nor the quick menus: they are used, not watched.)
+    return touch_layout() == TouchLayout::Menu && stage_ == Stage::Drive && !paused_ && !quick_;
 }
 
 bool RaceScreen::follows_aspect() const {
@@ -233,6 +260,8 @@ void RaceScreen::init(App& app) {
         return;
     }
     db_ok_ = db_.load(*app.vfs());
+    // The makers' countries, for the driver's side of a car ([vr] seat_side = car).
+    if (db_ok_) game::load_maker_countries([&](const std::string& p) { return app.vfs()->read(p); }, db_);
     if (!colors_.load(*app.vfs())) LOG_WARN("Race: database/carcolor.db not loaded (opponents in default paint)");
     if (!db_ok_) error_ = db_.player_error();
     for (const data::Course& c : db_.courses()) {

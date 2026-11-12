@@ -113,6 +113,14 @@ they only reach the game while its window is in front, so another app or a
 second copy of the game can use the same pad without the game acting on it.
 The keyboard and mouse always need the game's window. VR builds always read
 their controllers (the headset's window never has the focus).
+With it off, a race the player drives pauses when another window takes the
+focus (online races go on, without rumble or force feedback until the game is in
+front again; presentation §E2). When the game's window has the focus again, each
+controller's motors are sent the level they should play now, written to the
+controller even if it matches the last one sent, and again 0.1 s later: a stop
+sent while the window was away could be lost on Windows, and the pad kept
+rumbling after the player came back until the game made it rumble again (issue
+200). Wheels and the VR controllers are left alone.
 
 **Xbox controllers** (Windows; Settings → Controls, `[input] xbox_driver`,
 `rawinput` by default): SDL reads Xbox pads through its RAWINPUT driver, which
@@ -552,6 +560,11 @@ The overlay appears on the first touch (on Android and iOS it is shown at
 start unless a gamepad is connected) and hides as soon as a gamepad or the
 keyboard is used. The Android back and volume keys do not hide it.
 
+While a replay or demonstration plays, the controls fade out 3 seconds after the
+last touch. A tap anywhere brings them back; it only shows them and presses
+nothing. They stay up while a finger is on them, and are always shown in the
+replay's pause menu.
+
 Each screen picks a layout:
 
 | Layout | Controls |
@@ -644,7 +657,9 @@ On desktop the mouse cursor hides over the game's window after 2 seconds without
 bring it back.
 
 Screens choose their layout by overriding `Screen::touch_layout()`
-(`TouchLayout::Menu`, `Driving` or `None`). On desktop, `GT3R_PHONE=1`
+(`TouchLayout::Menu`, `Driving` or `None`), and have them fade out while
+untouched by overriding `Screen::touch_fades()` (the race screen's replays and
+demonstrations; `TouchControls::set_fade`). On desktop, `GT3R_PHONE=1`
 opens a window shaped like a 20:9 phone (cutout, rounded corners, phone UI
 sizing, whole-window `--shot`s) and `GT3R_TOUCH_SHOW=1` shows the controls
 without a touch, for screenshots. The logic is in

@@ -12,6 +12,7 @@
 #include "app/screen_race.h"
 #include "app/screen_registry.h"
 #include "app/text_keyboard.h"
+#include "app/presence.h"
 #include "app/updates.h"
 
 #include "base/file.h"
@@ -975,6 +976,25 @@ private:
             std::snprintf(b, sizeof(b), "%+.2f m", double(v));
             return std::string(b);
         };
+        auto metres2 = [](float v) {
+            char b[16];
+            std::snprintf(b, sizeof(b), "%.2f m", double(v));
+            return std::string(b);
+        };
+        choice("Seat side",
+               "In-car views: the seat you sit in. Match the car: the seat the car's own driver sits in, as its model "
+               "shows; without one, the side of its maker's country, or the center.",
+               {"Center", "Left", "Right", "Match the car"}, int(s.seat_side), [apply, s](int i) {
+                   xr::Settings n = s;
+                   n.seat_side = xr::SeatSide(i);
+                   apply(n);
+               });
+        slider("Seat side distance", "How far a left or right seat is from the middle of the car.", s.seat_offset, 0.1f, 0.6f,
+               0.02f, metres2(s.seat_offset), [apply, s](float v) {
+                   xr::Settings n = s;
+                   n.seat_offset = v;
+                   apply(n);
+               }).enabled = s.seat_side != xr::SeatSide::Center;
         slider("Seat height", "In-car views: your eyes above or below the car's camera.", s.seat_height, -0.6f, 0.6f, 0.02f,
                seat(s.seat_height), [apply, s](float v) {
                    xr::Settings n = s;
@@ -2364,6 +2384,14 @@ private:
         Row& notes = action("Release notes", links.notes.empty() ? "The relay server has not named a release page yet." : links.notes,
                             links.notes.empty() ? "Unknown" : "", [] { updates().open_notes(); });
         notes.enabled = !links.notes.empty();
+        if (Presence::supported()) { // app/presence.h
+            heading("Discord");
+            toggle("Show what you're playing",
+                   "Your Discord profile shows GT3 Revisited with the mode, course, car and lap, through the Discord "
+                   "app on this computer. Nothing is sent when Discord is closed.",
+                   discord_status().enabled(app), [a](bool v) { discord_status().set_enabled(*a, v); });
+            info("Discord", discord_status().status_text());
+        }
         heading("Online battle");
         std::string server = app.config().get("online", "server").value_or(kDefaultServer);
         info("Relay server", server.empty() ? kDefaultServer : server,

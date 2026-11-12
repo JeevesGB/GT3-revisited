@@ -325,141 +325,140 @@ namespace gt3r::race {
         }
     }
 
-    CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::string& model, const WheelSpec& ws,
-        int paint, ByteSpan wheel_file, const CarBodyMod& body_mod, ByteSpan showroom_car,
-        ByteSpan showroom_wheel, std::function<std::optional<Bytes>()> stand_in_rim)
-        : ctx_(&ctx) {
-        mounts_ = car_camera_mounts(car_file);
-        CarModelOptions opt;
-        opt.body_mod = body_mod;
-        opt.wheel_override = wheel_file;
-        opt.showroom_car = showroom_car;
-        opt.showroom_wheel = showroom_wheel;
-        opt.stand_in_rim = std::move(stand_in_rim);
-        showroom_rims_ = CarFile::is_car(showroom_car); // (load_car_model's test for LOD 0's menu wheels)
-        opt.lod = -1;
-        opt.wheels = true;
-        opt.effects = true; // shadow nodes
-        opt.wheel_spec = ws;
-        opt.paint = paint;
-        opt.morphs = &morphs_;
-        scene::Model car = load_car_model(car_file, opt, model);
-        for (const scene::Mesh& m : car.meshes) lods_ = std::max(lods_, m.lod + 1);
-        scene::Model body = scene::extract(car, [](const scene::Mesh& m) {
-            return m.name.rfind("wheel_", 0) != 0 && m.name.rfind("node", 0) != 0;
-            });
-        for (int k = 0; k < 3; ++k) {
-            std::string n = k == 0 ? "node1" : k == 1 ? "node6" : "node5";
-            shadow_src_[size_t(k)] = scene::extract(car, [&](const scene::Mesh& m) { return m.name == n; });
-            for (scene::Mesh& m : shadow_src_[size_t(k)].meshes)
-                for (scene::Primitive& p : m.primitives) {
-                    p.material = {};
-                    if (k < 2) {
-                        p.flags = scene::kAlphaBlend | scene::kUnlit | scene::kNoDepthWrite | scene::kDoubleSided, p.texture = -1;
-                    }
-                    else { // headlamp pool: textured, Cs As + Cd
-                        p.flags = scene::kAdditive | scene::kUnlit | scene::kNoDepthWrite | scene::kDoubleSided;
-                    }
+CarVisual::CarVisual(render::GpuContext& ctx, ByteSpan car_file, const std::string& model, const WheelSpec& ws,
+                     int paint, ByteSpan wheel_file, const CarBodyMod& body_mod, ByteSpan showroom_car,
+                     ByteSpan showroom_wheel, std::function<std::optional<Bytes>()> stand_in_rim)
+    : ctx_(&ctx) {
+    mounts_ = car_camera_mounts(car_file);
+    CarModelOptions opt;
+    opt.body_mod = body_mod;
+    opt.wheel_override = wheel_file;
+    opt.showroom_car = showroom_car;
+    opt.showroom_wheel = showroom_wheel;
+    opt.stand_in_rim = std::move(stand_in_rim);
+    opt.even_menu_rim_light = true; // the rims turn (issue 272)
+    showroom_rims_ = CarFile::is_car(showroom_car); // (load_car_model's test for LOD 0's menu wheels)
+    opt.lod = -1;
+    opt.wheels = true;
+    opt.effects = true; // shadow nodes
+    opt.wheel_spec = ws;
+    opt.paint = paint;
+    opt.morphs = &morphs_;
+    scene::Model car = load_car_model(car_file, opt, model);
+    for (const scene::Mesh& m : car.meshes) lods_ = std::max(lods_, m.lod + 1);
+    scene::Model body = scene::extract(car, [](const scene::Mesh& m) {
+        return m.name.rfind("wheel_", 0) != 0 && m.name.rfind("node", 0) != 0;
+    });
+    for (int k = 0; k < 3; ++k) {
+        std::string n = k == 0 ? "node1" : k == 1 ? "node6" : "node5";
+        shadow_src_[size_t(k)] = scene::extract(car, [&](const scene::Mesh& m) { return m.name == n; });
+        for (scene::Mesh& m : shadow_src_[size_t(k)].meshes)
+            for (scene::Primitive& p : m.primitives) {
+                p.material = {};
+                if (k < 2) {
+                    p.flags = scene::kAlphaBlend | scene::kUnlit | scene::kNoDepthWrite | scene::kDoubleSided, p.texture = -1;
+                } else { // headlamp pool: textured, Cs As + Cd
+                    p.flags = scene::kAdditive | scene::kUnlit | scene::kNoDepthWrite | scene::kDoubleSided;
                 }
-        }
-        hood_profile_ = make_hood_camera_profile(body, ws.wheelbase);
-        body_ = std::make_unique<render::GpuModel>(ctx, body);
-        occluder_.add(body);
-        occluder_.build(0.25f);
-        if (!morphs_.empty()) {
-            scene::Model mm; // the textures the morph parts use, then their meshes at the defaults
-            mm.name = model + "_morph";
-            std::vector<int> map(car.textures.size(), -1);
-            for (const gtm1::MorphDraws& md : morphs_)
-                for (int t : md.textures())
-                    if (size_t(t) < map.size() && map[size_t(t)] < 0) {
-                        map[size_t(t)] = int(mm.textures.size());
-                        mm.textures.push_back(car.textures[size_t(t)]);
-                    }
-            size_t draws = 0;
-            for (gtm1::MorphDraws& md : morphs_) {
-                md.map_textures(map);
-                draws += md.size();
-                for (scene::Mesh& m : md.meshes(gtm1::kCarCallbackDefaults)) mm.meshes.push_back(std::move(m));
             }
-            morph_base_ = std::make_unique<render::GpuModel>(ctx, mm);
-            LOG_INFO("Car %s: %zu morph draws (%zu LODs)", model.c_str(), draws, morphs_.size());
-        }
-        try {
-            lamps_ = CarLampSet::parse(CarFile::parse(car_file).info);
-            LOG_INFO("Car %s: lamps %zu head, %zu tail, %zu brake", model.c_str(), lamps_.head.size(), lamps_.tail.size(), lamps_.brake.size());
-        }
-        catch (const std::exception&) {
-        }
-        {
-            // The brake-lamp variant: the node programs' brake switch (selector id 0) takes its
-            // "pressed" branch (lit lens chunks with lamp materials).
-            CarModelOptions bo = opt;
-            bo.brake = true;
-            bo.wheels = false;
-            bo.effects = false;
-            std::vector<gtm1::MorphDraws> lit_morphs; // (left out as in body_; drawn from morphs_)
-            bo.morphs = &lit_morphs;
-            scene::Model lit = load_car_model(car_file, bo, model);
-            scene::Model lit_body = scene::extract(lit, [](const scene::Mesh& m) { return m.name.rfind("node", 0) != 0; });
-            if (!lit_body.meshes.empty()) body_brake_ = std::make_unique<render::GpuModel>(ctx, lit_body);
-        }
-        // The wheels' effects (race/wheel_fx.h): the tyre's GTTR fields, the brake records, and the
-        // rim's images in the wheel file's texture table (GTM1 +0x34, table 0: entry 1 the rim,
-        // entry 2 the spinning rim GT3 shows on the other cars' fast wheels).
-        std::optional<scene::Texture> rim_spin;
-        try {
-            CarFile f = CarFile::parse(car_file);
-            if (f.tire.size() >= 0x1C) {
-                tyre_repeats_ = rd32(f.tire, 0x10), tyre_flags_ = rd32(f.tire, 0x14);
-                u32 sh = rd32(f.tire, 0x18);
-                std::memcpy(&tyre_shininess_, &sh, 4);
-            }
-            brake_records_ = parse_brake_records(f.info);
-            gtm1::Gtm1 g = gtm1::Gtm1::parse(WheelFile::parse(wheel_file.empty() ? f.wheel : wheel_file).gtm1);
-            auto set_image = [&](size_t entry) -> std::optional<scene::Texture> {
-                if (g.texset_tables.empty() || g.texset_tables[0].size() <= entry) return std::nullopt;
-                const u32 k = g.texset_tables[0][entry];
-                if (k >= g.texsets.size() || g.texsets[k] >= g.data.size()) return std::nullopt;
-                std::vector<scene::Texture> t;
-                gtm1::decode_texture_set(g.data.subspan(g.texsets[k]), t, "rim_");
-                if (t.empty()) return std::nullopt;
-                return t[0];
-                };
-            if (std::optional<scene::Texture> rim = set_image(1)) rim_width_ = rim->width;
-            rim_spin = set_image(2);
-        }
-        catch (const std::exception& e) {
-            LOG_WARN("Car %s: wheel effects: %s", model.c_str(), e.what());
-        }
-        for (int i = 0; i < 4; ++i) {
-            std::string n = kWheelNames[i];
-            int axle = i >> 1;
-            render::Vec3 c{ (i & 1 ? 0.5f : -0.5f) * ws.track[axle], ws.radius[axle], (axle ? 0.5f : -0.5f) * ws.wheelbase };
-            wheel_center_[size_t(i)] = c;
-            wheel_width_[size_t(axle)] = ws.width[axle];
-            wheel_bound_[size_t(axle)] =
-                std::sqrt(ws.radius[axle] * ws.radius[axle] + 0.25f * ws.width[axle] * ws.width[axle]);
-            auto hub_model = [&](const std::string& name) {
-                scene::Model w = scene::extract(car, [&](const scene::Mesh& m) { return m.name == name; });
-                for (scene::Mesh& m : w.meshes)
-                    for (scene::Vertex& v : m.vertices) v.pos[0] -= c.x, v.pos[1] -= c.y, v.pos[2] -= c.z;
-                return w;
-                };
-            scene::Model rim = hub_model(n);
-            if (!rim.meshes.empty()) {
-                if (rim_spin) {
-                    rim_spin_texture_ = int(rim.textures.size()); // (the same index in every wheel's model)
-                    rim.textures.push_back(*rim_spin);
-                }
-                rims_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, rim);
-            }
-            scene::Model tyre = hub_model(n + "_tyre");
-            if (!tyre.meshes.empty()) tyres_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, tyre);
-            scene::Model band = hub_model(n + "_band");
-            if (!band.meshes.empty()) bands_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, band);
-        }
     }
+    hood_profile_ = make_hood_camera_profile(body, ws.wheelbase);
+    driver_seat_ = find_driver_seat(body);
+    body_ = std::make_unique<render::GpuModel>(ctx, body);
+    occluder_.add(body);
+    occluder_.build();
+    if (!morphs_.empty()) {
+        scene::Model mm; // the textures the morph parts use, then their meshes at the defaults
+        mm.name = model + "_morph";
+        std::vector<int> map(car.textures.size(), -1);
+        for (const gtm1::MorphDraws& md : morphs_)
+            for (int t : md.textures())
+                if (size_t(t) < map.size() && map[size_t(t)] < 0) {
+                    map[size_t(t)] = int(mm.textures.size());
+                    mm.textures.push_back(car.textures[size_t(t)]);
+                }
+        size_t draws = 0;
+        for (gtm1::MorphDraws& md : morphs_) {
+            md.map_textures(map);
+            draws += md.size();
+            for (scene::Mesh& m : md.meshes(gtm1::kCarCallbackDefaults)) mm.meshes.push_back(std::move(m));
+        }
+        morph_base_ = std::make_unique<render::GpuModel>(ctx, mm);
+        LOG_INFO("Car %s: %zu morph draws (%zu LODs)", model.c_str(), draws, morphs_.size());
+    }
+    try {
+        lamps_ = CarLampSet::parse(CarFile::parse(car_file).info);
+        LOG_INFO("Car %s: lamps %zu head, %zu tail, %zu brake", model.c_str(), lamps_.head.size(), lamps_.tail.size(), lamps_.brake.size());
+    } catch (const std::exception&) {
+    }
+    {
+        // The brake-lamp variant: the node programs' brake switch (selector id 0) takes its
+        // "pressed" branch (lit lens chunks with lamp materials).
+        CarModelOptions bo = opt;
+        bo.brake = true;
+        bo.wheels = false;
+        bo.effects = false;
+        std::vector<gtm1::MorphDraws> lit_morphs; // (left out as in body_; drawn from morphs_)
+        bo.morphs = &lit_morphs;
+        scene::Model lit = load_car_model(car_file, bo, model);
+        scene::Model lit_body = scene::extract(lit, [](const scene::Mesh& m) { return m.name.rfind("node", 0) != 0; });
+        if (!lit_body.meshes.empty()) body_brake_ = std::make_unique<render::GpuModel>(ctx, lit_body);
+    }
+    // The wheels' effects (race/wheel_fx.h): the tyre's GTTR fields, the brake records, and the
+    // rim's images in the wheel file's texture table (GTM1 +0x34, table 0: entry 1 the rim,
+    // entry 2 the spinning rim GT3 shows on the other cars' fast wheels).
+    std::optional<scene::Texture> rim_spin;
+    try {
+        CarFile f = CarFile::parse(car_file);
+        if (f.tire.size() >= 0x1C) {
+            tyre_repeats_ = rd32(f.tire, 0x10), tyre_flags_ = rd32(f.tire, 0x14);
+            u32 sh = rd32(f.tire, 0x18);
+            std::memcpy(&tyre_shininess_, &sh, 4);
+        }
+        brake_records_ = parse_brake_records(f.info);
+        gtm1::Gtm1 g = gtm1::Gtm1::parse(WheelFile::parse(wheel_file.empty() ? f.wheel : wheel_file).gtm1);
+        auto set_image = [&](size_t entry) -> std::optional<scene::Texture> {
+            if (g.texset_tables.empty() || g.texset_tables[0].size() <= entry) return std::nullopt;
+            const u32 k = g.texset_tables[0][entry];
+            if (k >= g.texsets.size() || g.texsets[k] >= g.data.size()) return std::nullopt;
+            std::vector<scene::Texture> t;
+            gtm1::decode_texture_set(g.data.subspan(g.texsets[k]), t, "rim_");
+            if (t.empty()) return std::nullopt;
+            return t[0];
+        };
+        if (std::optional<scene::Texture> rim = set_image(1)) rim_width_ = rim->width;
+        rim_spin = set_image(2);
+    } catch (const std::exception& e) {
+        LOG_WARN("Car %s: wheel effects: %s", model.c_str(), e.what());
+    }
+    for (int i = 0; i < 4; ++i) {
+        std::string n = kWheelNames[i];
+        int axle = i >> 1;
+        render::Vec3 c{(i & 1 ? 0.5f : -0.5f) * ws.track[axle], ws.radius[axle], (axle ? 0.5f : -0.5f) * ws.wheelbase};
+        wheel_center_[size_t(i)] = c;
+        wheel_width_[size_t(axle)] = ws.width[axle];
+        wheel_bound_[size_t(axle)] =
+            std::sqrt(ws.radius[axle] * ws.radius[axle] + 0.25f * ws.width[axle] * ws.width[axle]);
+        auto hub_model = [&](const std::string& name) {
+            scene::Model w = scene::extract(car, [&](const scene::Mesh& m) { return m.name == name; });
+            for (scene::Mesh& m : w.meshes)
+                for (scene::Vertex& v : m.vertices) v.pos[0] -= c.x, v.pos[1] -= c.y, v.pos[2] -= c.z;
+            return w;
+        };
+        scene::Model rim = hub_model(n);
+        if (!rim.meshes.empty()) {
+            if (rim_spin) {
+                rim_spin_texture_ = int(rim.textures.size()); // (the same index in every wheel's model)
+                rim.textures.push_back(*rim_spin);
+            }
+            rims_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, rim);
+        }
+        scene::Model tyre = hub_model(n + "_tyre");
+        if (!tyre.meshes.empty()) tyres_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, tyre);
+        scene::Model band = hub_model(n + "_band");
+        if (!band.meshes.empty()) bands_[size_t(i)] = std::make_unique<render::GpuModel>(ctx, band);
+    }
+}
 
     void CarVisual::set_brake_parts(const BrakeParts& bin) {
         for (int i = 0; i < 4; ++i) {

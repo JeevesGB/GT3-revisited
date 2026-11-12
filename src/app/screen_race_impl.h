@@ -216,10 +216,13 @@ public:
     void on_event(App& app, const SDL_Event& e) override;
     // Phones: driving touch controls while racing, menu controls otherwise.
     TouchLayout touch_layout() const override;
+    // Replays and demonstrations: the menu controls fade out until touched (issue 283).
+    bool touch_fades() const override;
     // The game area of Settings -> Display -> Aspect ratio, except the developer race list.
     bool follows_aspect() const override;
     void render(App& app, Ui& ui) override;
     bool clickable(float x, float y) const override { return editor_ && editor_->clickable(x, y); }
+    bool presence(App& app, PresenceText& t) override; // screen_race_presence.cpp
 
 private:
     // ===== Types =====
@@ -436,7 +439,8 @@ private:
     void music_cues(App& app);
     // Ours: the race song controls (the Next / Previous song chords, the driving layout's song
     // buttons; the pause screen's L1 / R1 in update_pause) and the song shown after a skip.
-    void song_controls(App& app);
+    // Held, each keeps skipping (race::SongSkipHold).
+    void song_controls(App& app, double dt);
     void skip_song(App& app, int dir);
     static constexpr double kSongShown = 4.0; // seconds a skip while driving shows the new song
     // The race song (RaceMusic::now_playing) at the bottom of the screen: on the pause screen with
@@ -537,6 +541,9 @@ private:
     std::string car_display_name(const std::string& label, bool full = false) const;
     std::vector<ResultRow> result_rows(bool full_names = false) const;
     std::vector<ResultRow> result_menu_rows() const;
+    // The results panel's rows for a page (race::ResultPage): the race results; a championship
+    // round's points of the round in finishing order; its totals, highest first.
+    std::vector<ResultRow> result_panel_rows(race::ResultPage page) const;
     void latch_result();
     menu::flow::GameResult build_result() const;
     void leave(App& app);
@@ -924,6 +931,7 @@ private:
     menu::flow::MenuSounds quick_sounds_; // the menus' sound effects (quick / pause menus)
     bool quick_sounds_tried_ = false;
     ResultsOverlay results_;
+    race::ResultPanelFlow result_panel_; // the panel's pages after the finish (1P races)
     TimeTrialOverlay tt_overlay_;
     LicenseResultOverlay license_overlay_;
     std::unique_ptr<render::PrizeView> prize_; // licence medal model
@@ -977,6 +985,7 @@ private:
     bool race_mode_ = false;
     // --- online battle (docs/dev/ONLINE.md) ---
     bool online_ = false;
+    bool focus_quiet_ = false; // ours: the window lost the focus in an online race (race::FocusLoss::Quiet): motors still
     // The online race's state (screen_race_online.cpp; only read in online races).
     struct Online {
         NetWait wait = NetWait::None;
@@ -1038,6 +1047,7 @@ private:
 #if GT3R_XR
     std::unique_ptr<render::View3D> vr_views_[2]; // the eyes (screen_race_vr.cpp)
 #endif
+    int driver_side_ = 0; // the seat the player's car has its driver in: -1 left, 1 right, 0 unknown (build_player_visual; [vr] seat_side = car)
     std::vector<std::unique_ptr<render::View3D>> icon_views_; // 2P results panel car pictures
     std::unique_ptr<CarVisual> car2_visual_;
     bool finished2_ = false;
@@ -1162,6 +1172,7 @@ private:
     std::string toast_;
     double toast_time_ = 0;
     double song_shown_ = 0; // draw_song after a skip while driving: seconds left
+    race::SongSkipHold song_hold_, pause_song_hold_; // the song controls / the pause screen's L1 / R1 held
     bool show_replays_ = false;
     XrList xr_list_; // the selection page's lists for the VR pointer
     std::vector<ReplayFile> replay_files_;

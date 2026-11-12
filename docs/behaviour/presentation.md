@@ -419,9 +419,29 @@ The panel is drawn over the whole HUD, the lap / time block included: where the
 two meet (a 4:3 screen), the panel covers "Lap", "Best" and "Last".
 
 The panel is fully shown at 7 + 0.12 n s: 7.72 s for six cars
-(`ResultsOverlay::fully_shown_time`). After that, Circle or Cross leaves. If every car has
-finished, the race also leaves on its own 15 s after the last one did. Leaving
-goes through §C1.
+(`ResultsOverlay::fully_shown_time`). After that, Circle or Cross leaves. A 15 s
+timer also runs while the panel is fully shown and every car has finished; the
+race leaves when it runs out. Leaving goes through §C1 (`race::ResultPanelFlow`,
+test `race_result_panel_pages`).
+
+**Championship rounds** show two more pages on the same panel. The RACE RESULTS
+timer is 10 s there, and Circle / Cross or the timer turns the page instead of
+leaving: the whole panel fades out over 0.5 s, then the next page builds up
+again at once, title bar first (t = 0 instead of 5, rank bars at 1 + 0.12 i):
+
+The title bars are the layout's own (on the US disc "POINT" and "TOTAL POINTS"):
+
+| Page | Title bar | Rows | Timer |
+|---|---|---|---|
+| POINTS | `b_title_point` | finishing order, each place's points for the round ("+10pts", "+1pt") | 10 s, while every car has finished |
+| TOTAL POINT | `b_title_total_point` | each car's points before the round plus this round's, highest first, a tie in finishing order ("10pts") | 15 s, always running |
+
+Points by place are 10, 6, 4, 3, 2, 1, and none from 7th on
+(`race::championship_points`). A car still racing scores its current place. The
+points text is the number and "pt" (under 2) or "pts", with "+" on POINTS; the
+Japanese game writes "+10 pt" (`race::result_points_text`). The player's row is
+highlighted on every page. TOTAL POINT ends the race as the RACE RESULTS page
+does in other races (test `race_championship_points_pages`).
 
 ### §B7 Time trials and machine tests
 
@@ -1306,6 +1326,14 @@ past the 4:3 frame on wide screens) and darkens its band (`bg`).
   frames and starts again (a 0.5 s sawtooth). A disabled button is drawn at half
   alpha.
 - **Ours.** Start also closes the window.
+- **Ours: away from the game.** A phone or tablet sending the game to the
+  background opens the window. On a computer, another window taking the focus
+  opens it while the player drives (not in replays or demonstrations, nor over
+  the menus after a run), unless Controllers in the background is on: then the
+  player may be driving from the other window and the race goes on. An online
+  race never pauses for it; its controllers' rumble and force feedback stay
+  still until the game's window has the focus again. The window stays open when
+  the game is back in front (`race::focus_loss`).
 
 ### §E3 EXIT and RETRY
 
@@ -2275,6 +2303,9 @@ the view does not judder.
   - The stick's direction is where the view turns: right 90° right, pulled back
     behind, pushed up ahead. The view eases there and back ahead when the stick
     is let go.
+  - The view always turns the short way to where the stick points. Rolling
+    the stick round turns the view round with it, any number of times in
+    either direction. Let go, it comes back to the front the short way.
   - In-car the view turns about the car's up axis with the eye in place; the
     chase views go round the car.
   - Look back takes over while held. No mirror while the view is turned more
@@ -2720,7 +2751,10 @@ k = 0, so no glare is drawn.
   except on phones and tablets). A wheel that has only one kind of model (a
   modified game's) draws that one in both places, whatever the setting. Ours blurs their spinning modelled rims over
   the same turn GT3 blurs its rims over, by copies of the rim itself, so the
-  blur grows smoothly from a standstill.
+  blur grows smoothly from a standstill. The menus' rims have their light painted
+  in (one side of the spokes brighter) and never turn there; ours evens that light
+  out round the axis for races, so a rolling rim's bright side does not turn with
+  it (a standing rim looks a little flatter than in the menus).
 - Ours: `DrawItem::in_order` draws an item whole at its place (its opaque
   meshes, then its blended ones in model order) before later items' opaque
   meshes: the course scenery, the wet-road frame passes and each car shadow.

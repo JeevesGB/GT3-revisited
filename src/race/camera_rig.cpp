@@ -186,18 +186,20 @@ void CameraRig::place(const sim::VehicleState& s, const sim::VehicleSetup& setup
     }
     if (lag_time_ > 1.0 / 60.0) lag_time_ = 0;
     // Ours: the look around (set_look), eased to the stick's direction and back to the front.
+    // The view always turns the short way to where the stick points: rolling the stick round
+    // turns the view round with it, any number of times either way, and straight back with the
+    // stick wobbling either side keeps to one side. Let go, it comes back to the front the short
+    // way (look_ is kept within half a turn).
     {
-        float target = 0;
+        float aim = 0;
         const float m = std::min(std::hypot(look_x_, look_y_), 1.0f);
         if (m > kLookStart && !intro_ && mode_ != CameraMode::Orbit && mode_ != CameraMode::Tv) {
-            float th = std::atan2(look_x_, -look_y_);
-            // Near straight back either side is behind: keep to the side the view is turned to.
-            if (std::fabs(th) > 0.75f * kPi && look_ * th < 0) th -= std::copysign(2 * kPi, th);
             const float t = std::clamp((m - kLookStart) / (kLookFull - kLookStart), 0.0f, 1.0f);
-            target = th * t * t * (3 - 2 * t);
+            aim = std::atan2(look_x_, -look_y_) * t * t * (3 - 2 * t);
         }
-        look_ += (target - look_) * (1 - std::exp(-kLookRate * fdt));
-        if (target == 0 && std::fabs(look_) < 1e-4f) look_ = 0; // back in front: the view exactly as without
+        const float target = look_ + wrap(aim - look_);
+        look_ = wrap(look_ + (target - look_) * (1 - std::exp(-kLookRate * fdt)));
+        if (aim == 0 && std::fabs(look_) < 1e-4f) look_ = 0; // back in front: the view exactly as without
     }
     // GT3's in-car vibration (on-board camera, view point 0 only), once per 60 Hz camera update.
     // Amplitude A = sum over the wheels of |slip ratio| 0.3 + |slip angle| / (pi/2), at most 3;
@@ -393,6 +395,7 @@ void CameraRig::place(const sim::VehicleState& s, const sim::VehicleSetup& setup
             u = render::normalize(u0 * std::cos(roll * (1.0f - lock)) + axis * std::sin(roll * (1.0f - lock)));
         }
         const render::Vec3 rv2 = render::normalize(render::cross(f, u));
+        mount_frame_ = render::Mat4::from({rv2.x, rv2.y, rv2.z, 0, u.x, u.y, u.z, 0, -f.x, -f.y, -f.z, 0, 0, 0, 0, 1});
         auto vworld = [&](const render::Vec3& v) { return rv2 * v.x + u * v.y - f * v.z; };
         view_ = render::look_at(eye_, eye_ + vworld(d), vworld(du));
         fovy_ = c->fovy();
@@ -554,6 +557,15 @@ CustomCamera CameraRig::preset(CameraMode m, const sim::VehicleSetup& setup) con
     }
     c.clamp();
     return c;
+}
+
+render::Mat4 CameraRig::custom_seat(bool level, const render::Vec3& nudge) const {
+    const CustomCamera* c = custom();
+    const float turn = (c ? c->yaw * kPi / 180.0f : 0.0f) + (look_back_ ? kPi : look_);
+    render::Mat4 frame = mount_frame_;
+    if (level || !car_mounted()) // its heading only (the frame's z axis is back)
+        frame = render::rotate_y(std::atan2(frame.at(0, 2), frame.at(2, 2)));
+    return render::translate(eye_) * frame * render::translate(nudge) * render::rotate_y(-turn);
 }
 
 CameraCar CameraRig::camera_car(const sim::VehicleState& s, const sim::VehicleSetup& setup) {

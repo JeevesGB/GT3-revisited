@@ -28,6 +28,7 @@
 namespace gt3r {
 
 class App;
+struct PresenceText; // app/presence.h
 
 class Screen {
 public:
@@ -44,6 +45,9 @@ public:
     // On-screen touch controls for this screen (phones/tablets): menu
     // navigation by default; screens that drive a car return Driving.
     virtual TouchLayout touch_layout() const { return TouchLayout::Menu; }
+    // Ours: the controls fade out while nobody touches them (TouchControls::set_fade): a race
+    // that is only watched (replays, demonstrations).
+    virtual bool touch_fades() const { return false; }
     // Our own frontend screens (setup, hub, settings) lay out to the whole
     // window instead of the letterboxed 640x360 space: Ui::width()/height()
     // vary, Ui::safe() is the area clear of display cutouts and rounded
@@ -63,6 +67,9 @@ public:
     // headset, A pressed there clicks it as the trigger does; elsewhere A is the pad's Cross
     // (App::xr_pointer). Screens without pointer input keep the default.
     virtual bool clickable(float, float) const { return false; }
+    // The Discord status while this screen is on top (app/presence.h): fills `t` and returns
+    // true, or returns false to let the screen below say.
+    virtual bool presence(App&, PresenceText&) { return false; }
 };
 
 class App {
@@ -71,6 +78,9 @@ public:
     SDL_AppResult iterate();
     SDL_AppResult event(const SDL_Event& e);
     void shutdown();
+
+    // The Discord status from the screens (Screen::presence), top first: false when none says.
+    bool screen_presence(PresenceText& t);
 
     // Opens a disc image and remembers it in the config. Returns an error
     // message on failure, empty on success.

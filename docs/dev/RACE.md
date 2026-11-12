@@ -16,6 +16,7 @@ Code: `src/race/` (engine side) and `src/app/screen_race*.cpp` (the screen; see
 | `race/interp.h/.cpp` | Fixed-tick accumulator, quaternion helpers, `VehicleState` interpolation |
 | `race/camera_rig.h/.cpp` | Chase, far chase, bumper, roof and free-orbit cameras |
 | `race/hood_camera.h/.cpp` | The hood mount's profile: 17 fore/aft eyes above the body's surface, from its mesh |
+| `race/driver_seat.h/.cpp` | The seat the car's own driver sits in, from its body's mesh (`CarVisual::driver_seat`; VR's Match the car, [VR](VR.md)). Tests `driver_seat_*` |
 | `race/race_scene.h/.cpp` | GPU scene: course (scenery, backdrop, sky domes) and the car (body LODs + four wheels) |
 | `race/hud.h/.cpp` | HUD (lap times, tachometer, gear, speed) using the game's own assets |
 | `race/hud_layout.h/.cpp` | The HUD layout per display mode (the original's layout table) and the mode a run uses |
@@ -179,7 +180,9 @@ SDL's trigger rumble does nothing there.
   detail; the default except on phones and tablets). LOD 0's wheels are the menus' with
   `[video] showroom_wheels = on` (Settings → Display → Showroom wheels in races; the
   default except on phones and tablets): the `menu/cars/<model>` rim and tyre, a fitted
-  wheel's `menu/wheel/<label>` (docs/formats/car_model.md "Tyres"). The wheels are split into models re-centred on their hubs
+  wheel's `menu/wheel/<label>` (docs/formats/car_model.md "Tyres"), its images' painted light evened out round the
+  axis since the rim turns here (`CarModelOptions::even_menu_rim_light`, `formats/model/rim_light.h`; ours, issue
+  272). The wheels are split into models re-centred on their hubs
   (`CarVisual::tyres_`, `rims_`) and drawn with `car * translate(hub) * rotY(-steer) * rotZ(camber) * rotX(-spin)`
   (the camber negated on right wheels, whose models are built turned half a turn).
 - Wheels (`race/wheel_fx.h`, docs/formats/car_model.md "Brake parts" and "Wheel spin blur"):
@@ -257,8 +260,10 @@ SDL's trigger rumble does nothing there.
   gt3` keeps GT3's two. The last view is remembered for the session only (GT3 keeps it in its
   options). Ours: the look around (`CameraRig::set_look`, the race pad's RX / RY: the right stick,
   the touch controls' drag on the open screen): the stick's direction turns the view
-  (atan2(x, -y), full from half way out), eased at 14/s and back ahead when let go; near straight
-  back it keeps to the side it is turned to. In-car it turns the view about the car's up axis (eye
+  (atan2(x, -y), full from half way out), eased at 14/s and back ahead when let go, always the
+  short way: the aim is taken nearest the current turn and the turn is kept within +-pi, so
+  rolling the stick round turns the view round with it and a let-go returns the short way (issue
+  200: past 225 degrees it once swung a whole turn back). In-car it turns the view about the car's up axis (eye
   in place); the chase views turn their heading (round the car, the pitch scaled by its cosine).
   Look back takes over while held (the far chase now looks back too); no mirror past 0.35 rad; none
   in the disc's demonstrations, replays or VR stereo. In-car vibration (GT3's in-car camera shakers, point 0 only, also
@@ -300,8 +305,8 @@ SDL's trigger rumble does nothing there.
   first and the rows that change with it sit below, so it never moves; on a phone the panel
   scrolls. On a seat anchor the scene's drags only aim the view: the seat moves by the panel's
   Fore/aft, Sideways and Height sliders (`clamp()` keeps the nudge inside the mounts' bounds).
-  Tests `race_camera_custom_*`, `custom_cameras_*`, `hood_camera_*`. VR stereo keeps the
-  built-in views (a custom camera shows flat).
+  Tests `race_camera_custom_*`, `custom_cameras_*`, `hood_camera_*`. In VR stereo a
+  custom camera places the seat (`CameraRig::custom_seat`, [VR](VR.md); the editor shows flat).
 - Road shade (docs/formats/course.md): the four wheels' road attributes A/B scale the car's light
   colours (per draw item) and the light shadow's alpha F; `race/road_shade.*` interpolates them
   from the road mesh (test `race_road_shade_disc`).
@@ -937,8 +942,8 @@ menus §11.1; `race/post_run.h`, `screen_race_post_run.cpp`; tests `race_post_ru
   end or its pause's EXIT the same transition over its last frame and the quick menu
   (`return_to_menu`). `GameResult::prize_shown` keeps the menus from showing the page again.
   - Arcade race: cup (a win) -> replay -> result menu. 2P: replay (always) -> result menu. GT race,
-    championship round: prize (finished) -> replay -> result menu (the championship's points page
-    is not reproduced). Time trial, free run, machine test: name entry (ranked) -> replay -> menu.
+    championship round: prize (finished) -> replay -> result menu (the round's POINTS and TOTAL
+    POINT pages come before, on the results panel over the live race). Time trial, free run, machine test: name entry (ranked) -> replay -> menu.
     Licence: the menu, with the name entry (ranked) over it, no replay (the preview box). Free
     practice before a GT race: the transition -> the pre-race menu.
   - A replay plays once, the whole recorded run (the auto-drive after the finish included), with
@@ -1335,7 +1340,10 @@ From the race workstream's research (presentation §B, `result1.pmb`,
   then the "OFFICIAL TIMER SEIKO" bar. Names/times sw_16 at 87 %, the
   player's row 0xFFC800, others 0xCCCCCC. Time column: winner "m'ss.mmm",
   "+gap", "+N lap(s)", "Running...". Leaves on Circle / Cross after it is fully shown,
-  or 15 s after every car finished (2P: 15 s).
+  or when a 15 s timer runs out (it runs while the panel is fully shown and every car has
+  finished; 2P: 15 s after it is shown). A championship round turns to POINTS and TOTAL POINT
+  instead (10 s / 10 s / 15 s, a 0.5 s fade-out between pages; `race::ResultPanelFlow`,
+  `RaceScreen::result_panel_rows`).
 - **Time trial finish**: the arcade time trial is one timed lap (`race::kTimeTrialLaps`,
   whatever the event's laps byte says; presentation §B7): the car finishes at its first
   completed lap (`race::solo_run_finished`), the laps freeze. Debug runs with `laps=N` finish
@@ -1977,7 +1985,7 @@ by the course area):
   for every style). Visibility: the original depth-tests an N x N pixel box
   around the sun; we cast a 3 x 3 grid of rays through the same angular box
   against the course's opaque scenery and backdrop triangles
-  (`race::Occluder`, an XZ grid; about 0.1 ms) and use the open fraction.
+  (`race::Occluder`, a bounding volume tree; a few microseconds) and use the open fraction.
 - `race::SunDisc` draws the sun disc: `Flare::disc_mesh` as a `scene::Model` with the
   vertex program's colours baked in at load (sun RGB x gain / 2), one additive unlit primitive
   without depth writes, added to the items by `RaceScreen::collect_items` as two `background`

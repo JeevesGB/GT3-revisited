@@ -497,7 +497,7 @@ void RaceScreen::update_drive(App& app, double dt) {
     song_shown_ = std::max(0.0, song_shown_ - dt);
     lamps_.tick(dt);
     if (app.vfs()) music_cues(app);
-    song_controls(app);
+    song_controls(app, dt);
     // Screenshots: a Next song, then the pause window, at set race times.
     if (preset_.skip_at > 0 && race_time_ >= preset_.skip_at) preset_.skip_at = 0, skip_song(app, 1);
     if (preset_.pause_at > 0 && race_time_ >= preset_.pause_at && !paused_ && !quick_) {
@@ -624,8 +624,11 @@ void RaceScreen::update_drive(App& app, double dt) {
         const bool confirm = app.menu().pressed(PadButton::Cross) || app.menu().pressed(PadButton::Circle);
         // Races: once the panel is fully shown; time trials, machine tests and free runs: the
         // record overlay's 5 s (0.1 s after the top-speed test's EXIT), then 10 s more.
-        bool leave = field_ ? finish_wait_ > shown && (confirm || (all_done && finish_wait_ - all_done_at_ > 15.0))
-                            : TimeTrialOverlay::ends_race(finish_wait_ + TimeTrialOverlay::kShowDelay - overlay_delay_, confirm);
+        // 1P races: the panel's pages (race::ResultPanelFlow; a championship round's POINTS and TOTAL POINT).
+        bool leave = field_ && !two_player_
+                         ? result_panel_.update(finish_wait_, size_t(field_->opponents() + 1), all_done, confirm)
+                     : field_ ? finish_wait_ > shown && (confirm || (all_done && finish_wait_ - all_done_at_ > 15.0))
+                              : TimeTrialOverlay::ends_race(finish_wait_ + TimeTrialOverlay::kShowDelay - overlay_delay_, confirm);
         // Licence results and the time-trial FAIL: GT3's presenter timeline (frames from
         // the result); confirm only in its last hold. Leaving takes 2 more frames (event 1).
         if (!field_ && (!license_event_.empty() || tt_failed_)) {
@@ -666,7 +669,7 @@ void RaceScreen::update_drive(App& app, double dt) {
         camera2_.set_lap(field_->second_laps().laps);
         bind_hood(camera2_, hood_bound2_, car2_visual_ ? car2_visual_.get() : car_visual_.get());
         camera2_.update(render_state2_, field_->second_setup(), pad2, dt);
-        app.input().set_rumble(1, rumble2_on_ && !replaying_
+        app.input().set_rumble(1, rumble2_on_ && !replaying_ && !focus_quiet_
                                       ? rumble2_.rumble(app.input().gt3_rumble(1), app.input().dualsense(1))
                                       : PadRumble{});
     }
@@ -704,12 +707,13 @@ void RaceScreen::update_drive(App& app, double dt) {
     update_shot_filter();
     if (const float d = director_.take_dissolve(); d > 0) start_dissolve(d); // a course record's own
 
-    bool feel = rumble_on_ && !replaying_ && !demo_ && !race_preview_; // (a car the computer drives sends nothing, physics §1.2)
+    // (A car the computer drives sends nothing, physics §1.2; nor an online race while its window is away, focus_quiet_.)
+    bool feel = rumble_on_ && !replaying_ && !demo_ && !race_preview_ && !focus_quiet_;
     app.input().set_rumble(0, feel ? rumble_.rumble(app.input().gt3_rumble(0), app.input().dualsense(0)) : PadRumble{});
     update_car_sounds(app, dt);
     update_course_ambience(app);
     // Controller force feedback (triggers, wheels) while someone is driving.
-    if (!replaying_ && !demo_ && !race_preview_) {
+    if (!replaying_ && !demo_ && !race_preview_ && !focus_quiet_) {
         if (!finished_ && (rumble_on_ || wheel_force_on_))
             if (const sim::VehicleTelemetry* t = vehicle_->telemetry()) {
                 ForceFeedbackState f = feedback(vehicle_->state(), *t, last_in_, ffb_wall_, ffb_car_);
