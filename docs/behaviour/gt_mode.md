@@ -199,7 +199,7 @@ item. The checks:
 | Enter a race | ride car, then the entry rules (§8) | `00cmn/ride_car`, `license_violation`, `regulation_violation` |
 | Open a license page / take a test | §21 | `lc/no_license_<id>`, `lc/no_last_exam` |
 | Car wash / oil change | ride car, money | `00cmn/ride_car`, `no_money` |
-| After buying a car with others in the garage | — | `00cmn/cd_ride_sure` ("ride the new car?") |
+| After buying a car while having a ride car | — | `00cmn/cd_ride_sure` ("ride the new car?") |
 | Trade: buy a guest car | §19 | `not_for_buy`, `no_money`, `max_car` |
 
 Race series whose gcf section-4 unlock level is 1 (the F1 series, `Gf1_h_1000`… on this
@@ -257,7 +257,8 @@ of 0.5, 0.75 and 1.0 (§23).
   the head of the list and gets the next serial number. The ride car stays the same car.
 - **The first car** in an empty garage becomes the ride car (so does any car added while
   there is no ride car). After buying a car when
-  the garage already has one or more, the dealer asks whether to ride the new one.
+  the player already has a ride car, the dealer asks whether to ride the new one; with no
+  ride car (for example after selling it) the new car becomes the ride car without asking.
 - **Selling** pays a quarter of the catalog price (car +0xEC), whatever the car's
   condition or parts. Cars with the cannot-sell flag (bit value 2: prize-only models)
   are refused, and their sell price shows "----". Selling the ride car leaves the
@@ -456,6 +457,14 @@ their own on the region page (`src/game/gt_mode_mods.cpp`, `docs/MODDING.md` "De
 makers"); those with their own paints number those paints themselves.
 A prize car gets its prize set's fixed color when the model's list has it, or a random
 paint otherwise (§20.3).
+
+**Purchase and wheel sounds.** Buying a car plays the `buy` sound 31 frames (about half a
+second) after the purchase is confirmed. The dealer music stops when the "purchased" page
+opens and stays off over it and over "Get in now?"; the next dealer page starts it again
+from the beginning (music §4.1). Fitting a wheel, from the wheel shop's "fit it?" or from
+the garage's wheel list, plays the `wheel` sound the same 31 frames later, and the music
+keeps playing (`gtmode_synth_dealer`, `gtmode_synth_garage_wheel_list`,
+`gtmode_menu_disc_buy_and_race`).
 
 **Wheels.** Every wheel costs the gcf `wheel` price (500 Cr on this disc, §2). A bought
 wheel goes into a player-wide inventory and is never used up. The inventory has 200
@@ -874,10 +883,21 @@ only move inside [lo_i, hi_i]:
 
   hi₁ = 9/8 · v₁,  lo_i = (2 v_i + v_{i+1}) / 3,  hi_{i+1} = (v_i + 2 v_{i+1}) / 3,  lo_n = 7/8 · v_n
 
-So each gear can never pass the gear next to it. The auto-level slider regenerates the
-ratios at the current final drive and clamps each into its range. Then the reference
-final drive becomes the current one, and the next ranges are built from it. Fitting a
+So each gear can never pass the gear next to it. The ranges are set when the page opens.
+The auto-level slider regenerates the ratios at the current final drive, rebuilds the
+ranges from the reference final drive as it is at that moment and clamps each ratio into
+its range. Then the reference final drive becomes the current one, so the next auto-level
+step (and the next time the page opens) builds the ranges from it. Fitting a
 transmission resets the reference to its stock final (§6.3).
+
+**Gear chart.** The transmission page's chart draws one straight line per forward
+gear: engine speed up, road speed to the right. 1st starts at 1000 rpm and every
+other gear at the rpm it lands on after the upshift into it; each line runs up to
+the upshift rpm, and the top gear's up to the rev limit. The road-speed scale is
+fixed at 0–350 km/h, so a taller or shorter gear or final drive moves the lines
+across the chart; the rpm scale runs up to the rev limit. Lines are light green, 4
+units wide and clipped to the chart; a gear whose ratio × final drive changed since
+the last frame is drawn dark orange for that frame.
 
 **Event guard.** When the menu is opened from a race's pre-race setup, a non-gear
 slider move that would make the car fail the event's entry rules (§8) is refused and
@@ -885,7 +905,8 @@ the old value is kept. A part change that would break them opens `not_to_change`
 tires cannot be changed for a dirt event (`dirt_tire_only`).
 
 **Part change pages.** The `chg/` pages list the parts the car owns. Choosing one fits
-it at once (§6.3) and saves. Items for goods the car does not own are disabled. The
+it at once (§6.3), plays the `ok` sound and saves (the racing brake item plays none).
+Items for goods the car does not own are disabled (the `disable` sound). The
 `attach_*` marks show what is fitted. A stage-0 item also counts as fitted when the
 car has its stock part. Port polish, engine balance, displacement and weight reduction
 have no page: they stay on the car once bought.

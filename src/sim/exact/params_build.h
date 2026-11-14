@@ -47,6 +47,11 @@ Equipment stock_equipment(const data::CarDatabase& db, const std::string& car_la
 // and the part setters, the base car's id from the record's +0x08, then the record's own settings bytes +0xE8 ..
 // +0x10D over the setters' (+0x10A the engine output factor, EQ +0x1B8).
 Equipment variant_equipment(const data::CarDatabase& db, const data::CarVariant& v);
+// A variant record (table 31, 272 bytes) of car `car` with these parts whose settings bytes are the ones stock_equipment
+// gives it: variant_equipment reads it back as stock_equipment(db, car, parts) (mod events' tuned opponents,
+// game/data/mod_events.h). Label and car ids by their hashes.
+Bytes variant_record(const data::CarDatabase& db, const std::string& label, const std::string& car,
+                     const std::array<u64, 27>& parts);
 // The course's tyres, as every race mode fits them to each entry before the race: on a wet course
 // (category 1) the tyres of the front tyre's stage + 13 unless both are wet ones (stages 13 .. 24) already, on a dirt course
 // (category 2) the stage 12 (dirt) tyres unless both are; the car's front and rear records of that stage, both or neither. True
@@ -115,6 +120,20 @@ struct EnginePeak {
     s32 power_rpm = 0, torque_rpm = 0;
 };
 EnginePeak engine_peak(const ParamImage& p, const ConvertInputs& in);
+
+// The settings menu's gear chart (gt_mode §14): its data routine builds the spec from the
+// equipment (the builder), the engine block (no power cap) and the driveline block from it,
+// then the program gives each gear 0 .. n a line: from rpm_lo (1000 rpm for reverse and 1st, else the driveline's rpm after
+// the shift into that gear, D+0x30) to rpm_hi (the upshift rpm D+0x2E, the rev limit E+0x8C for reverse and the top gear),
+// each at its road speed in m/s (rpm x 2 pi / 60 over the gear's speed factor D+0x5C: ratio x final / driven tyre radius).
+struct GearChart {
+    s32 n = 0; // forward gears (D+2)
+    std::array<u16, 8> rpm_lo{}, rpm_hi{};
+    std::array<F, 8> speed_lo{}, speed_hi{};
+};
+// The program tables the builders read (the default curves, the surface classes, the differential letters, the static
+// block) feed nothing the chart reads, so this needs none.
+GearChart gear_chart(const data::CarDatabase& db, Equipment eq);
 
 // The showroom build (the menus' car, and GT Mode's grid: race/field.h): the spec (with flag, mode and
 // tyre override 0), P from it (control source 0, the program's showroom rule record (no power cap), the
