@@ -202,6 +202,9 @@ struct MenuLaunch {
     menu::flow::GameRequest request;
 };
 
+// The speedometer's top speed estimate for a car (presentation §D1; 0 without gears).
+float hud_top_speed_kmh(const CarSetup& c);
+
 class RaceScreen : public Screen {
 public:
     RaceScreen() : preset_(read_preset()) {}
@@ -566,6 +569,7 @@ private:
     void stop_playback();
     void save_current_replay();
     void draw_replay_items(App& app, Ui& ui, const SDL_FRect& rect);
+    void followed_car_hud(HudData& d); // a field replay's HUD from the followed car (presentation §D9)
     // The title and replay-mark clocks from a run's or replay's start (presentation §B3):
     // `replay` 0 a live run, 1 a replay, 2 the attract demo / menu backdrop (no title).
     void start_hud_clocks(int replay, float start_speed);
@@ -666,6 +670,7 @@ private:
     void configure_online_field(FieldConfig& cfg);
     int net_index(u8 player) const;
     void online_retire(int i);
+    void online_cpu_cars(const sim::exact::ExactRace& race); // host: our CPU cars' states and finishes
     void online_event(App& app, const net::Event& e);
     bool online_update(App& app, double dt);
     int online_ticks(int n);
@@ -723,10 +728,12 @@ private:
     bool build_exact_solo(App& app);
     void load_opponent_cars(App& app, const RaceField& f);
     void build_player_visual(App& app, const std::string& model, ByteSpan car_file);
-    // The rig's bonnet-camera mounts (race/hood_camera.h) from the car it looks at: bound when
-    // the car visual behind camera_ / camera2_ changes (player 2, a replay's followed opponent).
-    void bind_hood(CameraRig& cam, std::optional<const CarVisual*>& bound, const CarVisual* v);
-    std::optional<const CarVisual*> hood_bound_, hood_bound2_;
+    // The rig's car: its bonnet-camera mounts (race/hood_camera.h) and its camera points (the
+    // in-car eye, the chase point: CameraRig::set_car_mounts), from the car the camera is on:
+    // bound when the car visual behind camera_ / camera2_ changes (player 2, a replay's or the
+    // Preview's followed opponent).
+    void bind_camera_car(CameraRig& cam, std::optional<const CarVisual*>& bound, const CarVisual* v);
+    std::optional<const CarVisual*> camera_car_, camera2_car_;
     void exact_solo_step();      // after each step: the run's end and result from the race flow
     bool exact_solo() const { return solo_field_ != nullptr; }
     RaceField* exact_field() const { return field_ ? field_.get() : solo_field_.get(); }
@@ -946,6 +953,8 @@ private:
     std::optional<text::StringTable> race_strings_;
     bool race_strings_tried_ = false;
     double odometer_m_ = 0;
+    std::vector<double> opp_trip_m_; // each opponent's trip this race (m)
+    std::vector<float> opp_top_kmh_; // each opponent's speedometer top speed (-1: not yet read)
     bool from_menu_ = false;
     bool scripted_ = false; // a menu launch with GT3R_RACE set (no pre-run quick menu unless qm=)
     App* app_ = nullptr;
@@ -994,9 +1003,15 @@ private:
         NetWait wait = NetWait::None;
         double start_at = 0;         // net::now_ms() of the countdown start
         long long ticks = 0;         // ticks run since then
-        std::vector<int> player;     // opponent index -> player id
+        std::vector<int> player;     // opponent index -> player id (a CPU car's: net::kCpuId + k)
         std::vector<int> paint;      // opponent index -> paint
         std::vector<std::string> names;
+        // The host's CPU cars (docs/dev/ONLINE.md "CPU cars"), by opponent index: a CPU car, and one this machine runs (we
+        // host it); our CPU cars' state ticks and whether their finishes went out.
+        std::vector<bool> cpu, local;
+        std::vector<u32> cpu_tick;
+        std::vector<bool> cpu_finish_sent;
+        std::vector<double> reported_contact; // opponent index -> race time its machine (or the host) last reported a hit
         std::vector<RemoteCar> cars;
         bool finish_sent = false, lost = false, loaded_sent = false, left = false;
         u32 state_tick = 0;

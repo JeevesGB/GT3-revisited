@@ -12,8 +12,9 @@ online lobby (`src/app/screen_online.cpp`; also `gt3r --screen online`).
   `sim::exact`; docs/dev/RACE.md "Races on the exact core"), at 60 steps a second, and
   sends that car's state after every step.
 - An online race is a `race::ExactField` with the i.LINK battle's race rules
-  (`Conductor::BattleMP`): start type 1 (four seconds on the grid), the lobby's laps, no
-  tyre wear, no catch-up. Each player's car takes their own ASM / TCS: the game's Options
+  (`Conductor::BattleMP`): start type 1 (four seconds on the grid), the lobby's laps, the
+  lobby's tyre wear (the split-screen battle's setting 2 when the host turns it on; none
+  on dirt, as that conductor gives), no catch-up. Each player's car takes their own ASM / TCS: the game's Options
   (`[options] assist_asm` / `assist_tcs`), which the start page and the lobby set too
   (`OnlineLaunch::asm_on` / `tcs_on`); the race entry's flags in every state tell the other
   machines, whose prediction for that car is built for them. Every machine runs **NTSC-U rules at 60 steps a second**,
@@ -72,7 +73,7 @@ same pad frames compute the same race. That would allow, later:
 
 Not built.
 
-## State (protocol 4)
+## State (protocol 5)
 
 A car's state is 113 bytes on the wire with three frames of history when one repeats,
 116 while steering (every frame different), at most 125. A race datagram carrying it is
@@ -122,7 +123,14 @@ newest, and a lost datagram loses no frame (what a lockstep game would need).
     sends Loaded once its scene is built. Go carries the countdown start in
     the host's clock.
   - **Settings:** course, laps, *ghost above* a round trip (default 150 ms;
-    0 = always contact), and the car rules ("Lobby car rules" below).
+    0 = always contact), the car rules ("Lobby car rules" below), then the allowed
+    tire types (u16), tire wear (u8) and the car settings rule (u8), then the CPU cars
+    ("CPU cars" below). An older host's message without the tire fields reads as every
+    tire type allowed, no wear and any settings.
+  - **Capabilities.** Hello ends with a byte of what the game supports
+    (`net::kCaps`; bit 1 tire wear). Older games send none, which reads as 0. The host
+    refuses the start with tire wear on while a player's game lacks it ("Bob's game is
+    too old for tire wear"): that game would race its car without wear.
   - **Race traffic (mesh).** Each Hello lists the client's LAN endpoints. The
     roster gives every player's endpoints: the address the host sees, then
     the LAN ones. Clients send "punch" datagrams (`"GT3P"` + session token) to
@@ -167,10 +175,42 @@ Each player's car travels as a `game::OnlineCar` descriptor (`src/game/net_car.*
   donor car (below).
 - **Arcade car:** a car of the arcade's class lists (database table 35, e.g.
   `nsx_s_zero_97_290`), with its base car. Every machine builds it as the arcade
-  races it (`race::arcade_car`): the variant's parts with its arcade tyres for the
+  races it (`race::arcade_car_on`): the variant's parts with its arcade tyres for the
   course (stage 10 "racing"; dirt courses stage 12). Road cars' arcade tyres
   (`arc_normal`) equal their stock `normal` ones; race cars' `arc_racing` grip more
   than their stock tyres (GT-One: μ 1.70 against 1.59).
+
+### Tires and settings
+GT3's own i.LINK battle races each car as its menu chose it. Here the lobby also lets each
+player choose the car's tires and change its settings (public issue 304); the host decides
+which tires and whether tuned cars may race ("Lobby car rules").
+- **Tire types** (`game::kTireTypes`): a tyre stage (the tyre records' +0x10). 0 is the
+  car's own set ("Stock tires"), 1 sports, 2 to 8 the racing compounds from super-slick to
+  super-soft, 9 simulation: the tune shop's sets, the names GT3's parts pages give them.
+  10 and 11 are the arcade's racing and drift sets (its car page's RACING / DRIFT).
+- **Which a car has** (`game::online_tire_choices`): a disc, mod or garage car's sets that
+  GT Mode fits on it (`fittable_parts`: the shop's record for the goods 56 + type and its
+  rear goods); an arcade car's sets the database has for its base car, its own two and the
+  shop's. The lobby's **Tires** row steps through those the host allows.
+- **How they travel.** A garage car's tires are its tyre parts (the choice replaces both;
+  GT Mode can fit a rear set apart, and both axles then count for the rule). A disc, mod or
+  arcade car's choice, and a disc or mod car's settings, trail the digest: u8 tire type
+  (0xFF the car's own), u8 flags (1: the settings follow, in the garage car's order). A mod
+  car's donor comes first then, empty or not, since 0.5.0 and later read a donor there.
+  Older games ignore them and build the car as listed: their digest differs, so they refuse
+  it ("is different on this disc") rather than race another car (`net_car_lobby_tires_wire`).
+- **Settings** (Cross on the **Settings** row): the sliders GT Mode's Settings pages open for
+  the car's parts, with their ranges and texts (`game::slider_range`, `slider_set`,
+  `setting_text`), then "Stock settings", "The garage car's settings" (a garage car) and back.
+  A stock disc car's parts open few of them; a race car's most. Arcade cars race with the
+  arcade's settings. The settings stay in the lobby: the GT Mode garage keeps its own. The
+  host allows changed settings or not with the **Car settings** rule ("Lobby car rules").
+- **Legal.** A disc or mod car with lobby tires or settings is checked as a garage car of its
+  parts with those tires (`garage_setup_problem`), on every machine (`online_car_here`); an
+  arcade car's tires must be ones its base car has (`net_car_tires_disc`).
+- **Kept** per car in the config (`[online_tune]`: `garage3.<car>`, `arcade.<arcade car>` or the
+  car's label = `tires=7;settings=...`), dropped when the car no longer has those tires or the
+  settings no longer fit it (a garage car changed since).
 
 ### Regional discs
 
@@ -184,7 +224,10 @@ players' cars from its own disc, so a car races only where it is the same car.
   tables are its offline races') and NTSC-U's rules at 60 steps a second as every online race, a road
   course, ASM and TCS on, the descriptor's engine condition). P is what the race reads of the
   car: mass and extents, engine curves, gearing, tyres, suspension, aids. Names, prices and
-  model ids are not in it, so a car whose records differ only there is the same car.
+  model ids are not in it, so a car whose records differ only there is the same car. An
+  electric mod car's drive (`sim::exact::ElectricDrive`: on, and its regen) is outside P too;
+  a game without the drive (0.6.6 and earlier) builds that car on its donor's engine, whose P
+  differs, so the two games see each other's electric car as different.
 - **Compared exactly.** The exact core builds P bit for bit alike on every platform: the
   digests of 316 cars of the NTSC-U disc fold to the same value on arm64 and x86-64, and so do
   the PAL and NTSC-J discs' (`net_car_params_disc`), and a synthetic set is pinned
@@ -281,6 +324,55 @@ against its own disc's GT Mode rules (`game::garage_setup_problem` in
   other upgrade, then every slider at its bottom end (8,765 garage cars on NTSC-U). All
   of them are legal. Each car with a spring, a gear ratio or another car's suspension
   past them is refused (724 of 724).
+
+## CPU cars
+
+The host can fill the grid's empty places with CPU cars (issue 128). The lobby's **CPU cars** row
+shows how many and their skill (Left / Right changes how many); Cross opens their page, an `OpponentGrid` as
+Quick race's custom race has it: how many, where the players start among them, a skill for all, then each car
+(Cross: its car page, any disc car or arcade car that meets the lobby's car rules; Left / Right: its skill).
+Everyone else sees the page read-only, and the CPU cars in the player list. The host's lineup is kept in
+`[online_cpu]`.
+
+- **Room.** At most six cars in all, as GT3's races and its i.LINK battle, and no more than the course's grid
+  holds (`course_grid_size`, the road's grid slots): Smokey Mountain's North layout has five. The lineup
+  shrinks as players join (the host resends it on every roster change). The host refuses the start when the
+  players alone are more than the grid holds ("This course's grid has room for 5 cars"); before, every machine
+  but one refused the race.
+- **Ids and wire.** CPU car k races as id `net::kCpuId + k` (0x80..0x84), never a player's. Settings carry the
+  lineup (`Settings::cpu`: paint, skill and the 16 bytes of driver overrides, `cpu_place`: how many start
+  ahead of the players); each car's descriptor travels as a `CarInfo` for its id, so every machine checks it as
+  it checks a player's car ("Regional discs"). The Load's grid holds their ids around the players.
+- **Driver overrides, not skills.** A skill is the arcade race of that difficulty's driver overrides
+  (A{E,N,H,P}ST0001, dirt A?AD0001), whose values differ between releases (NTSC-J's Hard is 100/100/100). The
+  host sends the bytes its own disc gives, so the host's car and every machine's prediction drive alike.
+- **The host runs them**, as opponents of its own race (`FieldConfig::opponents`, `opponent_sources`: as every
+  machine builds the car, `exact_online_source`; `opponent_drivers`). Every other machine poses them as it poses a
+  player's car (`FieldConfig::Remote::driver`). Running them on every machine instead would not stay together: each
+  machine poses the players' cars a little differently, and the AI reacts to them.
+- **States.** The host sends each CPU car's state 30 times a second (half of them each step), with no pad frames
+  and control source 1, so the prediction shadow is the race's AI driving the car with its overrides
+  (`exact_shadow`, configuration 3). A CPU state is 92 bytes.
+- **Contacts.** The host reports its CPU cars' hits on players' cars like its own car's (`RemoteHit::from`;
+  `Contact` from the CPU car's id). A player's machine reports its hits on a CPU car to the host, which applies one
+  only when it saw no contact between that CPU car and that player's car within 0.2 s
+  (`last_contact_between`, `apply_opponent_impulse`). A contact any machine reports also counts as contact for
+  the plausibility checks of that car.
+- **Finishes.** The host sends each CPU car's finish (`Finish` with its id); a finished CPU car is a ghost on
+  the host as everywhere else. The results name a CPU car by its car.
+- **Plausibility** runs on CPU cars too; a warning about one is only logged (it would be the host's own fault).
+
+Measured (`net_cpu_cars_race`, US 1.10, Trial Mountain, two players and four CPU cars of mixed skill on the
+race's AI, 100 ms each way, 5 % of states lost): CPU cars posed 2.2 cm rms, 0.62 m at worst; no warnings; the
+race order the same on both machines at every step; every finish the same on both. Two instances on one Mac,
+three Hard CPU cars, one lap: the same finish times on both, about 3,300 states per CPU car, no warnings.
+
+Not done:
+- The lapped rule ghosts a pair of cars, but the ghost flag is per car: on the host a CPU car and a player's car
+  that are a lap apart still touch when neither is lapped against the host's own car.
+- CPU cars touch a player's car somewhat more often than a car run on the same machine (measured over 40
+  races with a slow car in their way): on the host the player's car does not give way at once, its own machine
+  answers the hit.
 
 ## Pickers (`src/app/online_pickers.cpp`)
 
@@ -525,9 +617,20 @@ Each rule is "any" by default (`game::CarRules`, `game::car_meets_rules`; tested
 `net_car_rules_disc`, `net_car_rules_arcade_classes`):
 - **Mod cars:** allowed (default) or not. A mod car from a GT Mode garage is one too:
   by its package, or, where the car is installed, by this database.
-- **Tuned cars:** allowed, or stock cars only. A garage car counts as tuned when a part
-  or a setting differs from the stock car's, as GT Mode's own test (`GtMode::tuned`);
-  an untuned garage car races in a stock lobby.
+- **Tuned cars:** allowed, or stock cars only. A garage car counts as tuned by GT Mode's
+  own entry test (`GtMode::tuned`, GT3's rule): a part other than the stock car's, or a
+  part above its first stage, so a factory tuner car is tuned as it comes. Its tires do
+  not count (the tires rule decides them), nor do settings: a stock car with its ASM, TCS
+  or downforce changed races in a stock lobby.
+- **Car settings:** allowed, or stock only: every setting as the car's parts give it
+  (`sim::stock_settings`). A garage car tuned in GT Mode's settings menu, or any car whose
+  settings were changed in the lobby, breaks it; the lobby's settings page has "Stock
+  settings" to go back.
+- **Tires:** the tire types players may choose ("Tires and settings"), all by default; the
+  host ticks them on a page of their own. Every tire type the car races on must be allowed
+  ("Racing Soft tires are not allowed"). On a dirt course every car races on dirt tires (GT3
+  fits them before the race), so the rule does not apply there. The car page counts a car as
+  allowed when it has an allowed set.
 - **Class:** one of the arcade's classes C, B, A, S or rally cars: only the cars of that
   class, as the car page's classes give them (every car has one: its list's, else by its
   weight per power, a rally car on dirt). A garage car's class is its weight per power as
@@ -543,7 +646,8 @@ Each rule is "any" by default (`game::CarRules`, `game::car_meets_rules`; tested
   on dirt courses and the listed rally cars on road courses ("Class S cars are not
   available on dirt courses"). Every other car races anywhere (on dirt as a rally car).
 - **Who checks:** each player's lobby refuses Ready for a car that breaks
-  them. The host checks every car it can rebuild before the start. A mod car the
+  them, and drops Ready when the host's rules change under it (a player who chose
+  tires the host then disallowed). The host checks every car it can rebuild before the start. A mod car the
   host lacks cannot be checked there; only the mod cars rule applies to it. A garage
   car that is not a legal setup ("Legal setups" above) breaks every lobby's rules.
 - **Other players' cars** ("Regional discs" above): a player whose machine cannot race
@@ -551,7 +655,8 @@ Each rule is "any" by default (`game::CarRules`, `game::car_meets_rules`; tested
   Ready when such a car appears. The host refuses the start for its own view the same way.
   The car's name is red in the player list, the reason beside Ready / Start race.
 - **Wire:** the Settings message carries the class, type, drivetrain and aspiration
-  after the power limit (an older host's message without them reads as "any").
+  after the power limit (an older host's message without them reads as "any"), then the
+  tire types and the car settings rule.
 
 ### Cheat warnings
 The warnings cannot see a car whose descriptor makes it faster: the prediction shadow is
@@ -1091,6 +1196,9 @@ at 100–200 links are the busy desktop, not the relay.
     owner had it, no cheat warning;
   - `net_exact_stalled_machine`, `net_exact_prediction_beats_dead_reckoning`,
     `net_exact_shadow_cost` (the figures above).
+  - tests/test_net_cpu_cars.cpp: `net_cpu_cars_race` (CPU cars through the race screen's paths, "CPU cars" above),
+    `net_cpu_cars_shadow_skill` (a CPU car's prediction drives with its skill); `net_cpu_cars_session` (no disc:
+    the lineup, ids, states, finishes and contacts through loopback sessions).
   The `net_relay_*` tests cover the server: code joins, relay fallback, cookie
   challenges and rollover, spoofed binds, rate limits, join caps, and old
   protocol versions. They also cover link slots:
@@ -1171,7 +1279,8 @@ GT3R_RACE="auto=1,cam=1" GT3R_ONLINE="join=127.0.0.1,car=supra_rz_97,name=Two" g
    players.~~ (done)
 5. ~~Races on the exact core: posed remote cars, exact prediction shadows,
    protocol 4.~~ (done)
-6. Later: input-only lockstep or rollback ("Later: input-only lockstep" above).
+6. ~~CPU cars on the empty places (protocol 5).~~ (done; "CPU cars" above)
+7. Later: input-only lockstep or rollback ("Later: input-only lockstep" above).
 
 ## Known issues
 

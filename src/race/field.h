@@ -142,8 +142,15 @@ struct FieldConfig {
     // ("" or past the list: the race's), and the race without its event's rubber band.
     std::vector<std::string> opponent_skills;
     bool no_rubber_band = false;
+    // Each opponent's car as raced (an online race's CPU car: as every machine builds it, exact_online_source); an empty label
+    // or past the list: its label in `opponents`.
+    std::vector<ExactCarSource> opponent_sources;
+    // Each opponent's driver overrides in place of the race's (sim::exact::DriverOverrides: an online race's CPU car, as the
+    // host's disc gives its skill); unset or past the list: opponent_skills'.
+    std::vector<std::optional<std::array<u8, 16>>> opponent_drivers;
     // The split-screen battle's options (its Options page, docs/dev/RACE.md "Options"): the catch-up for the
-    // trailing player (0 off, 1 low, 2 high), the handicap in metres (> 0: player 2 starts back, < 0: player 1), tyre damage.
+    // trailing player (0 off, 1 low, 2 high), the handicap in metres (> 0: player 2 starts back, < 0: player 1), tyre damage
+    // (also the online lobby's tire wear).
     int battle_catchup = 0;
     float handicap_m = 0;
     bool battle_wear = false;
@@ -156,6 +163,8 @@ struct FieldConfig {
         // condition.
         ExactCarSource source;
         sim::EngineCondition condition;
+        // The host's CPU car (docs/dev/ONLINE.md "CPU cars"): its driver overrides, which its prediction's AI drives with.
+        std::optional<std::array<u8, 16>> driver;
     };
     std::vector<Remote> remote;
     int player_slot = -1; // the local player's grid slot (-1: behind the opponents)
@@ -242,6 +251,8 @@ public:
     virtual const sim::VehicleTelemetry* opponent_telemetry(int i) const = 0;
     virtual std::optional<CarFacts> second_facts() const = 0;
     virtual std::optional<CarFacts> opponent_facts(int i) const = 0;
+    // Opponent i's engine condition (its odometer and oil: the race display's odometer, presentation §D9); nullopt: none.
+    virtual std::optional<sim::EngineCondition> opponent_condition(int i) const { (void)i; return std::nullopt; }
     // Player 2's race pad for the next step (RaceVehicle::set_pad).
     virtual void set_second_pad(const PadState* pad) { (void)pad; }
     // How often the race steps (the one place the screen takes the rate from: 60 for every race a player drives; a
@@ -259,8 +270,15 @@ public:
         int laps = 0;
         bool started = false, wrong_way = false;
         double current = 0, last = -1, best = -1, race_distance = 0;
+        // The car's race entry (car_laps only): its best lap of the visit (entry + 0x11F0) and the sum of its listed laps
+        // (entry + 0x220), < 0 / 0 for none; and whether the car has finished.
+        double entry_best = -1, entry_total = 0;
+        bool finished = false;
     };
     virtual LapInfo second_laps() const = 0;
+    // Any car's laps (as Standing::car: player 1 -1, player 2 -2, opponents 0..n-1): what the race display reads for the
+    // car it follows (presentation §D9). Empty for a field that keeps no per-car laps.
+    virtual LapInfo car_laps(int car) const { (void)car; return {}; }
     virtual int second_position() const = 0;
 
     // The race order: every car (player = -1, second player = -2, opponents 0..n-1), ranked
@@ -287,7 +305,8 @@ public:
     virtual bool opponent_in_pits(int i) const = 0;
     virtual std::vector<Standing> standings() const = 0;
 
-    // Online battle: remote players (opponents with FieldConfig::remote entries).
+    // Online battle: remote players (opponents with FieldConfig::remote entries). The host's CPU cars (docs/dev/ONLINE.md
+    // "CPU cars") are opponents of its own field (FieldConfig::opponents) and remote cars of everyone else's.
     virtual bool opponent_remote(int i) const { (void)i; return false; }
     // The remote car's pose at the end of the coming tick (used by the next step).
     virtual void set_remote_pose(int i, const RemoteCar::Pose& p) { (void)i, (void)p; }
@@ -295,16 +314,24 @@ public:
     virtual void set_remote_finish(int i, double race_time) { (void)i, (void)race_time; }
     virtual void set_remote_retired(int i) { (void)i; }
     virtual bool opponent_retired(int i) const { (void)i; return false; }
-    // Contacts of the last step between the player's car and remote cars: the impulse the remote
-    // car felt (its owner applies it if its machine missed the hit), and when the player's car last
+    // Contacts of the last step between the player's car (or, online, one of this machine's CPU cars) and remote cars: the
+    // impulse the remote car felt (its owner applies it if its machine missed the hit), and when the player's car last
     // touched each remote car (race time; < -1e9 = never).
     struct RemoteHit {
         int opponent = -1;
+        int from = -1;                  // the car that struck it: -1 the player's, else this machine's CPU car (opponent index)
         float point_x = 0, point_z = 0; // world
         float jx = 0, jz = 0;           // impulse on the remote car, N*s
     };
     virtual std::vector<RemoteHit> take_remote_hits() { return {}; }
     virtual double last_contact_with(int i) const { (void)i; return -1e18; }
+    // When car `by` (an opponent index; -1 the player's) last touched remote car i, and when any car of this machine did.
+    virtual double last_contact_between(int by, int i) const { return by < 0 ? last_contact_with(i) : -1e18; }
+    virtual double last_local_contact(int i) const { return last_contact_with(i); }
+    // A hit on this machine's CPU car i (an opponent) that another player's machine saw (contact message).
+    virtual void apply_opponent_impulse(int i, float point_x, float point_z, float jx, float jz) {
+        (void)i, (void)point_x, (void)point_z, (void)jx, (void)jz;
+    }
     // When this machine saw a remote car complete the race distance (race time; < 0 = not yet).
     virtual double remote_observed_finish(int i) const { (void)i; return -1; }
     // A hit on the player's car that another player's machine saw (contact message).

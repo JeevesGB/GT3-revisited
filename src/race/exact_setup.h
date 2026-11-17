@@ -55,14 +55,12 @@ std::shared_ptr<const ex::RaceCourse> exact_course(ByteSpan course_file, const s
 // entry's variant record or an arcade car's (variant_equipment; an arcade car's tyres switched to the stage's records), a
 // database car with its own parts. nullopt with *error set for an unknown label. The race fits the course's tyres to it
 // (sim::exact::course_tires).
-// An electric mod car races on its donor car's engine (its stock engine, engine parts, drivetrain and gearbox): the exact
-// core has no EV drive yet.
+// An electric mod car's motor, drivetrain and single reduction are its own (the race gives it the electric drive:
+// sim::exact::electric_drive).
 std::optional<ex::Equipment> exact_equipment(const data::CarDatabase& db, const ExactCarSource& src, std::string* error = nullptr);
-// The same without the electric mod cars' donor engine (the equipment as the database builds it).
-std::optional<ex::Equipment> exact_equipment_as_built(const data::CarDatabase& db, const ExactCarSource& src,
-                                                      std::string* error = nullptr);
 // An online player's car (game::OnlineCar, docs/dev/ONLINE.md "Cars") as a car source: a garage car with its parts and
-// settings, an arcade car with its arcade tyres for the course (race::arcade_car's stage), a disc or mod car by its label;
+// settings, an arcade car with its chosen tyres (else its racing set) for the course (race::arcade_car_on's stage), a disc or
+// mod car by its label, or with its parts and settings when the lobby gave it other tyres or settings;
 // its engine condition (a garage car's) in *condition.
 ExactCarSource exact_online_source(const data::CarDatabase& db, const game::OnlineCar& c, const std::string& course,
                                    sim::EngineCondition* condition = nullptr);

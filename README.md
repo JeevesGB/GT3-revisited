@@ -176,6 +176,8 @@ beside it instead. Saves and replays can go in another folder of your choice
 | `music_playlist.txt` | your songs' playlist (their order and check marks) |
 | `music_songs.txt` | your songs as the last scan found them, and how loud each is (so the next start has them at once) |
 | `screenshots/` | F12 screenshots |
+| `gt3r.log` | this session's log, for bug reports (Settings → Disc & saves → **Show the log**); after a crash it ends with why the game closed. Your home folder shows as `~` and your user name as `<user>`; it stops at a few MB |
+| `gt3r.prev.log` | the session before this one's log (the one that crashed, once you start the game again) |
 
 ### Your music
 
@@ -333,8 +335,13 @@ players, each on their own machine:
   class lists' cars (raced as the arcade does), and every other car by its weight
   per power, as GT3 classes garage cars.
 - The host's **Car rules** limit the cars: class, production or race cars,
-  drivetrain, NA or turbo, stock cars only, a power limit, mod cars. The car
-  page can list only the cars allowed.
+  drivetrain, NA or turbo, stock cars only, stock settings only, which tires, a
+  power limit, mod cars. The car page can list only the cars allowed. The host can also turn on
+  **Tire wear**.
+- Each player chooses their car's **Tires** (the sets the tune shop sells for it;
+  an arcade car's racing or drift tires too) and can change its **Settings** in
+  the lobby, within the ranges its parts allow, as in GT Mode's settings menu.
+  The lobby remembers them per car; a GT Mode garage car keeps its own.
 - A GT Mode car races only with parts and settings the game's tune shop and
   settings menu can give it; any other setup (an edited save, say) is refused.
 - **Stability control (ASM)** and **Traction control (TCS)** are your own
@@ -395,8 +402,9 @@ course viewers export models for Blender. See [MODDING](docs/MODDING.md).
 - **Physics** runs at 60 steps a second on every disc, with the rules of the
   disc's release; races, replays and the disc's demonstrations play out as in
   the game ([PHYSICS](docs/dev/PHYSICS.md), European and Japanese discs:
-  [COMPATIBILITY](docs/COMPATIBILITY.md)). Electric mod cars race on their donor
-  car's engine for now ([MODDING](docs/MODDING.md)).
+  [COMPATIBILITY](docs/COMPATIBILITY.md)). Electric mod cars race with an
+  electric drive of our own, which GT3 has no counterpart of
+  ([MODDING](docs/MODDING.md)).
 - A few presentation details are measured from captures rather than
   specified exactly, and a few effects that come from PS2 microcode are
   approximated ([RACE](docs/dev/RACE.md#known-gaps),

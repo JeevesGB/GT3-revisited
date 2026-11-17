@@ -187,6 +187,7 @@ bool Session::host(u16 port, const std::string& name, const std::string& car, u8
     me.name = name;
     me.car = car;
     me.paint = paint;
+    me.caps = caps_;
     players_ = {me};
     phase_ = Phase::Lobby;
     start_rx();
@@ -217,6 +218,7 @@ bool Session::join(const std::string& address, const std::string& name, const st
     w.str(version_.to_string());
     w.u8_(u8(std::min<size_t>(local_eps_.size(), 4)));
     for (size_t i = 0; i < local_eps_.size() && i < 4; ++i) w.str(local_eps_[i]);
+    w.u8_(caps_); // what this game supports (older hosts stop reading before it)
     send_reliable(*c, w);
     conns_.push_back(std::move(c));
     phase_ = Phase::Lobby;
@@ -243,6 +245,7 @@ bool Session::host_via(const std::string& server, const std::string& name, const
     me.name = name;
     me.car = car;
     me.paint = paint;
+    me.caps = caps_;
     players_ = {me};
     collect_local_endpoints();
     phase_ = Phase::Lobby;
@@ -279,6 +282,7 @@ bool Session::join_code(const std::string& server, const std::string& code, cons
     w.str(version_.to_string());
     w.u8_(u8(std::min<size_t>(local_eps_.size(), 4)));
     for (size_t i = 0; i < local_eps_.size() && i < 4; ++i) w.str(local_eps_[i]);
+    w.u8_(caps_); // what this game supports (older hosts stop reading before it)
     hello_ = w.data;
     phase_ = Phase::Lobby;
     server_started_ = now();
@@ -373,6 +377,7 @@ double Session::rtt_ms() const {
 
 Link Session::link(u8 id) const {
     Link l;
+    if (is_cpu_id(id)) return host_ ? l : link(0); // a CPU car: the host's (it runs them)
     if (!player(id) || int(id) == my_id_) return l;
     auto own = [&](const Conn& c) {
         l.known = true;
@@ -471,8 +476,16 @@ Writer Session::settings_msg() const {
     w.u8_(settings_.category);
     w.u8_(settings_.drive);
     w.u8_(settings_.aspiration);
-    w.u8_(settings_.ai_opponents);
-    w.u32_(settings_.ai_seed ? settings_.ai_seed : 1);
+    w.u16_(settings_.tires);
+    w.u8_(settings_.tire_wear ? 1 : 0);
+    w.u8_(settings_.stock_settings ? 1 : 0);
+    w.u8_(settings_.cpu_place);
+    w.u8_(u8(settings_.cpu.size()));
+    for (const Settings::CpuCar& c : settings_.cpu) {
+        w.u8_(c.paint);
+        w.u8_(c.skill);
+        w.bytes(c.driver);
+    }
     return w;
 }
 
@@ -1237,8 +1250,9 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
         // A peer or a client speaks only for itself.
         if (c.peer || host_) from = u8(c.player);
         if (c.player < 0 && host_) return;
-        if (int(target) == my_id_) {
+        if (int(target) == my_id_ || (host_ && is_cpu_id(target))) { // (the host answers for its CPU cars)
             e.player = from;
+            e.target = target;
             // Bound what another machine can do to our car (a hostile one could send anything).
             float j = std::hypot(e.contact.jx, e.contact.jz);
             const float kMaxImpulse = 60000; // N*s: ~a 2 t car changing speed by 30 m/s
@@ -1276,6 +1290,7 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
                 std::string ep = r.str();
                 if (std::find(eps.begin(), eps.end(), ep) == eps.end()) eps.push_back(ep);
             }
+            const u8 caps = r.remaining() ? r.u8_() : u8(0); // (older games send none)
             // Direct-IP sessions (no relay server checks versions): the same release only. Through
             // a relay server, its min_online decides (docs/dev/ONLINE.md "Versions and updates").
             GameVersion theirs = parse_game_version(build).value_or(GameVersion{});
@@ -1304,6 +1319,7 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
             p.car = car;
             p.paint = paint;
             p.endpoints = eps;
+            p.caps = caps;
             players_.push_back(p);
             Writer w;
             w.u8_(u8(Msg::Welcome));
@@ -1516,7 +1532,8 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
             else ++i;
         }
         for (auto it = punches_.begin(); it != punches_.end();) it = player(it->first) ? std::next(it) : punches_.erase(it);
-        for (auto it = car_info_.begin(); it != car_info_.end();) it = player(it->first) ? std::next(it) : car_info_.erase(it);
+        for (auto it = car_info_.begin(); it != car_info_.end();)
+            it = player(it->first) || is_cpu_id(it->first) ? std::next(it) : car_info_.erase(it); // (CPU cars stay)
         push(kind_event(Event::Kind::Roster));
         break;
     }
@@ -1545,11 +1562,23 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
             s.drive = r.u8_();
             s.aspiration = r.u8_();
         }
-        if (r.remaining() >= 5) { // AI opponents (older hosts: none)
-            s.ai_opponents = r.u8_();
-            s.ai_seed = r.u32_();
-            if (!s.ai_seed) s.ai_seed = 1;
-            if (s.ai_opponents > u8(kMaxPlayers - 1)) s.ai_opponents = u8(kMaxPlayers - 1);
+        if (r.remaining() >= 3) { // the tire rule and tire wear (a host without them: any tires, no wear)
+            s.tires = r.u16_();
+            s.tire_wear = r.u8_() & 1;
+        }
+        if (r.remaining() >= 1) s.stock_settings = r.u8_() & 1; // (a host without it: any settings)
+        if (r.remaining() >= 2) { // the CPU cars
+            s.cpu_place = r.u8_();
+            const int n = std::min<int>(r.u8_(), kMaxCpuCars);
+            for (int k = 0; k < n && r.ok(); ++k) {
+                Settings::CpuCar c;
+                c.paint = r.u8_();
+                c.skill = r.u8_();
+                ByteSpan d = r.bytes(c.driver.size());
+                if (r.ok()) std::copy(d.begin(), d.end(), c.driver.begin());
+                s.cpu.push_back(c);
+            }
+            s.cpu_place = u8(std::min<size_t>(s.cpu_place, s.cpu.size()));
         }
         if (!r.ok()) break;
         settings_ = s;
@@ -1796,7 +1825,11 @@ void Session::start_load() {
     e.kind = Event::Kind::Load;
     e.course = settings_.course;
     e.laps = settings_.laps;
+    // The players, with the CPU cars around them: cpu_place of them ahead (docs/dev/ONLINE.md "CPU cars").
+    const size_t place = std::min<size_t>(settings_.cpu_place, settings_.cpu.size());
+    for (size_t k = 0; k < place; ++k) e.grid.push_back(u8(kCpuId + k));
     for (const Player& p : players_) e.grid.push_back(p.id);
+    for (size_t k = place; k < settings_.cpu.size(); ++k) e.grid.push_back(u8(kCpuId + k));
     grid_ = e.grid;
     Writer w;
     w.u8_(u8(Msg::Load));
@@ -1872,6 +1905,33 @@ void Session::send_state(const CarSnapshot& s) {
         if (c->close_at == 0 && (c->player >= 0 || !host_)) send_unreliable(*c, w);
 }
 
+void Session::send_cpu_state(const CarSnapshot& s) {
+    if (!host_ || !is_cpu_id(s.player)) return;
+    Writer w;
+    w.u8_(u8(Msg::State));
+    write_snapshot(w, s);
+    for (auto& c : conns_)
+        if (c->close_at == 0 && c->player >= 0 && !c->peer) send_unreliable(*c, w);
+}
+
+void Session::send_cpu_finish(u8 id, double race_time, double best_lap) {
+    if (!host_ || !is_cpu_id(id)) return;
+    Writer w;
+    w.u8_(u8(Msg::Finish));
+    w.u8_(id);
+    w.f64_(race_time);
+    w.f64_(best_lap);
+    broadcast_reliable(w);
+}
+
+void Session::set_cpu_car_info(int k, const Bytes& info) {
+    if (!host_ || k < 0 || k >= kMaxCpuCars || info.size() > 1024) return;
+    const u8 id = u8(kCpuId + k);
+    if (auto it = car_info_.find(id); it != car_info_.end() && it->second == info) return;
+    car_info_[id] = info;
+    send_car_info(nullptr, id, info);
+}
+
 void Session::send_finish(double race_time, double best_lap) {
     if (!joined()) return;
     Writer w;
@@ -1882,12 +1942,13 @@ void Session::send_finish(double race_time, double best_lap) {
     broadcast_reliable(w);
 }
 
-void Session::send_contact(u8 target, const Event::Hit& h) {
+void Session::send_contact(u8 target, const Event::Hit& h, int from) {
     if (!joined() || int(target) == my_id_) return;
+    if (from < 0 || !host_ || !is_cpu_id(u8(from))) from = my_id_; // (only the host speaks for a CPU car)
     Writer w;
     w.u8_(u8(Msg::Contact));
     w.u8_(target);
-    w.u8_(u8(my_id_));
+    w.u8_(u8(from));
     w.u32_(h.tick);
     w.f32_(h.point_x), w.f32_(h.point_z), w.f32_(h.jx), w.f32_(h.jz);
     // Straight to them when we have a link (host: every client), else through the host.

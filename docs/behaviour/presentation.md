@@ -1233,6 +1233,17 @@ whatever the items say. Each part is drawn only while its item is on:
   in proportion to the input, brake red (240, 0, 0) and accel green
   (73, 204, 43), with the gauge art on top.
 
+- **Which car.** Every part shows the car the cameras follow (§G3), and changes
+  with it: its meters, lamps, odometers, steering, pedals and tyres, its position,
+  its name, and the map's own-car dot (drawn over the others). The lap count, the
+  lap clock, Best (the car's race entry's best lap) and Total (the entry's laps,
+  plus the running lap until the car finishes) are the followed car's. Last and
+  the lap-time list hold the laps posted while each car was followed, so a switch
+  keeps the earlier ones until the new car crosses the line
+  (`RaceScreen::followed_car_hud`, `race::lap_list_of`, test
+  `race_replay_followed_car_lap_list`). Ours: a computer car shows the automatic
+  mark (`>`) [?].
+
 A theater demonstration draws the items on its run's own layout instead (§G7).
 
 ### §D10 Time format
@@ -1652,7 +1663,9 @@ opens the pause, §E2):
 - **Up / Down** (modes 0 and 3, and mode 2 with TARGET MANUAL): the next /
   previous car, wrapping, with a new shot for the new car (below, §H8).
 - **Cross** (modes 0, 2 and 3): the driver's view on the followed car (the view
-  the player last drove with) and back. Back on the replay cameras the view's
+  the player last drove with) and back. The view sits at that car's own camera
+  points (its in-car eye, its chase point: `CameraRig::set_car_mounts`, bound
+  with the camera's car), and in the in-car view that car is not drawn. Back on the replay cameras the view's
   reset re-arms the shot (§H8). A new or restarted replay starts on the replay cameras.
 - **Cross, Circle, L1, R1** (mode 1): a new cut (§G2).
 - **Up / Down** (mode 1): the race-sound level inside the sections the music

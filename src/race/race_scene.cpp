@@ -127,36 +127,41 @@ namespace gt3r::race {
             set_moving(backdrop_moving_, ctx, backdrop_.get(), std::move(backdrop_nodes));
         }
 
-        course::CourseModelOptions so;
-        so.scenery = so.course_line = so.backdrop = false;
-        so.sky = true;
-        scene::Model sky = course::build_course_model(data, so, name + "/sky");
-        if (!sky.meshes.empty()) {
-            log_bounds("sky", sky);
-            // Horizon colour: average of the sky textures' lower halves (where the horizon usually is).
-            auto mean_rows = [&](float out[3], bool lower) {
-                double acc[3] = {}, n = 0;
-                for (const scene::Texture& t : sky.textures)
-                    for (u32 y = lower ? t.height / 2 : 0; y < (lower ? t.height : t.height / 2); ++y)
-                        for (u32 x = 0; x < t.width; ++x) {
-                            u32 c = t.rgba[size_t(y) * t.width + x];
-                            for (int k = 0; k < 3; ++k) acc[k] += double((c >> (8 * k)) & 0xFF) / 255.0;
-                            n += 1;
-                        }
-                if (n > 0)
-                    for (int k = 0; k < 3; ++k) out[k] = float(acc[k] / n);
-                };
-            mean_rows(horizon_, true);
-            mean_rows(sky_rgb_, false);
-            sky_ = std::make_unique<render::GpuModel>(ctx, sky);
-        }
-        // The rear-view mirror's sky: the low-resolution dome (slot 24).
-        course::CourseModelOptions mo;
-        mo.scenery = mo.course_line = mo.backdrop = mo.sky = false;
-        mo.sky_low = true;
-        scene::Model sky_low = course::build_course_model(data, mo, name + "/sky2");
-        if (!sky_low.meshes.empty()) sky_low_ = std::make_unique<render::GpuModel>(ctx, sky_low);
-        occluder_.build();
+    course::CourseModelOptions so;
+    so.scenery = so.course_line = so.backdrop = false;
+    so.sky = true;
+    scene::Model sky = course::build_course_model(data, so, name + "/sky");
+    if (!sky.meshes.empty()) {
+        log_bounds("sky", sky);
+        // Horizon colour: average of the sky textures' lower halves (where the horizon usually is).
+        auto mean_rows = [&](float out[3], bool lower) {
+            double acc[3] = {}, n = 0;
+            for (const scene::Texture& t : sky.textures)
+                for (u32 y = lower ? t.height / 2 : 0; y < (lower ? t.height : t.height / 2); ++y)
+                    for (u32 x = 0; x < t.width; ++x) {
+                        u32 c = t.rgba[size_t(y) * t.width + x];
+                        for (int k = 0; k < 3; ++k) acc[k] += double((c >> (8 * k)) & 0xFF) / 255.0;
+                        n += 1;
+                    }
+            if (n > 0)
+                for (int k = 0; k < 3; ++k) out[k] = float(acc[k] / n);
+        };
+        mean_rows(horizon_, true);
+        mean_rows(sky_rgb_, false);
+        sky_ = std::make_unique<render::GpuModel>(ctx, sky);
+    }
+    // The rear-view mirror's sky: the low-resolution dome (slot 24).
+    course::CourseModelOptions mo;
+    mo.scenery = mo.course_line = mo.backdrop = mo.sky = false;
+    mo.sky_low = true;
+    scene::Model sky_low = course::build_course_model(data, mo, name + "/sky2");
+    if (!sky_low.meshes.empty()) sky_low_ = std::make_unique<render::GpuModel>(ctx, sky_low);
+    // The moving nodes cover the sun and the lamps too (GT3 depth-tests the finished frame), and
+    // some carry whole buildings with their flags: Smokey Mountain's hotel. They go in as they
+    // stand at the start; rebuilding the tree as they move would cost more than posing them.
+    for (const Moving* m : {&scenery_moving_, &backdrop_moving_})
+        for (const gtm1::AnimatedNodes& a : m->nodes) occluder_.add(a.meshes());
+    occluder_.build();
 
         // The reflection map's scene: slot 5 scenery and the slot 23 sky dome.
         course::CourseModelOptions eo;

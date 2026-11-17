@@ -408,6 +408,8 @@ std::optional<ModCarDef> parse_mod_car(std::string_view text, std::string* error
             return fail("[powertrain] electric: give torque_nm, power_kw and max_rpm (or a curve and max_rpm)");
         if (!d.max_rpm) return fail("[powertrain] electric: max_rpm is required");
         if (d.gears.size() > 1) return fail("[drivetrain] electric: one reduction ratio (gears = <ratio> or final_drive)");
+        for (const std::optional<float>& v : {d.regen_g, d.regen_kw, d.regen_torque_nm})
+            if (v && !(*v >= 0)) return fail("[powertrain] regen_g, regen_kw and regen_torque_nm: 0 or more");
     }
     if (d.max_rpm && *d.max_rpm > 25500) return fail("[powertrain] max_rpm: at most 25500");
     return d;
@@ -744,9 +746,13 @@ bool add_mod_car(CarDatabase& db, const ModCarDef& def, std::string* error, cons
         }
     put16(car, 0xE0, maker_id);
     put16(car, 0xE2, maker_id);
+    // Each language's name and second name (car_name_fields). The second ("SUZUKI SPORTS
+    // LIMITED(J)" after "ALTO WORKS") is blank, as on most disc cars: the results and records
+    // show the two together.
     u16 name = db.add_unistring(game(def.name));
+    u16 second = db.add_unistring(" ");
     put16(car, 0xE4, name);
-    put16(car, 0xE6, name);
+    put16(car, 0xE6, second);
     put16(car, 0xE8, db.add_string(def.label));
     put16(car, 0xEA, def.year.value_or(donor->year));
     // The price as the disc stores its own cars' (docs/MODDING.md): credits in the US and
@@ -754,9 +760,9 @@ bool add_mod_car(CarDatabase& db, const ModCarDef& def, std::string* error, cons
     put32(car, 0xEC, def.price.value_or(donor->price));
     put8(car, 0xF0, 0);
     if (def.category) put8(car, 0xF1, *def.category);
-    // The same names in every language (car_name_fields), and offered in every language
-    // (region byte +0xF7 = 0).
-    for (size_t o : {0xF2, 0xF4, 0x100, 0x102}) put16(car, o, name);
+    // The same names in every language, and offered in every language (region byte +0xF7 = 0).
+    for (size_t o : {0xF2, 0x100}) put16(car, o, name);
+    for (size_t o : {0xF4, 0x102}) put16(car, o, second);
     put8(car, 0xF7, 0);
     put16(car, 0x104, db.add_unistring(maker));
     db.add_label(def.label);
@@ -824,8 +830,13 @@ bool add_mod_car(CarDatabase& db, const ModCarDef& def, std::string* error, cons
         // Regen: lift-off deceleration regen_g (default 0.2 g, typical one-pedal driving) turned
         // into motor torque through the driven tyre and the reduction; power-limited at speed.
         float r = 0.33f; // driven tyre radius, m
-        if (auto ts = drive == 1 ? def.front_tire : def.rear_tire)
-            r = ts->rim_in * 0.0127f + ts->width_mm_5 * 5 * 0.001f * ts->aspect_5 * 5 * 0.01f;
+        // (Host floats: a compiler may fuse the sum below into a multiply-add, Clang only within one statement, GCC on
+        // arm64 across them, so the last bit can differ between builds. electric_drive rounds the result.)
+        if (auto ts = drive == 1 ? def.front_tire : def.rear_tire) {
+            const float rim = ts->rim_in * 0.0127f;
+            const float sidewall = ts->width_mm_5 * 5 * 0.001f * ts->aspect_5 * 5 * 0.01f;
+            r = rim + sidewall;
+        }
         float mass = float(weight) + 120.0f; // as the spec builder counts it
         float g = def.regen_g.value_or(0.2f);
         m.regen_torque_nm = def.regen_torque_nm.value_or(overall_ratio > 0 ? g * 9.81f * mass * r / overall_ratio
