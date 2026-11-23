@@ -1619,7 +1619,7 @@ private:
                 row(kColour, "Colour",
                     (pname.empty() ? "" : pname + "  ") + std::to_string(paint_ + 1) + " of " + std::to_string(paint_count()),
                     !ready, arrows, 26);
-            if (!pal.empty()) draw_paint_chip(ui, arrows ? 212 : 200, ry - 1, 18, 9, pal[size_t(cur)].rgb, false);
+            if (!pal.empty()) draw_paint_chip(ui, arrows ? 212.0f : 200.0f, float(ry - 1), 18, 9, pal[size_t(cur)].rgb, false);
         }
         if (cars_.empty()) {
             row(kTires, "Tires", "-", false, false);
@@ -2631,6 +2631,8 @@ private:
     int picking_cpu_ = -1;  // the CPU car whose car page is open
     std::map<std::string, int> grid_sizes_; // by course label
     u16 ghost_ms_ = 150;
+    int ai_opponents_ = 0; // the host's AI opponents (kept in [online])
+    u32 ai_seed_ = 1;      // their shared seed
     bool tire_wear_ = false; // the host's
     // The chosen car's lobby tires (a tire type; -1: its own) and settings (none: its own), kept per car ([online_tune]).
     int lobby_tires_ = -1;

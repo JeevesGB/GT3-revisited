@@ -531,7 +531,7 @@ void draw_paint_column(GtModeSession& s, const PageRef& ref, const std::string& 
 // Garage list (code-drawn): rows of the "car1" template ("car_a1" on the cursor row) as a
 // vertical list in the "menu_garage" window (ListRows: 28 units apart) with its scroll bar, in
 // the chosen sort order, with the sort column header and values.
-void draw_garage_list(const MenuController& ctl, GtModeSession& s, const PageRef& ref, const std::string& page,
+void draw_garage_list(const MenuController& ctl, GtModeSession& s, const PageRef& ref, const std::string& /*page*/,
                       DrawList& out) {
     ListRows g;
     if (!garage_rows(ctl, s, g)) return;

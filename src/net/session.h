@@ -73,6 +73,7 @@ struct Settings {
     };
     std::vector<CpuCar> cpu;
     u8 cpu_place = 0;
+    u8 ai_opponents = 0; // AI opponents the host asked for (not sent: online AI is disabled until it is host-authoritative)
 };
 
 // How this player reaches another one.
@@ -265,6 +266,14 @@ public:
         std::string suspect_name, reporter_name;
     };
     const std::vector<FlagRecord>& flags() const { return flag_log_; }
+
+    // Proximity voice: unreliable μ-law frames (host-relayed like State).
+    struct VoiceRx {
+        u8 player = 0, seq = 0;
+        Bytes data;
+    };
+    void send_voice(u8 seq, ByteSpan mulaw);
+    std::vector<VoiceRx> take_voice(); // frames received since the last call
 
     // Test hooks: drop this share of outgoing datagrams (0..1); shift this session's clock;
     // drop every punch datagram (forces relaying).

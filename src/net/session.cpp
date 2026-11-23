@@ -1571,12 +1571,12 @@ void Session::handle(Conn& c, ByteSpan msg, double arrived) {
             s.cpu_place = r.u8_();
             const int n = std::min<int>(r.u8_(), kMaxCpuCars);
             for (int k = 0; k < n && r.ok(); ++k) {
-                Settings::CpuCar c;
-                c.paint = r.u8_();
-                c.skill = r.u8_();
-                ByteSpan d = r.bytes(c.driver.size());
-                if (r.ok()) std::copy(d.begin(), d.end(), c.driver.begin());
-                s.cpu.push_back(c);
+                Settings::CpuCar cc;
+                cc.paint = r.u8_();
+                cc.skill = r.u8_();
+                ByteSpan d = r.bytes(cc.driver.size());
+                if (r.ok()) std::copy(d.begin(), d.end(), cc.driver.begin());
+                s.cpu.push_back(cc);
             }
             s.cpu_place = u8(std::min<size_t>(s.cpu_place, s.cpu.size()));
         }

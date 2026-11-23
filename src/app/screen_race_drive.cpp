@@ -656,7 +656,7 @@ void RaceScreen::update_drive(App& app, double dt) {
         toast("End of replay");
         const sim::Vec3& a = vehicle_->state().position;
         bool exact = a.x == replay_.final_position.x && a.y == replay_.final_position.y && a.z == replay_.final_position.z;
-        if (std::optional<bool> m = exact_field() ? exact_playback_matches(*exact_field()) : std::nullopt) exact = *m;
+        if (std::optional<bool> pm = exact_field() ? exact_playback_matches(*exact_field()) : std::nullopt) exact = *pm;
         LOG_INFO("Replay: end, final %s the recording", exact ? "matches" : "DIFFERS FROM");
     }
     render_state_ = interpolate(prev_, vehicle_->state(), step_.alpha());
