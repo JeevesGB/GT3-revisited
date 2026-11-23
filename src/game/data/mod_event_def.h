@@ -3,7 +3,7 @@
 // Player-made GT Mode events (docs/MODDING.md "Adding events"): what a mods/<id>/events/<name>.ini
 // holds, and what loading it made (game/data/mod_events.h). The race records themselves live in the
 // ordinary event table (32), cloned from a disc event; this keeps what the disc format has no field
-// for (the title, the picture, the league page, the skills and grid place of the field).
+// for (the title, the pictures, the league page, the skills and grid place of the field).
 
 #include <array>
 #include <string>
@@ -38,8 +38,8 @@ struct ModEventRace {
     // the race's pool: the race draws its opponents from it as GT3's races do (every car, in the draw's
     // order), the player behind them.
     std::vector<ModEventCar> opponents;
-    // How many opponents it draws from its pool (event +0x1B5 less the player's car): 0 = as many as the
-    // pool has, at most 5.
+    // How many opponents it draws from its pool (event +0x1B5 less the player's car), up to 31: more than the
+    // pool has repeats its cars (GT3's draw); 0 = as many as the pool has, at most 5.
     int cars = 0;
     // How the opponents drive: the race record's own driver percentages (event +0x19C .. +0x1B3, every
     // CPU car of a driveline class alike, ai §9.2), -1 the base race's, 0 .. 3 the arcade race of that
@@ -55,6 +55,7 @@ struct ModEventDef {
     // [event]
     std::string title, description;
     std::string picture; // host path of the event's picture (PNG, 640x448 shown), "" = none
+    std::string icon;    // host path of its strip icon on the league page (PNG, 51x27 shown), "" = the picture
     // The league page it is listed on, as the disc's race map links it ("r/beginner/beginner");
     // "" or a page the open disc does not have: the Custom Events league.
     std::string league;
@@ -85,7 +86,8 @@ struct ModEventDef {
     std::vector<ModEventRace> races;
 
     static constexpr int kMaxRaces = 10;
-    static constexpr int kMaxOpponents = 5; // in a race
+    static constexpr int kMaxOpponents = 31;    // in a race (a field of up to 32 cars, the player's included; GT3's races 5)
+    static constexpr int kDefaultOpponents = 5; // a race without cars = (as GT3's races)
     static constexpr int kMaxPool = 32;     // in a pool (event +0x10)
 };
 

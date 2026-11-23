@@ -15,7 +15,7 @@ sim::ControlInputs RaceScreen::demo_inputs(size_t i) const {
 
 void RaceScreen::start_demo() {
     if (!track_ || !vehicle_) return;
-    // Without the disc's demonstration GT3's loader writes nothing into the race and the driver plays it in
+    // Without the disc's demonstration GT3's loader (0x12F5A8) writes nothing into the race and the driver plays it in
     // replay mode all the same: the last run, or the empty recording before any run (its replay over at once).
     if (!disc_demo_) {
         if (finished_) latch_result(); // the replay re-runs the field: keep the live run's result
@@ -38,6 +38,8 @@ void RaceScreen::start_demo() {
 // Licence quick menu: the demonstration runs live in the preview box behind the menu.
 void RaceScreen::start_preview() {
     if (!track_ || !vehicle_ || preview_) return;
+    // Concept's menu of a test with the pace car has no box (its render skips it, 0x1337F8).
+    if (concept_menus() && launch_.request.lead_car) return;
     // After a run, GT3's licence menu replays that run in the box, looping
     // (presentation.md A7); with no run, or after one left with EXIT or a DEMONSTRATION (the
     // driver loads the demonstration in the run's place, §A8), the disc's demonstration.
@@ -109,8 +111,13 @@ void RaceScreen::begin_license() {
         std::string err;
         // The language's demonstration (docs/dev/GT_MODE.md "Language": S-1's in British English).
         const Vfs& vfs = *app_->vfs();
-        const std::string path =
+        std::string path =
             game::demo_replay_path(demo_code, vfs.language(), [&](const std::string& p) { return vfs.exists(p); });
+        // Tokyo-Geneva's European release names its 50 Hz recording ("demo/<code>_p", 0x148818); the race here steps 60
+        // times a second, so the same test's 60 Hz recording on the disc is played (the Asian release's, "LCtw": the
+        // same car and times; ours, concept §15).
+        if (!vfs.exists(path) && demo_code.rfind("LCeu", 0) == 0 && vfs.exists("demo/LCtw" + demo_code.substr(4)))
+            path = "demo/LCtw" + demo_code.substr(4);
         if (std::optional<Bytes> b = vfs.read(path)) disc_demo_ = DemoReplay::parse(*b, &err);
         if (disc_demo_) LOG_INFO("Demo %s: %zu frames, %.3f s", demo_code.c_str(), disc_demo_->size(),
                                  disc_demo_->time_ms / 1000.0);

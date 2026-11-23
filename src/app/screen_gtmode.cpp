@@ -68,6 +68,16 @@ public:
         }
         std::string car, wheel;
         int paint = 0;
+        // Concept's prize car page: the car won, over the whole page (the "purchased" showroom: no floor mirror).
+        if (e.widget_class && *e.widget_class == "render_model" && page == "concept_car_get") {
+            if (!game::car_for_widget(page, *e.widget_class, car, paint)) return;
+            const ShowroomCamera& cam = showroom_camera(app, "buycar");
+            const float sx = box.w / std::max(e.w, 1.0f), sy = box.h / std::max(e.h, 1.0f);
+            const SDL_FRect whole{box.x - e.x * sx, box.y - (448 - e.y - e.h) * sy, 640 * sx, 448 * sy};
+            if (const Loaded* m = this->car(app, car, paint, wheel); m && cam.valid)
+                showroom(app, r, placed(whole), *m, "conceptget:" + car + "#" + std::to_string(paint), cam, -1, 0, true, 1.0f, env, 4);
+            return;
+        }
         // Arcade car pickers ("ar/select_car:<entry>"): the entry's car, turning, in the
         // area above the icon strip.
         if (size_t colon = page.find(':'); colon != std::string::npos && page.rfind("ar/", 0) == 0) {
@@ -228,7 +238,10 @@ private:
         // composite, which a tile-based mobile GPU pays for in full (5 fps on a Galaxy A15).
         // At the screen's resolution the passes' part of a game pixel has nothing left to add.
         if (platform::is_mobile() || canvas_) passes = 1;
-        if (show_.key != entry) {
+        // A new car, or the same car shown anew (its menu frame count restarted: back on the
+        // page after a race, or back from the class row): the intro starts over. Keeping the
+        // old state held the camera still until the new count caught up with the old one.
+        if (show_.key != entry || (frame >= 0 && frame < show_.frames + show_.load_wait)) {
             show_ = Showroom{};
             show_.key = entry;
             show_.look[0] = cam.key(0x34), show_.look[1] = cam.key(0x35), show_.look[2] = cam.key(0x36);
@@ -252,7 +265,7 @@ private:
                 ++show_.load_wait;
                 continue;
             }
-            // The menu car camera integrator: v += a / 60, v -= v c / 60, x += v / 60.
+            // The MenuCarCamera integrator: v += a / 60, v -= v c / 60, x += v / 60.
             auto spring = [](float& x, float& v, float target, float k, float c) {
                 v += (target - x) * k / 60.0f;
                 v -= v * c / 60.0f;
@@ -514,7 +527,7 @@ private:
             area = SDL_FRect{box.x - e.x * sx, box.y - (448 - e.y - e.h) * sy, 640 * sx, 448 * sy};
             // The championship trophy item draws 160 pixels left of centre (gt_mode §18, M).
             if (trophy) area.x -= 160 * sx;
-            // Race prizes (mini prize): the cup appears smaller and higher than the .prm camera
+            // Race prizes (MiniPrize): the cup appears smaller and higher than the .prm camera
             // over the full frame gives (M: fitted to the reference capture of the Sunday Cup
             // cup page: 0.86 x about the frame centre).
             if (mini) {
@@ -596,10 +609,13 @@ private:
         if (!t.tex) t.tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, w, h);
         if (!t.tex) return;
         SDL_Texture* prev = SDL_GetRenderTarget(r);
+        SDL_BlendMode prev_blend = SDL_BLENDMODE_BLEND;
+        SDL_GetRenderDrawBlendMode(r, &prev_blend);
         SDL_SetRenderTarget(r, t.tex);
         paint(w, h);
         SDL_FlushRenderer(r);
         SDL_SetRenderTarget(r, prev);
+        SDL_SetRenderDrawBlendMode(r, prev_blend);
         static const SDL_BlendMode kAdd = SDL_ComposeCustomBlendMode(
             SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD, SDL_BLENDFACTOR_ZERO,
             SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
@@ -624,11 +640,14 @@ private:
         if (!t.tex) t.tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, w, h);
         if (!t.tex) return;
         SDL_Texture* prev = SDL_GetRenderTarget(r);
+        SDL_BlendMode prev_blend = SDL_BLENDMODE_BLEND;
+        SDL_GetRenderDrawBlendMode(r, &prev_blend); // clear_picture and accumulate change it
         SDL_SetRenderTarget(r, t.tex);
         clear_picture(r);
         paint(t.tex, w, h);
         SDL_FlushRenderer(r);
         SDL_SetRenderTarget(r, prev);
+        SDL_SetRenderDrawBlendMode(r, prev_blend);
         const float o = std::clamp(opacity, 0.0f, 1.0f);
         SDL_SetTextureBlendMode(t.tex, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
         SDL_SetTextureColorModFloat(t.tex, o, o, o);
@@ -713,7 +732,7 @@ private:
             opt.paint = paint;
             race::CarSetup setup = race::car_setup_from_database(s->gt().db(), car);
             opt.wheel_spec = setup.wheels;
-            opt.body_mod = body_mod_for_car(s->gt().db(), car, paint);
+            opt.body_mod = body_mod_for_car(s->gt().db(), car, paint, data::CarScene::Menu);
             std::optional<Bytes> wheel_file;
             // A fitted wheel: the menus load the detailed menu/wheel/<code> model,
             // the race wheel/<code>.
@@ -861,7 +880,7 @@ public:
         ui.header("GT MODE", path_);
         if (!gt_) {
             ui.text(8, 40, error_.empty() ? "loading..." : error_, colors::kBad);
-            ui.footer("Triangle: back");
+            ui.footer("{Triangle}: back");
             return;
         }
         const game::GameState& s = gt_->state();
@@ -912,7 +931,7 @@ public:
             ui.text(364, y, b, col);
             y += 11;
         }
-        ui.footer("Up/Down: scroll   Triangle: back   (play GT mode in the 'gt3menu' screen)");
+        ui.footer("{Up/Down}: scroll   {Triangle}: back   (play GT mode in the 'gt3menu' screen)");
     }
 
 private:

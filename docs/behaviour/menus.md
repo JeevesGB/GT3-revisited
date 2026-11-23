@@ -879,7 +879,7 @@ steps, and each step is a page:
 | Item | Action | Steps | Race |
 |---|---|---|---|
 | Single Race | `single_race` | `ar/level` → `ar/select_course` → `ar/select_class` → `ar/select_car` | mode `single_race` with the race code below |
-| Time Trial | `compulsory` | `ar/select_compulsory` | mode `time_trial` (the race code follows from the challenge) |
+| Time Trial | `compulsory` | `ar/select_compulsory` | mode `time_trial` (the race code follows from the challenge); the car in its first paint, whatever paint another mode's car page chose |
 | Free Run | `time_attack` | `ar/select_course` → `ar/select_class` → `ar/select_car` | mode `free_run`, race code `ATAF0001` |
 | 2 Player Battle | `two_player_battle` | `ar/select_course` → `ar/select_car_2p` | mode `two_player_battle`, race code `A2P0001` |
 | Clear Status | `goodies` | `ar/goodies` | none; Goal opens `ar/select_ending` as a popup |
@@ -2088,7 +2088,7 @@ Development aids:
 |---|---|
 | `GT3R_LANG` | the game's language, any the disc has menu folders for (`JP` on an NTSC-U disc, say) |
 | `GT3R_GT3MENU_OPEN=<set>:<page>` | opens a page directly |
-| `GT3R_GT3MENU_SCRIPT` | runs keys at start-up, one frame each plus a release frame, after 30 frames to let the first page settle. Example: `down,cross,wait:40` |
+| `GT3R_GT3MENU_SCRIPT` | runs keys at start-up, one frame each plus a release frame, after 30 frames to let the first page settle; `p2:<key>` is player 2's key (the 2 player car pages). Example: `down,cross,wait:40` |
 | `GT3R_GT3MENU_FREEZE` | stops the menu clock after the script |
 
 **`gt3r --screen menu`** (`src/app/screen_menu.cpp`) is a static viewer. It

@@ -6,7 +6,9 @@
 #include "net/protocol.h"
 #include "base/file.h"
 #include "base/sha256.h"
+#include "disc/disc.h"
 #include "disc/volume.h"
+#include "formats/model/gltf.h"
 #include "formats/png_writer.h"
 #include "game/data/car_database.h"
 #include "game/mod_package.h"
@@ -524,8 +526,8 @@ TEST(net_old_protocol_told_to_update) {
         while (size_t n = old.recv_from(from, buf, sizeof buf)) reply.append(reinterpret_cast<const char*>(buf), n);
         return reply.find("update") != std::string::npos;
     }));
-    CHECK(reply.find("update required: the host has a newer version of the game (online protocol 5, yours 3)") !=
-          std::string::npos);
+    CHECK(reply.find("update required: the host has a newer version of the game (online protocol " +
+                     std::to_string(net::kProtocolVersion) + ", yours 3)") != std::string::npos);
     CHECK(host.players().size() == 1); // not let in
     // The other way round: a newer game is told the host must update.
     CHECK(net::protocol_mismatch(net::kProtocolVersion + 1).find("the host needs to update") != std::string::npos);
@@ -547,6 +549,71 @@ TEST(net_session_rejects_when_racing) {
     }));
     CHECK(!late.active());
     CHECK(host.players().size() == 2);
+}
+
+TEST(net_session_disc_must_match) {
+    // The host lets in only players whose disc matches its own: a Gran Turismo 3 release joins a Gran Turismo 3 host
+    // whatever its region, another disc is turned away with both discs named, and a host on that disc lets it in.
+    FakeClock clock;
+    const net::OnlineDisc gtc{"files:8d5d67d9bdd40790", "Gran Turismo Concept (SCES-50858)"};
+    net::Session host, gt3, other;
+    if (!host.host(0, "Host", "a", 0)) SKIP("no UDP sockets here");
+    const std::string addr = "127.0.0.1:" + std::to_string(host.port());
+    gt3.join(addr, "One", "b", 0);
+    CHECK(pump({&host, &gt3}, [&] { return gt3.my_id() == 1; }));
+    other.set_disc(gtc);
+    other.join(addr, "Two", "c", 0);
+    std::vector<net::Event> ev;
+    CHECK(pump({&host, &gt3, &other}, [&] {
+        for (auto& e : drain(other)) ev.push_back(e);
+        return has(ev, net::Event::Kind::Rejected);
+    }));
+    std::string why;
+    for (const net::Event& e : ev)
+        if (e.kind == net::Event::Kind::Rejected) why = e.text;
+    CHECK(why == "the host plays a Gran Turismo 3 release, you Gran Turismo Concept (SCES-50858); discs must match");
+    CHECK(!other.active() && host.players().size() == 2);
+    // A host on that disc: the same disc joins, a Gran Turismo 3 release does not.
+    net::Session chost, same, plain;
+    chost.set_disc(gtc), same.set_disc(gtc);
+    CHECK(chost.host(0, "Host", "a", 0));
+    const std::string caddr = "127.0.0.1:" + std::to_string(chost.port());
+    same.join(caddr, "Same", "b", 0);
+    CHECK(pump({&chost, &same}, [&] { return same.my_id() == 1; }));
+    plain.join(caddr, "Plain", "c", 0);
+    ev.clear();
+    CHECK(pump({&chost, &same, &plain}, [&] {
+        for (auto& e : drain(plain)) ev.push_back(e);
+        return has(ev, net::Event::Kind::Rejected);
+    }));
+    CHECK(chost.players().size() == 2);
+}
+
+TEST(net_online_disc_identity) {
+    // Which discs race together (docs/dev/ONLINE.md "Discs").
+    DiscInfo us, pal, mod, gtc, patched;
+    us.serial = "PBPX_955.03", us.verified = true, us.digest = "164c486ca0a61886";
+    pal.serial = "SCES_502.94", pal.verified = true, pal.region = Region::Europe, pal.digest = "075246ad42a4b418";
+    CHECK(game::online_disc(&us, GameKind::Gt3).id == "gt3" && game::online_disc(&pal, GameKind::Gt3).id == "gt3");
+    // A disc the game does not know (a mod under its own serial): its files.
+    mod.serial = "SCEF_502.94", mod.region = Region::Europe, mod.digest = "0123456789abcdef";
+    CHECK(game::online_disc(&mod, GameKind::Gt3).id == "files:0123456789abcdef");
+    CHECK(game::online_disc(&mod, GameKind::Gt3).name == "an unrecognized disc (SCEF-50294)");
+    // Two versions of it: both named the same, told apart.
+    CHECK(net::disc_mismatch({"files:1", "an unrecognized disc (SCEF-50294)"}, {"files:2", "an unrecognized disc (SCEF-50294)"}) ==
+          "the host plays another version of an unrecognized disc (SCEF-50294); discs must match");
+    // A known release whose files were changed.
+    patched = pal, patched.modified = true, patched.digest = "fedcba9876543210";
+    patched.description = "Gran Turismo 3 A-Spec (PAL)";
+    CHECK(game::online_disc(&patched, GameKind::Gt3).id == "files:fedcba9876543210");
+    CHECK(game::online_disc(&patched, GameKind::Gt3).name == "a modified copy of Gran Turismo 3 A-Spec (PAL) (SCES-50294)");
+    // A Gran Turismo Concept release.
+    gtc.serial = "SCES_508.58", gtc.digest = "8d5d67d9bdd40790", gtc.data.game = GameKind::Concept;
+    CHECK(game::online_disc(&gtc, GameKind::Concept).id == "files:8d5d67d9bdd40790");
+    CHECK(game::online_disc(&gtc, GameKind::Concept).name == "Gran Turismo Concept (SCES-50858)");
+    // No disc image (the files alone).
+    CHECK(game::online_disc(nullptr, GameKind::Gt3).id == "gt3");
+    CHECK(game::online_disc(nullptr, GameKind::Concept).id != "gt3");
 }
 
 TEST(net_remote_car_prediction) {
@@ -1288,6 +1355,15 @@ Bytes tiny_glb(u32 texture_dim = 0) {
     return glb;
 }
 
+struct ModPackageFileFinder {
+    const game::ModPackage& p;
+    Bytes operator()(const std::string& path) const {
+        for (const game::ModPackage::File& f : p.files)
+            if (f.path == path) return f.data;
+        return {};
+    }
+};
+
 game::ModPackage ev_package(const std::string& extra = "") {
     game::ModPackage p;
     p.label = "online_test_ev";
@@ -1333,6 +1409,25 @@ TEST(net_mod_package_validation_disc) {
         p.files[0].data.assign(ini.begin(), ini.end());
         refuses(p, "online_test_ev", "donor not on this disc");
     }
+    // A menu model and a race model (issue 412): both bodies go, and a key that no scene draws
+    // (`file`, overridden by both) names no file.
+    {
+        game::ModPackage p = ev_package("[model]\nrace = models/race.glb\n");
+        p.files.push_back({"models/race.glb", tiny_glb()});
+        ok = game::validate_mod_package(p, db, "online_test_ev", &err);
+        if (!ok) std::printf("  file + race package refused: %s\n", err.c_str());
+        CHECK(ok);
+        p.files.pop_back();
+        refuses(p, "online_test_ev", "race body missing");
+        p = ev_package("[model]\nmenu = models/menu.glb\nrace = models/race.glb\n");
+        p.files[1].path = "models/menu.glb";
+        p.files.push_back({"models/race.glb", tiny_glb()});
+        ok = game::validate_mod_package(p, db, "online_test_ev", &err);
+        if (!ok) std::printf("  menu + race package refused: %s\n", err.c_str());
+        CHECK(ok);
+        p.files.push_back({"models/body.glb", tiny_glb()});
+        refuses(p, "online_test_ev", "body no scene draws");
+    }
     // Install: the files land in mods/dl-<hash>/ and nowhere else.
     std::string dir = test::temp_path("mods").string();
     std::string hash = sha256_hex(game::serialize_mod_package(good));
@@ -1341,6 +1436,13 @@ TEST(net_mod_package_validation_disc) {
     if (where) {
         CHECK(read_host_file(*where + "/cars/online_test_ev.ini").has_value());
         CHECK(read_host_file(*where + "/models/body.glb").has_value());
+        // The body as our own encoding: it loads the same.
+        if (std::optional<Bytes> body = read_host_file(*where + "/models/body.glb")) {
+            const ModPackageFileFinder find{good};
+            const scene::Model sent = load_glb(find("models/body.glb")), kept = load_glb(*body);
+            CHECK(sent.meshes.size() == kept.meshes.size() && sent.textures.size() == kept.textures.size());
+            for (size_t i = 0; i < sent.textures.size() && i < kept.textures.size(); ++i) CHECK(sent.textures[i].rgba == kept.textures[i].rgba);
+        }
         std::optional<Bytes> mi = read_host_file(*where + "/mod.ini");
         CHECK(mi && std::string(mi->begin(), mi->end()).find("priority = -100") != std::string::npos);
     }
@@ -1925,12 +2027,14 @@ static double relayed_race(bool pair_channels) {
 TEST(net_relay_traffic_per_link) {
     // Every pair on its own channel (a race once punching settled): one stream each way.
     double link = relayed_race(true);
-    // The busiest legitimate channel: the host still forwarding four other players' states to a
-    // player (their pair channels not up yet). The racing guard sits at about twice that.
+    // The busiest legitimate channel here: the host still forwarding four other players' states to a
+    // player (their pair channels not up yet), five cars' in all. The racing guard holds a full field's
+    // (net::kMaxRaceCars: every other car's states on one channel) with room, under twice that.
     double busiest = relayed_race(false);
     double guard = net::RelayServer::Limits{}.channel_bytes_per_s;
     CHECK(busiest > link * 3);
-    CHECK(busiest * 1.6 < guard && busiest * 2.5 > guard);
+    const double full_field = busiest / 5 * (net::kMaxRaceCars - 1);
+    CHECK(full_field * 1.1 < guard && full_field * 2 > guard);
 }
 
 namespace {
@@ -2889,4 +2993,42 @@ TEST(net_update_links) {
     net::RelayServer::Versions v;
     v.release_url = "https://github.com/an-owner-name-of-length/GT3-revisited/releases/latest/download/{asset}";
     CHECK(net::check_relay_versions(v));
+}
+
+// A downloaded body's images as our own encoding (formats/model/gltf.h reencode_glb_images): the same pictures and
+// geometry, the sender's image bytes gone; a JPEG or an image beside the file a 1x1 white PNG, as the loader draws it.
+TEST(net_glb_images_reencoded) {
+    const Bytes glb = tiny_glb(4);
+    const Bytes ours = reencode_glb_images(glb, 2048);
+    const scene::Model a = load_glb(glb), b = load_glb(ours);
+    CHECK(a.textures.size() == 2 && b.textures.size() == 2);
+    if (a.textures.size() == 2 && b.textures.size() == 2) CHECK(a.textures[1].rgba == b.textures[1].rgba);
+    CHECK(a.meshes.size() == b.meshes.size() && a.meshes[0].vertices.size() == b.meshes[0].vertices.size());
+    // The sender's image bytes (its view: from offset 44 of the binary buffer) are zeros now; ours follow at the end.
+    auto bin_of = [](const Bytes& g) {
+        const u32 json_len = u32(g[12]) | u32(g[13]) << 8 | u32(g[14]) << 16 | u32(g[15]) << 24;
+        return Bytes(g.begin() + 12 + 8 + json_len + 8, g.end());
+    };
+    const Bytes sent_bin = bin_of(glb), our_bin = bin_of(ours);
+    CHECK(our_bin.size() > sent_bin.size());
+    bool zeroed = our_bin.size() >= sent_bin.size();
+    for (size_t i = 44; zeroed && i < sent_bin.size(); ++i) zeroed = our_bin[i] == 0;
+    CHECK(zeroed);
+    CHECK(std::equal(sent_bin.begin(), sent_bin.begin() + 44, our_bin.begin())); // (the geometry as it was)
+    // A JPEG: white, as load_glb draws it.
+    std::string text(glb.begin(), glb.end());
+    const size_t m = text.find("image/png");
+    CHECK(m != std::string::npos);
+    if (m == std::string::npos) return;
+    Bytes jpeg = glb;
+    std::memcpy(jpeg.data() + m, "image/jpg", 9);
+    const scene::Model j = load_glb(reencode_glb_images(jpeg, 2048));
+    CHECK(j.textures.size() == 2 && j.textures[1].width == 1 && j.textures[1].rgba == std::vector<u32>{0xFFFFFFFFu});
+    bool threw = false;
+    try {
+        reencode_glb_images(Bytes{'n', 'o', 'p', 'e'}, 2048);
+    } catch (const FormatError&) {
+        threw = true;
+    }
+    CHECK(threw);
 }

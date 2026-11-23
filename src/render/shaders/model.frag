@@ -78,7 +78,26 @@ layout(set = 3, binding = 0) uniform FragmentUniforms {
     // four angles. The SPIN_COPIES variant: w the copies' cells (DrawItem::spin_turn).
     vec4 wheel_blur;
     vec4 wheel_steps; // DrawItem::gs_bilinear: xy the texture's size
+    // scene::Primitive::uv_region: the part of the texture the primitive shows (min u, min v,
+    // max u, max v); an axis with max <= min: none (region_uv).
+    vec4 uv_region;
 } u;
+
+// The texture coordinates kept inside the primitive's region of its texture (u.uv_region), half a
+// texel of the mip level in use (the larger footprint, so anisotropic taps too) in from its
+// edges: filtering never takes in a picture packed beside it. A region narrower than that: its
+// middle.
+vec2 region_uv(vec2 uv) {
+    vec4 r = u.uv_region;
+    bvec2 on = greaterThan(r.zw, r.xy);
+    if (!any(on)) return uv;
+    vec2 size = vec2(textureSize(u_tex, 0));
+    vec2 texels = max(abs(dFdx(uv)), abs(dFdy(uv))) * size;
+    float level = exp2(ceil(log2(max(max(texels.x, texels.y), 1.0))));
+    vec2 inset = 0.5 * level / size, mid = 0.5 * (r.xy + r.zw);
+    vec2 c = clamp(uv, min(r.xy + inset, mid), max(r.zw - inset, mid));
+    return vec2(on.x ? c.x : uv.x, on.y ? c.y : uv.y);
+}
 
 // GT3's per-vertex reflection weight (VU kernel): C0 + C1 min(V.N, 0), V the unit vector
 // from the eye. Without decoded rows: 1 + C1 min(V.N, 0) with the scalar C1 in env_sky.w.
@@ -195,13 +214,16 @@ vec3 gt3_grade(vec3 c) {
 // blurred picture laid over the frame. The mean of grade.x x grade.y bilinear taps spaced
 // grade.zw apart around v_uv x view_row0.xy + view_row0.zw (one tap: the plain bilinear sample),
 // every tap clamped to view_row1 (the used part of the texture, half a texel in from its edges: a
-// clamp to its edge), at the weight tint.a.
+// clamp to its edge), at the weight tint.a. flat_color.z = 1 (View3D::spin_resolve): u_sphere is a
+// mask, black where the taps count; each tap weighs by its coverage (1 - the mask), and the result
+// by the pixel's own (none: left as it is).
 vec4 dof_sample() {
     vec2 uv = v_uv * u.view_row0.xy + u.view_row0.zw;
     vec2 n = max(u.grade.xy, vec2(1.0));
     // flat_color.xy > 0: the taps weighted by a Gaussian of that spread (in taps) per axis, else
     // equally (a box mean).
     vec2 s = u.flat_color.xy;
+    bool masked = u.flat_color.z > 0.5;
     vec3 sum = vec3(0.0);
     float total = 0.0;
     for (float j = 0.0; j < n.y; j += 1.0)
@@ -210,10 +232,15 @@ vec4 dof_sample() {
             vec2 g = vec2(s.x > 0.0 ? exp(-0.5 * k.x * k.x / (s.x * s.x)) : 1.0,
                           s.y > 0.0 ? exp(-0.5 * k.y * k.y / (s.y * s.y)) : 1.0);
             float w = g.x * g.y;
-            sum += w * texture(u_tex, clamp(uv + k * u.grade.zw, u.view_row1.xy, u.view_row1.zw)).rgb;
+            vec2 t = clamp(uv + k * u.grade.zw, u.view_row1.xy, u.view_row1.zw);
+            if (masked) w *= 1.0 - texture(u_sphere, t).r;
+            sum += w * texture(u_tex, t).rgb;
             total += w;
         }
-    return vec4(sum / total, u.tint.a);
+    if (!masked) return vec4(sum / total, u.tint.a);
+    float own = 1.0 - texture(u_sphere, clamp(uv, u.view_row1.xy, u.view_row1.zw)).r;
+    if (own <= 0.0 || total <= 0.0) return vec4(0.0);
+    return vec4(sum / total, u.tint.a * own);
 }
 #endif
 
@@ -293,8 +320,12 @@ void shade() {
         // base pass's texel alpha (bound texture; white when none) x vertex alpha.
         // Texels at or below params.x (scene::Primitive::under_ref) failed that pass's alpha test
         // and wrote nothing: the alpha under it (env_c1.w) stays there.
+        // params.x >= 2: only those failing texels (ref = params.x - 2), the pass's hole, which
+        // View3D draws before the items after the car body (its wheels).
         float ta = wheel_texture(v_uv).a;
-        if (u.params.x >= 0.0 && ta <= u.params.x) ta = u.env_c1.w;
+        float under_ref = u.params.x >= 2.0 ? u.params.x - 2.0 : u.params.x;
+        if (under_ref >= 0.0 && ta <= under_ref) ta = u.env_c1.w;
+        else if (u.params.x >= 2.0) discard;
         float ad = v_color.a * ta;
         // GS TEST.DATE with DATM 0: only where Ad < 0x80 (0x80 = 1.0 here), not on texels at full
         // reflectivity. (The 0x80 an earlier reflection pass leaves: the decoder drops the
@@ -332,7 +363,7 @@ void shade() {
         return;
     }
 #endif // PLAIN
-    vec4 t = wheel_texture(v_uv);
+    vec4 t = wheel_texture(region_uv(v_uv));
     vec4 c = vec4(gs_texel(t.rgb), t.a) * v_color;
     if (u.params.w > 1.5) {
         // Road sheen: the texel modulated by its VU program's lit colour (model.vert), fogged
@@ -385,12 +416,19 @@ void shade() {
 // mean of the copies it holds, and each copy's own depth keeps whatever lies behind its spokes (the
 // brake parts) sharp. A pixel's samples hold one copy each; the cells of a 4 x 4 ordered pattern
 // share out the rest, so a pixel's copies spread over the whole turn. Without sample masks (OpenGL
-// ES 3.0) the copies come one to a pixel (as many as cells).
+// ES 3.0) the copies come one to a pixel (as many as cells). No cells (View3D's mask of the copies,
+// PipelineKey::spin_mask): every copy on every sample, the area the turn sweeps.
 const int kSpinCells[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);
 
 void spin_copy_samples() {
     int copy = v_copy;
     int cells = int(u.wheel_blur.w + 0.5);
+    if (cells <= 0) {
+#ifndef NO_SAMPLE_MASK
+        gl_SampleMask[0] = -1; // (an output: left unset it would be undefined)
+#endif
+        return;
+    }
     ivec2 p = ivec2(gl_FragCoord.xy) & 3;
     if (kSpinCells[p.y * 4 + p.x] * cells / 16 != copy % cells) discard;
 #ifndef NO_SAMPLE_MASK

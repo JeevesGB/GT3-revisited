@@ -1,18 +1,18 @@
 // Event creator: the player's own GT Mode events (public issue 275), made in the game and played
 // in GT Mode (game/data/mod_events.h, docs/MODDING.md "Adding events").
 //
-// The events are a mod of the player's, mods/my_events/: one events/<id>.ini each, and its
-// picture in pictures/<id>.png. The mod loads over whatever disc is open, like any other, so the
+// The events are a mod of the player's, mods/my_events/: one events/<id>.ini each, its picture
+// in pictures/<id>.png and its strip icon in pictures/<id>_icon.png. The mod loads over whatever disc is open, like any other, so the
 // choices the creator offers come off that disc: its courses, its cars (mod cars too) and the
 // leagues of its GT Mode race map. An event saved for a league another disc lacks goes to the
 // Custom Events league there.
 //
-// Pages: the list of the player's events; an event (title, description, picture, league, single
+// Pages: the list of the player's events; an event (title, description, picture, icon, league, single
 // races or a championship, entry rules, prizes, its opponents and its races); a race (course,
 // laps, the event's opponents or a lineup of its own); the opponents of the event (the lineup
 // every race without its own runs, and every championship round); the prizes (per place, the
-// championship bonus, a prize car). Lineups are Quick race's (app/opponent_grid.h): one to five
-// cars, each with a colour and a skill, and the player's place on the grid.
+// championship bonus, a prize car in a colour or a random one). A race draws up to 31 opponents from
+// its pool (repeating its cars when it has fewer), the player behind them.
 //
 // Export .zip writes the event as a mod of its own (<id>/mod.ini, events/, pictures/): the Mods
 // screen's Install from .zip takes it on another player's game.
@@ -62,6 +62,7 @@ namespace {
 
 constexpr const char* kModId = "my_events";
 constexpr int kPictureW = 640, kPictureH = 448; // the menus' full-screen pictures
+constexpr int kIconW = 51 * 4, kIconH = 27 * 4;  // a league page's strip icons (51 x 27), kept at 4x for sharp screens
 constexpr u32 kPrizeStep = 500, kPrizeBigStep = 5000;
 constexpr int kMaxLaps = 99;
 
@@ -120,14 +121,108 @@ std::vector<u32> cover(const PngImage& src, int w, int h) {
     return out;
 }
 
+// One of an event's pictures (the full-screen picture or the strip icon): a new one not saved
+// yet, or its saved file (ModEventDef::*field, relative to the mod folder), and its preview.
+struct EventPicture {
+    int w, h;                                  // as saved
+    std::string data::ModEventDef::*field;      // where the event names it
+    const char* suffix;                        // its file: pictures/<id><suffix>.png
+
+    std::vector<u32> px;                       // a new picture (w x h), not saved yet
+    bool removed = false, tex_dirty = true;
+    std::string host;                          // its saved file
+    SDL_Texture* tex = nullptr;
+
+    EventPicture(int w_, int h_, std::string data::ModEventDef::*f, const char* sfx) : w(w_), h(h_), field(f), suffix(sfx) {}
+    EventPicture(const EventPicture&) = delete;
+    EventPicture& operator=(const EventPicture&) = delete;
+    ~EventPicture() {
+        if (tex) SDL_DestroyTexture(tex);
+    }
+
+    std::string rel(const std::string& id) const { return "pictures/" + id + suffix + ".png"; }
+    // The event opened (its saved file, under the mod folder `dir`) or a new one (dir "").
+    void open(const data::ModEventDef& ed, const std::string& dir) {
+        host = dir.empty() || (ed.*field).empty() ? std::string() : dir + "/" + ed.*field;
+        px.clear(), removed = false, tex_dirty = true;
+    }
+    std::string path(const data::ModEventDef& ed, const std::string& id) const {
+        return id.empty() || (ed.*field).empty() ? std::string() : host;
+    }
+    bool has(const data::ModEventDef& ed, const std::string& id) const {
+        return !px.empty() || (!removed && !path(ed, id).empty() && host_path_exists(path(ed, id)));
+    }
+    std::string state(const data::ModEventDef& ed, const std::string& id) const {
+        if (!px.empty()) return "New picture";
+        return has(ed, id) ? "Chosen" : "None";
+    }
+    void set(const PngImage& img) { px = cover(img, w, h), removed = false, tex_dirty = true; }
+    void remove() { px.clear(), removed = true, tex_dirty = true; }
+
+    // Writes a new picture, deletes a removed one (every change, EventCreatorScreen::persist).
+    bool save(data::ModEventDef& ed, const std::string& dir, const std::string& id) {
+        const std::string r = rel(id);
+        if (!px.empty()) {
+            host_make_dir(dir + "/pictures");
+            if (!write_host_file(dir + "/" + r, encode_png(u32(w), u32(h), px))) return false;
+            ed.*field = r;
+            px.clear();
+            tex_dirty = true; // (now from its file)
+        } else if (removed) {
+            host_remove(dir + "/" + r);
+            (ed.*field).clear();
+        } else if (!has(ed, id)) {
+            (ed.*field).clear();
+        }
+        removed = false;
+        host = (ed.*field).empty() ? std::string() : dir + "/" + r;
+        return true;
+    }
+
+    // Its file in an exported mod <id>/ (d: the exported event, whose field it sets or clears).
+    void put(std::vector<std::pair<std::string, Bytes>>& files, data::ModEventDef& d, const data::ModEventDef& ed,
+             const std::string& own_id, const std::string& id) const {
+        const std::string r = rel(id);
+        if (!px.empty()) {
+            files.emplace_back(id + "/" + r, encode_png(u32(w), u32(h), px));
+            d.*field = r;
+        } else if (std::optional<Bytes> b; !removed && has(ed, own_id) && (b = read_host_file(path(ed, own_id)))) {
+            files.emplace_back(id + "/" + r, std::move(*b));
+            d.*field = r;
+        } else {
+            (d.*field).clear();
+        }
+    }
+
+    // Its preview (none drawn without one).
+    void draw(SDL_Renderer* renderer, const SDL_FRect& dst, const data::ModEventDef& ed, const std::string& id) {
+        if (tex_dirty) {
+            tex_dirty = false;
+            if (tex) SDL_DestroyTexture(tex), tex = nullptr;
+            std::vector<u32> p = px;
+            u32 pw = u32(w), ph = u32(h);
+            if (p.empty() && !removed && has(ed, id))
+                if (std::optional<Bytes> b = read_host_file(path(ed, id))) try {
+                    PngImage img = decode_png(*b, 4096);
+                    pw = img.width, ph = img.height, p = std::move(img.rgba);
+                } catch (const std::exception&) {
+                }
+            if (!p.empty()) {
+                tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, int(pw), int(ph));
+                if (tex) {
+                    SDL_UpdateTexture(tex, nullptr, p.data(), int(pw * 4));
+                    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+                }
+            }
+        }
+        if (tex) SDL_RenderTexture(renderer, tex, nullptr, &dst);
+    }
+};
+
 } // namespace
 
 class EventCreatorScreen : public Screen {
 public:
-    ~EventCreatorScreen() override {
-        if (picture_tex_) SDL_DestroyTexture(picture_tex_);
-    }
-
     void update(App& app, double) override {
         update_page(app);
         // Every change is saved as it is made (the event's file; GT Mode reads it at its next visit).
@@ -207,7 +302,7 @@ public:
         if (!error_.empty()) {
             ui.header("EVENT CREATOR", "");
             ui.text_center(150, error_, colors::kBad);
-            footer_actions(ui, "", {{"Triangle: back", kFootBack}}, hits_, kHitFooter, pointer_);
+            footer_actions(ui, "", {{"{Triangle}: back", kFootBack}}, hits_, kHitFooter, pointer_);
             return;
         }
         if (page_ == Page::Cars) {
@@ -227,7 +322,7 @@ public:
         std::string hint = rows.empty() ? std::string() : rows[size_t(sel_)].hint;
         if (!note_.empty()) hint = note_;
         if (naming_ && !name_keyboard_.is_open()) hint = "Type, Enter to keep, Esc to cancel";
-        footer_actions(ui, hint, {{"Cross: choose", kFootChoose}, {"Triangle: back", kFootBack}}, hits_, kHitFooter, pointer_);
+        footer_actions(ui, hint, {{"{Cross}: choose", kFootChoose}, {"{Triangle}: back", kFootBack}}, hits_, kHitFooter, pointer_);
         if (naming_) render_naming(ui);
     }
 
@@ -325,17 +420,13 @@ private:
         std::sort(events_.begin(), events_.end(), [](const data::ModEventDef& a, const data::ModEventDef& b) { return a.title < b.title; });
     }
 
-    // How many opponents a course's start grid holds (the player takes a place).
+    // How many opponents a course's field holds (the player takes a place): course_field_size, up to 31 where the grid can
+    // be made longer along the course's racing line.
     int grid_limit(App& app, const std::string& course) {
         auto [it, fresh] = grid_limits_.try_emplace(course, data::ModEventDef::kMaxOpponents);
         if (fresh)
-            if (std::optional<Bytes> f = app.vfs()->read(course_file_path(*app.vfs(), course))) try {
-                const course::CourseFile cf = course::CourseFile::parse(*f);
-                const int slots = int(course::Road::parse(cf.section(*f, course::kSlotRoad)).grid.size());
-                it->second = std::clamp(slots - 1, 1, data::ModEventDef::kMaxOpponents);
-            } catch (const std::exception& e) {
-                LOG_WARN("Event creator: %s's start grid: %s", course.c_str(), e.what());
-            }
+            if (const int cars = course_field_size(*app.vfs(), course); cars > 0)
+                it->second = std::clamp(cars - 1, 1, data::ModEventDef::kMaxOpponents);
         return it->second;
     }
 
@@ -564,7 +655,7 @@ private:
             const data::ModEventDef& d = events_[i];
             const std::string races = std::to_string(d.races.size()) + (d.races.size() == 1 ? " race" : " races");
             rows.push_back(action_row(d.title, d.championship ? "Championship, " + races : races,
-                                      "Cross: edit   In GT Mode: " + league_title(league_on_disc(d.league)),
+                                      "{Cross}: edit   In GT Mode: " + league_title(league_on_disc(d.league)),
                                       [this, &app, i] { edit_event(app, i); }, kLeftX, y));
         }
         rows.push_back(back_row(app));
@@ -584,14 +675,17 @@ private:
                                  [this, &app] { begin_naming(app, Text::Title); }, x, y));
         rows.push_back(field_row("Description", "description", ed_.description, "", "A line about it (shown on its card)",
                                  [this, &app] { begin_naming(app, Text::Description); }, x, y));
-        rows.push_back(action_row("Picture", picture_state(), "Cross: choose a picture (PNG); it fills the screen behind the event",
-                                  [this, &app] { open_dialog(app, menu::flow::FileDialogs::Kind::OpenPicture, ""); }, x, y));
-        if (has_picture()) {
-            rows.push_back(action_row("", "Remove picture", "Cross: no picture (GT Mode shows the title instead)", [this] {
-                picture_.clear(), picture_removed_ = true, dirty_ = true;
-                picture_tex_dirty_ = true;
-            }, x, y));
-        }
+        rows.push_back(action_row("Picture", picture_.state(ed_, id_), "{Cross}: choose a picture (PNG); it fills the screen behind the event",
+                                  [this, &app] { pick_picture(app, false); }, x, y));
+        if (picture_.has(ed_, id_))
+            rows.push_back(action_row("", "Remove picture", "{Cross}: no picture (GT Mode shows the title instead)",
+                                      [this] { picture_.remove(), dirty_ = true; }, x, y));
+        rows.push_back(action_row("Icon", icon_.state(ed_, id_),
+                                  "{Cross}: choose the small picture (PNG) its league's strip shows; without one, the picture",
+                                  [this, &app] { pick_picture(app, true); }, x, y));
+        if (icon_.has(ed_, id_))
+            rows.push_back(action_row("", "Remove icon", "{Cross}: no icon (the strip shows the picture)",
+                                      [this] { icon_.remove(), dirty_ = true; }, x, y));
         const int li = int(std::find(leagues_.begin(), leagues_.end(), league_on_disc(ed_.league)) - leagues_.begin());
         rows.push_back(value_row("League", league_title(leagues_[size_t(li)]), "Where GT Mode lists it (this disc's leagues)",
                                  [this, li](int h) {
@@ -606,13 +700,13 @@ private:
         static const char* const kLicenses[] = {"None", "B", "A", "International B", "International A", "S", "Rally"};
         auto cycle = [this](int& v, int n) { return [this, &v, n](int h) { v = (v + (h < 0 ? -1 : 1) + n) % n, dirty_ = true; }; };
         rows.push_back(value_row("License", kLicenses[ed_.license], "The license a player needs to enter", cycle(ed_.license, 7), x, y));
-        rows.push_back(action_row("Car rules", rules_summary(), "Cross: which cars may enter",
+        rows.push_back(action_row("Car rules", rules_summary(), "{Cross}: which cars may enter",
                                   [this] { open_sub(Page::Rules); }, x, y));
-        rows.push_back(action_row("Prizes", money(ed_.prizes[0]) + " for 1st", "Cross: prize money and a prize car",
+        rows.push_back(action_row("Prizes", money(ed_.prizes[0]) + " for 1st", "{Cross}: prize money and a prize car",
                                   [this] { open_sub(Page::Prizes); }, x, y));
         rows.push_back(action_row("Opponents", std::to_string(ed_.field.size()) + (ed_.field.size() == 1 ? " car" : " cars"),
-                                  ed_.championship ? "Cross: the cars a championship's field is drawn from"
-                                                   : "Cross: the cars every race without its own draws its opponents from",
+                                  ed_.championship ? "{Cross}: the cars a championship's field is drawn from"
+                                                   : "{Cross}: the cars every race without its own draws its opponents from",
                                   [this] { open_pool(-1); }, x, y));
         // The races, at the right under the picture.
         float ry = 146;
@@ -622,7 +716,7 @@ private:
             const bool own = !ed_.championship && !r.opponents.empty();
             (void)app;
             rows.push_back(action_row("Race " + std::to_string(k + 1), course_name(r.course) + ", " + laps + (own ? ", own cars" : ""),
-                                      "Cross: its course, laps and opponents", [this, &app, k] { open_race(app, int(k)); }, kRightX, ry,
+                                      "{Cross}: its course, laps and opponents", [this, &app, k] { open_race(app, int(k)); }, kRightX, ry,
                                       kRightW));
         }
         if (int(ed_.races.size()) < data::ModEventDef::kMaxRaces)
@@ -641,7 +735,7 @@ private:
         data::ModEventRace& r = ed_.races[size_t(race_)];
         float y = 110;
         const float x = kLeftX, w = 232;
-        rows.push_back(action_row("Course", course_name(r.course), "Cross: choose a course   Left/Right: the next one",
+        rows.push_back(action_row("Course", course_name(r.course), "{Cross}: choose a course   {Left/Right}: the next one",
                                   [this] { open_courses(); }, x, y, w));
         rows.back().change = [this, &app, &r](int h) {
             auto it = std::find_if(courses_.begin(), courses_.end(), [&](const PickerCourse& c) { return c.label == r.course; });
@@ -649,7 +743,7 @@ private:
             r.course = courses_[size_t((i + (h < 0 ? -1 : 1) + n) % n)].label;
             course_changed(app);
         };
-        rows.push_back(value_row("Laps", std::to_string(r.laps), "Left/Right: laps (L1/R1: 10 at a time)", [this, &r](int h) {
+        rows.push_back(value_row("Laps", std::to_string(r.laps), "{Left/Right}: laps ({L1}/{R1}: 10 at a time)", [this, &r](int h) {
             r.laps = (r.laps - 1 + h + kMaxLaps * 10) % kMaxLaps + 1, dirty_ = true;
         }, x, y, w));
         static const char* const kSkillNames[] = {"League's", "Easy", "Normal", "Hard", "Professional"};
@@ -665,18 +759,26 @@ private:
                                      }, x, y, w));
         if (own)
             rows.push_back(action_row("Its cars", std::to_string(r.opponents.size()) + (r.opponents.size() == 1 ? " car" : " cars"),
-                                      "Cross: the cars this race draws its opponents from", [this] { open_pool(race_); }, x, y, w));
-        const int most = std::min({data::ModEventDef::kMaxOpponents, int(race_pool(r).size()), grid_limit(app, r.course)});
-        const int n = r.cars > 0 ? std::min(r.cars, most) : most;
+                                      "{Cross}: the cars this race draws its opponents from", [this] { open_pool(race_); }, x, y, w));
+        // As many as the grid holds, more than the pool has too (its cars come up more than once).
+        const int most = std::min(data::ModEventDef::kMaxOpponents, grid_limit(app, r.course));
+        const int n = racing_you(r, most);
         rows.push_back(value_row("Racing you", std::to_string(n) + (n == 1 ? " car" : " cars"),
-                                 "How many cars it draws (" + course_name(r.course) + "'s grid has room for " +
-                                     std::to_string(grid_limit(app, r.course)) + ")",
+                                 "How many cars it draws; fewer cars to draw from come up more than once (" +
+                                     course_name(r.course) + "'s grid has room for " + std::to_string(grid_limit(app, r.course)) + ")",
                                  [this, &r, n, most](int h) { r.cars = std::clamp(n + (h < 0 ? -1 : 1), 1, std::max(most, 1)), dirty_ = true; },
                                  x, y, w));
         rows.push_back(button(armed_ ? "Press again" : "Remove race", {kLeftX, kButtonY, 120, kButtonH}, [this, &app] { remove_race(app); },
                               false, "Takes the race out of the event (press twice)"));
         editing_buttons(rows);
         return rows;
+    }
+
+    // How many opponents a race draws: its own count, else as many as its pool has, at most five (the loader's
+    // default); at most `most`.
+    int racing_you(const data::ModEventRace& r, int most) const {
+        const int n = r.cars > 0 ? r.cars : std::min(int(race_pool(r).size()), data::ModEventDef::kDefaultOpponents);
+        return std::clamp(n, 1, std::max(most, 1));
     }
 
     // The pool a race draws from: its own cars, else the event's.
@@ -691,14 +793,14 @@ private:
         float y = kTopY;
         std::vector<data::ModEventCar>& p = pool();
         if (p.size() < size_t(data::ModEventDef::kMaxPool))
-            rows.push_back(action_row("", "Add a car", "Cross: choose a car (then its version and color)",
+            rows.push_back(action_row("", "Add a car", "{Cross}: choose a car (then its version and color)",
                                       [this, &app] { open_cars(app, Pick::PoolAdd, 0, 0); }, kLeftX, y));
         editing_buttons(rows);
         // The cars, at the right: Cross opens one.
         const float colw = kRightW / 2;
         for (size_t i = 0; i < p.size(); ++i) {
             float ly = 0;
-            Row r = action_row("", entry_name(p[i]), "Cross: its version, color and parts", [this, i] { open_entry(int(i)); },
+            Row r = action_row("", entry_name(p[i]), "{Cross}: its version, color and parts", [this, i] { open_entry(int(i)); },
                                kRightX + float(i % 2) * colw, ly, colw);
             r.r.y = kTopY + 16 + float(i / 2) * 14, r.r.h = 14;
             r.dim = true;
@@ -714,7 +816,7 @@ private:
         data::ModEventCar& c = p[size_t(entry_)];
         const std::string car = entry_car(c);
         float y = kTopY;
-        rows.push_back(action_row("Car", car_name(car), "Cross: another car", [this, &app, car] {
+        rows.push_back(action_row("Car", car_name(car), "{Cross}: another car", [this, &app, car] {
             open_cars(app, Pick::EntryCar, car_index(car), 0);
         }, kLeftX, y));
         const std::vector<Version> vs = versions(car);
@@ -799,10 +901,20 @@ private:
                                      [this, &app] { begin_number(app, "Champion's bonus", "bonus", &ed_.bonus, max_bonus_); }, kLeftX, y));
         y += 8;
         rows.push_back(action_row("Prize car", ed_.prize_car.empty() ? "None" : car_name(ed_.prize_car),
-                                  ed_.championship ? "Given once, for winning the championship. Cross: choose   Left/Right: none"
-                                                   : "Given once, for winning every race. Cross: choose   Left/Right: none",
+                                  ed_.championship ? "Given once, for winning the championship. {Cross}: choose   {Left/Right}: none"
+                                                   : "Given once, for winning every race. {Cross}: choose   {Left/Right}: none",
                                   [this, &app] { open_cars(app, Pick::PrizeCar, car_index(ed_.prize_car), prize_paint_index()); }, kLeftX, y));
         rows.back().change = [this](int) { ed_.prize_car.clear(), ed_.prize_paint = -1, dirty_ = true; };
+        if (!ed_.prize_car.empty()) {
+            const int n = data_->color_count(ed_.prize_car), pi = ed_.prize_paint < 0 ? -1 : prize_paint_index();
+            rows.push_back(value_row("Its color", pi < 0 ? "Random" : Ui::clip(data_->color_name_latin(u32(ed_.prize_paint)), 150),
+                                     "The prize car's paint, or one picked at random when it is given", [this, n, pi](int h) {
+                                         const int k = (pi + 1 + (h < 0 ? -1 : 1) + n + 1) % (n + 1) - 1;
+                                         const u32 id = k < 0 ? 0xFFFFFFFFu : data_->color_id(ed_.prize_car, k);
+                                         ed_.prize_paint = id == 0xFFFFFFFFu ? -1 : int(id);
+                                         dirty_ = true;
+                                     }, kLeftX, y));
+        }
         editing_buttons(rows);
         return rows;
     }
@@ -894,7 +1006,7 @@ private:
                                  kLeftX, y));
         rows.push_back(action_row("Cars allowed",
                                   ed_.allowed.empty() ? "Any" : std::to_string(ed_.allowed.size()) + (ed_.allowed.size() == 1 ? " car" : " cars"),
-                                  "Cross: the list of the cars that may enter (by class, power, or one by one)",
+                                  "{Cross}: the list of the cars that may enter (by class, power, or one by one)",
                                   [this] { open_sub(Page::Allowed); }, kLeftX, y));
         y += 6;
         rows.push_back(action_row("Any car", "", "Clears every rule above", [this] {
@@ -936,7 +1048,7 @@ private:
                               true, "The list becomes the cars that pass the filters above and the event's rules"));
         y += kButtonH + 8;
         if (ed_.allowed.size() < list_room())
-            rows.push_back(action_row("", "Add a car", "Cross: choose a car", [this, &app] { open_cars(app, Pick::AllowedCar, 0, 0); },
+            rows.push_back(action_row("", "Add a car", "{Cross}: choose a car", [this, &app] { open_cars(app, Pick::AllowedCar, 0, 0); },
                                       kLeftX, y));
         if (!ed_.allowed.empty())
             rows.push_back(action_row("", "Clear the list (any car)", "", [this] { ed_.allowed.clear(), dirty_ = true; }, kLeftX, y));
@@ -945,7 +1057,7 @@ private:
         float ly = kTopY + 16;
         const float colw = kRightW / 2;
         for (size_t i = 0; i < ed_.allowed.size() && ly + float(i / 2) * 14 < kButtonY - 14; ++i) {
-            Row r = action_row("", car_name(ed_.allowed[i]), "Cross: take it off the list", [this, i] {
+            Row r = action_row("", car_name(ed_.allowed[i]), "{Cross}: take it off the list", [this, i] {
                 ed_.allowed.erase(ed_.allowed.begin() + std::ptrdiff_t(i));
                 dirty_ = true;
             }, kRightX + float(i % 2) * colw, ly, colw);
@@ -1002,8 +1114,8 @@ private:
                     ed_.field.push_back({l, race::pool_color_id(*e, int(&l - e->entries.data()))});
         if (ed_.field.empty()) ed_.field.push_back({cars_.front().label, 0xFFFFFFFFu});
         id_.clear();
-        picture_host_.clear();
-        picture_.clear(), picture_removed_ = false, picture_tex_dirty_ = true;
+        picture_.open(ed_, {});
+        icon_.open(ed_, {});
         dirty_ = true;
         go(Page::Event);
         picker_sound(app, "ok");
@@ -1012,8 +1124,8 @@ private:
     void edit_event(App& app, size_t i) {
         ed_ = events_[i];
         id_ = ed_.id;
-        picture_host_ = ed_.picture.empty() ? std::string() : mod_dir(app) + "/" + ed_.picture;
-        picture_.clear(), picture_removed_ = false, picture_tex_dirty_ = true;
+        picture_.open(ed_, mod_dir(app));
+        icon_.open(ed_, mod_dir(app));
         // Lineups this disc cannot race (cars it lacks) drop those cars.
         auto keep = [this](std::vector<data::ModEventCar>& v) {
             std::erase_if(v, [this](const data::ModEventCar& c) { return car_index(entry_car(c)) < 0; });
@@ -1101,7 +1213,7 @@ private:
 
     void open_courses() {
         auto it = std::find_if(courses_.begin(), courses_.end(), [&](const PickerCourse& c) { return c.label == ed_.races[size_t(race_)].course; });
-        course_picker_.set_labels("The race's course", "Triangle: back");
+        course_picker_.set_labels("The race's course", "{Triangle}: back");
         course_picker_.open(courses_, it == courses_.end() ? 0 : int(it - courses_.begin()), [](const std::string&) { return 0u; });
         page_ = Page::Courses;
     }
@@ -1185,13 +1297,11 @@ private:
 
     void note(std::string s) { note_ = std::move(s); }
 
-    // --- the picture ----------------------------------------------------------------------------
+    // --- the pictures ---------------------------------------------------------------------------
 
-    bool has_picture() const { return !picture_.empty() || (!picture_removed_ && !picture_path().empty() && host_path_exists(picture_path())); }
-    std::string picture_path() const { return id_.empty() || ed_.picture.empty() ? std::string() : picture_host_; }
-    std::string picture_state() const {
-        if (!picture_.empty()) return "New picture";
-        return has_picture() ? "Chosen" : "None";
+    void pick_picture(App& app, bool icon) {
+        picking_icon_ = icon;
+        open_dialog(app, menu::flow::FileDialogs::Kind::OpenPicture, "");
     }
 
     void open_dialog(App& app, menu::flow::FileDialogs::Kind kind, const std::string& name) {
@@ -1229,35 +1339,12 @@ private:
         try {
             PngImage img = decode_png(*b, 8192);
             if (img.width < 16 || img.height < 16) throw std::runtime_error("too small");
-            picture_ = cover(img, kPictureW, kPictureH);
-            picture_removed_ = false, picture_tex_dirty_ = true, dirty_ = true;
-            note("Picture from " + file + " (shown 640 x 448)");
+            if (picking_icon_) icon_.set(img), note("Icon from " + file + " (shown 51 x 27)");
+            else picture_.set(img), note("Picture from " + file + " (shown 640 x 448)");
+            dirty_ = true;
         } catch (const std::exception& e) {
             note(file + " is not a PNG picture this game can read (" + std::string(e.what()) + ")");
         }
-    }
-
-    void draw_picture(App& app, const SDL_FRect& dst) {
-        if (picture_tex_dirty_) {
-            picture_tex_dirty_ = false;
-            if (picture_tex_) SDL_DestroyTexture(picture_tex_), picture_tex_ = nullptr;
-            std::vector<u32> px = picture_;
-            u32 w = kPictureW, h = kPictureH;
-            if (px.empty() && !picture_removed_ && has_picture())
-                if (std::optional<Bytes> b = read_host_file(picture_path())) try {
-                    PngImage img = decode_png(*b, 4096);
-                    w = img.width, h = img.height, px = std::move(img.rgba);
-                } catch (const std::exception&) {
-                }
-            if (!px.empty()) {
-                picture_tex_ = SDL_CreateTexture(app.renderer(), SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, int(w), int(h));
-                if (picture_tex_) {
-                    SDL_UpdateTexture(picture_tex_, nullptr, px.data(), int(w * 4));
-                    SDL_SetTextureScaleMode(picture_tex_, SDL_SCALEMODE_LINEAR);
-                }
-            }
-        }
-        if (picture_tex_) SDL_RenderTexture(app.renderer(), picture_tex_, nullptr, &dst);
     }
 
     // --- saving ---------------------------------------------------------------------------------
@@ -1300,9 +1387,8 @@ private:
         ed_.id = id_;
         // A race draws no more cars than its course's grid holds.
         for (data::ModEventRace& r : ed_.races) {
-            const int pool = int(race_pool(r).size()), room = grid_limit(app, r.course);
-            const int n = r.cars > 0 ? std::min(r.cars, pool) : std::min(pool, data::ModEventDef::kMaxOpponents);
-            if (n > room) r.cars = room;
+            const int room = grid_limit(app, r.course);
+            if (racing_you(r, data::ModEventDef::kMaxOpponents) > room) r.cars = room;
         }
         // The tunes a pool still names (a car switched back to stock leaves its tune behind).
         std::erase_if(ed_.tunes, [this](const data::ModEventTune& t) {
@@ -1313,23 +1399,9 @@ private:
             return std::none_of(ed_.races.begin(), ed_.races.end(), [&](const data::ModEventRace& r) { return named(r.opponents); });
         });
         ed_.base = base_for(league_on_disc(ed_.league) == game::kCustomLeaguePage ? std::string() : ed_.league);
-        // The picture: a new one written, a removed one deleted.
-        const std::string pic_rel = "pictures/" + id_ + ".png";
-        if (!picture_.empty()) {
-            host_make_dir(dir + "/pictures");
-            const Bytes png = encode_png(kPictureW, kPictureH, picture_);
-            if (!write_host_file(dir + "/" + pic_rel, png)) return note("Could not save the picture");
-            ed_.picture = pic_rel;
-            picture_.clear();
-            picture_tex_dirty_ = true; // (now from its file)
-        } else if (picture_removed_) {
-            host_remove(dir + "/" + pic_rel);
-            ed_.picture.clear();
-        } else if (!has_picture()) {
-            ed_.picture.clear();
-        }
-        picture_removed_ = false;
-        picture_host_ = ed_.picture.empty() ? std::string() : dir + "/" + pic_rel;
+        // The pictures: new ones written, removed ones deleted.
+        if (!picture_.save(ed_, dir, id_)) return note("Could not save the picture");
+        if (!icon_.save(ed_, dir, id_)) return note("Could not save the icon");
         const std::string text = data::format_mod_event(ed_);
         if (!write_host_file(dir + "/events/" + id_ + ".ini", ByteSpan(reinterpret_cast<const u8*>(text.data()), text.size())))
             return note("Could not save the event");
@@ -1354,7 +1426,8 @@ private:
         armed_ = false;
         const std::string dir = mod_dir(app);
         host_remove(dir + "/events/" + id_ + ".ini");
-        host_remove(dir + "/pictures/" + id_ + ".png");
+        host_remove(dir + "/" + picture_.rel(id_));
+        host_remove(dir + "/" + icon_.rel(id_));
         LOG_INFO("Event creator: deleted %s", id_.c_str());
         rescan_ = false;
         app.rescan_mods();
@@ -1370,25 +1443,15 @@ private:
         open_dialog(app, menu::flow::FileDialogs::Kind::ExportEvent, (id_.empty() ? id_from(ed_.title) : id_) + ".zip");
     }
 
-    // The event as a mod of its own: <id>/mod.ini, <id>/events/<id>.ini, <id>/pictures/<id>.png.
+    // The event as a mod of its own: <id>/mod.ini, <id>/events/<id>.ini, <id>/pictures/<id>.png and <id>_icon.png.
     void write_export(const std::string& path, const std::string& file) {
         const std::string id = id_.empty() ? id_from(ed_.title) : id_;
         data::ModEventDef d = ed_;
         d.id = id;
         std::vector<std::pair<std::string, Bytes>> files;
         auto text = [](const std::string& s) { return Bytes(s.begin(), s.end()); };
-        std::vector<u32> px = picture_;
-        if (px.empty() && !picture_removed_ && has_picture())
-            if (std::optional<Bytes> b = read_host_file(picture_path())) {
-                files.emplace_back(id + "/pictures/" + id + ".png", std::move(*b));
-                d.picture = "pictures/" + id + ".png";
-            }
-        if (!px.empty()) {
-            files.emplace_back(id + "/pictures/" + id + ".png", encode_png(kPictureW, kPictureH, px));
-            d.picture = "pictures/" + id + ".png";
-        } else if (files.empty()) {
-            d.picture.clear();
-        }
+        picture_.put(files, d, ed_, id_, id);
+        icon_.put(files, d, ed_, id_, id);
         std::string mod = "[mod]\nname = " + d.title + "\n";
         if (!d.description.empty()) mod += "description = " + d.description + "\n";
         files.emplace_back(id + "/mod.ini", text(mod));
@@ -1568,10 +1631,16 @@ private:
             const SDL_FRect pic{kRightX, kTopY, 160, 112};
             ui.fill_round(pic.x - 1, pic.y - 1, pic.w + 2, pic.h + 2, 3, colors::kOutline);
             ui.fill(pic.x, pic.y, pic.w, pic.h, colors::kPanel);
-            draw_picture(app, pic);
-            if (!picture_tex_) ui.text_center_in(pic.x, pic.w, pic.y + 50, "No picture", colors::kDim);
-            float y = kTopY + 2;
+            picture_.draw(app.renderer(), pic, ed_, id_);
+            if (!picture_.tex) ui.text_center_in(pic.x, pic.w, pic.y + 50, "No picture", colors::kDim);
+            // The strip icon as its league page shows it: the icon, else the picture squeezed into it.
             const float tx = pic.x + pic.w + 8, tw = kRightX + kRightW - tx;
+            const SDL_FRect ico{tx, kTopY, 51 * 1.5f, 27 * 1.5f};
+            ui.fill_round(ico.x - 1, ico.y - 1, ico.w + 2, ico.h + 2, 3, colors::kOutline);
+            ui.fill(ico.x, ico.y, ico.w, ico.h, colors::kPanel);
+            icon_.draw(app.renderer(), ico, ed_, id_);
+            if (!icon_.tex && picture_.tex) SDL_RenderTexture(app.renderer(), picture_.tex, nullptr, &ico);
+            float y = ico.y + ico.h + 6;
             for (const std::string& l : Ui::wrap(ed_.title, tw)) ui.text(tx, y, l, colors::kAccent), y += 12;
             y += 4;
             for (const std::string& l : Ui::wrap("In GT Mode: " + league_title(league_on_disc(ed_.league)), tw))
@@ -1743,10 +1812,9 @@ private:
     std::map<std::string, std::vector<Version>> versions_; // per car: the disc's variants of it
     Pick picking_ = Pick::None;
 
-    std::vector<u32> picture_; // a new picture (640 x 448), not saved yet
-    bool picture_removed_ = false, picture_tex_dirty_ = true;
-    std::string picture_host_;
-    SDL_Texture* picture_tex_ = nullptr;
+    EventPicture picture_{kPictureW, kPictureH, &data::ModEventDef::picture, ""};
+    EventPicture icon_{kIconW, kIconH, &data::ModEventDef::icon, "_icon"};
+    bool picking_icon_ = false; // the OpenPicture dialog chooses the icon
 
     bool waiting_ = false;
     menu::flow::FileDialogs::Kind dialog_ = menu::flow::FileDialogs::Kind::OpenPicture;

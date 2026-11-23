@@ -43,6 +43,10 @@ online lobby (`src/app/screen_online.cpp`; also `gt3r --screen online`).
   prediction.
 - A machine whose disc program the exact core does not know (`ProgramData::load`
   refuses it) cannot race online: its lobby refuses Ready and Start with the reason.
+- **Whose rules.** Every disc of Gran Turismo 3's code races online on NTSC-U's rules and GT3's
+  own tables (`race::online_rules`, `online_program_data`), so its releases share lobbies. A
+  Gran Turismo Concept disc races on its own release's rules and tables, as its offline races
+  do: its lobby holds players on that same disc alone ("Discs" below).
 
 Why owner authority and not lockstep (yet)? Online play was built on a physics that was
 deterministic only on the same build (float results differ between compilers and CPUs), so a
@@ -73,15 +77,15 @@ same pad frames compute the same race. That would allow, later:
 
 Not built.
 
-## State (protocol 5)
+## State (protocol 6)
 
 A car's state is 113 bytes on the wire with three frames of history when one repeats,
 116 while steering (every frame different), at most 125. A race datagram carrying it is
 about 132 bytes while steering (144 through the relay, plus 28 bytes of IP/UDP header),
 sent 60 times a second: about 69 kbit/s per stream, 70 kbit/s at the busiest second; a host still
 forwarding four other players' states sends up to 0.30 Mbit/s on one channel (measured in
-`net_relay_traffic_per_link`, with pings and contacts; the relay's racing guard is
-0.5 Mbit/s).
+`net_relay_traffic_per_link`, with pings and contacts). A full field forwarded on one channel (31 other cars) is
+about 2.2 Mbit/s; the relay's racing guard is 3 Mbit/s.
 
 | field | encoding |
 |---|---|
@@ -180,6 +184,18 @@ Each player's car travels as a `game::OnlineCar` descriptor (`src/game/net_car.*
   (`arc_normal`) equal their stock `normal` ones; race cars' `arc_racing` grip more
   than their stock tyres (GT-One: μ 1.70 against 1.59).
 
+### Discs
+
+The host lets in only players whose disc matches its own (`net::OnlineDisc`, sent at the end
+of Hello, after the capabilities; `game::online_disc`). Every Gran Turismo 3 release in the known list, with its own
+files, is one disc, `gt3`, whatever its region. Any other disc matches only the same files
+(`files:<DiscInfo::digest>`): a Gran Turismo Concept release, a modified copy of a release,
+a disc the game does not know (a mod under its own serial). Courses
+and the program's own changes are not compared one by one, so different files never race
+together. The refusal names both discs ("the host plays a Gran Turismo 3 release, you an
+unrecognized disc (SCEF-50294); discs must match"). An older game sends no disc and counts
+as `gt3`; an older host ignores it.
+
 ### Tires and settings
 GT3's own i.LINK battle races each car as its menu chose it. Here the lobby also lets each
 player choose the car's tires and change its settings (public issue 304); the host decides
@@ -211,6 +227,37 @@ which tires and whether tuned cars may race ("Lobby car rules").
 - **Kept** per car in the config (`[online_tune]`: `garage3.<car>`, `arcade.<arcade car>` or the
   car's label = `tires=7;settings=...`), dropped when the car no longer has those tires or the
   settings no longer fit it (a garage car changed since).
+
+### Custom colours
+A disc or arcade car in a custom paint colour (`race/custom_paints.h`, docs/dev/CUSTOM_PAINTS.md)
+sends the colour, not its index: indices past the disc's paints differ between machines.
+`game::set_online_car_paint` puts the colour's finish in `paint` (what a game without the
+colour shows) and its RGB in `OnlineCar::color`, which travels in the lobby block after the
+tires and settings: flag 2 in its flags byte, then u8 R, G, B. Older games stop reading after
+the settings. A colour is no physics, so the digest does not change. Each machine turns the
+colour into its own paint index with `game::online_car_local_paint` (`race::received_paint`:
+the installed colour with that RGB and finish, else one added for the session, not listed in
+the pickers), for the lobby's chips, the race (`configure_online_field`, `resolve_online`) and
+the host's CPU cars (their `net::Settings` paint is the finish; the colour is in their
+descriptor). Garage and mod cars wear the disc's paints. Tests: `custom_paint_online_car`, the
+`online_car` fuzz target.
+
+### Liveries
+A disc or arcade car wearing a livery (race/custom_paints.h) sends its package's SHA-256 and size
+in the lobby block after the colour (flag 4; older games stop before it). The package
+(`game/livery_package.h`) is built once per livery from the installed folder and holds only what
+was painted: each picture's coverage against the template (`gtm1::livery_coverage`) as its alpha,
+unpainted pictures left out, livery.ini written afresh. It travels like a mod car's
+(`offer_package` / `request_package` / `take_package`, through the host, in the lobby). Receiving
+(Settings → Online → Other players' liveries, `[online] liveries = show | ask | off`, ask by default): the package is parsed and validated against this disc (its model and paint here, every
+picture keyed by one of that car's textures in that paint, PNGs within `Pack::kMaxSide`, at most
+16 MB and 64 files) and installed as `mods/downloaded_liveries/liveries/dl-<12 hash digits>/`, each
+picture written as our own re-encoding of it (never the sender's bytes: the system's thumbnailers
+and media scan then only read our encoder's output).
+`online_car_local_paint` finds it by hash (our own by `race::note_livery_hash`); until then, or
+when refused, the car shows the livery's paint (and colour). Measured on localhost: a stripe and
+roundel on the R34's side, 5,844 bytes, installed and raced by the guest. Tests:
+`livery_package_disc`, `livery_online_car`, fuzz `livery_package` and `online_car`.
 
 ### Regional discs
 
@@ -334,18 +381,26 @@ Quick race's custom race has it: how many, where the players start among them, a
 Everyone else sees the page read-only, and the CPU cars in the player list. The host's lineup is kept in
 `[online_cpu]`.
 
-- **Room.** At most six cars in all, as GT3's races and its i.LINK battle, and no more than the course's grid
-  holds (`course_grid_size`, the road's grid slots): Smokey Mountain's North layout has five. The lineup
+- **Room.** Up to 16 players (`net::kMaxPlayers`) and 32 cars in all (`net::kMaxRaceCars`), no more than the
+  course's field holds (`course_field_size`: 32 where the course has racing lines, the places past its own grid
+  made along its main line, `race::FieldConfig::made_grid`; else its grid slots). The lineup
   shrinks as players join (the host resends it on every roster change). The host refuses the start when the
   players alone are more than the grid holds ("This course's grid has room for 5 cars"); before, every machine
   but one refused the race.
-- **Ids and wire.** CPU car k races as id `net::kCpuId + k` (0x80..0x84), never a player's. Settings carry the
+- **Ids and wire.** CPU car k races as id `net::kCpuId + k` (0x80..0x9E), never a player's. Settings carry the
   lineup (`Settings::cpu`: paint, skill and the 16 bytes of driver overrides, `cpu_place`: how many start
   ahead of the players); each car's descriptor travels as a `CarInfo` for its id, so every machine checks it as
   it checks a player's car ("Regional discs"). The Load's grid holds their ids around the players.
 - **Driver overrides, not skills.** A skill is the arcade race of that difficulty's driver overrides
   (A{E,N,H,P}ST0001, dirt A?AD0001), whose values differ between releases (NTSC-J's Hard is 100/100/100). The
   host sends the bytes its own disc gives, so the host's car and every machine's prediction drive alike.
+  A Gran Turismo Concept disc has no such races: it tunes its opponents per car and level. There the skills
+  are its single-race levels, Normal, Professional and Ace, and a CPU car takes the overrides of its own
+  class entry's single race at that level (`game::concept_cpu_driver`: the entry's code with its last
+  character raised by the level, as Single Race does; its entry of the course's kind, dirt or road, else
+  its other one; a car no class lists, its race under Tokyo-Geneva's names `A_<car>_000n` where the disc
+  holds one). No original mode has CPU cars online, so this is our rule. Quick race's custom race does the
+  same on a Concept disc, and runs on the player's car's own race at Normal.
 - **The host runs them**, as opponents of its own race (`FieldConfig::opponents`, `opponent_sources`: as every
   machine builds the car, `exact_online_source`; `opponent_drivers`). Every other machine poses them as it poses a
   player's car (`FieldConfig::Remote::driver`). Running them on every machine instead would not stay together: each
@@ -465,7 +520,10 @@ owner).
 
 **What is offered.** Only a mod car (`cars/<label>.ini`) has a package. A disc
 car never travels as one, whatever disc it comes from: a garage car from a disc
-this machine does not have is "not on this disc", with nothing to download. A
+this machine does not have is "not on this disc", with nothing to download. Nor
+does a car exported from a disc (docs/MODDING.md "Exporting cars"): its files are that disc's, so
+it has no package: its owner is told so, and the others see a stand-in, as for any car that cannot
+be shared. A
 package holds only the mod's own files, and the mod is built over its donor
 car from the receiver's disc, so the descriptor names the donor
 (`data::ModCar::donor`) and the lobby offers the download only when the donor
@@ -495,9 +553,15 @@ sends a garage mod car without its package: a player without the mod sees
   rim and physics.
 - Opponents (online players and the AI alike) now draw a mod car's own body
   (`body_mod_for_car`), as the player's car always did.
+- The installed pictures and body are our own encoding of what was sent, never
+  the sender's bytes (each PNG decoded and encoded again; the body's images
+  likewise by `reencode_glb_images`, other images a white 1x1 PNG as the loader
+  draws them, the sender's image bytes zeroed). Tests: `net_glb_images_reencoded`,
+  `net_mod_package_validation_disc`; fuzz `glb`, `json`.
 
 **Validation** (everything checked before anything is written or loaded):
-- **Structure:** magic, at most 8 files and 32 MB, per-type caps (`.ini`
+- **Structure:** magic, at most 8 files and 32 MB (the definition, up to
+  four bodies: the ones its menus and races draw, and three pictures), per-type caps (`.ini`
   64 KB, `.glb` 16 MB, `.png` 4 MB).
 - **Paths:** plain relative (letters, digits, `. _ -`, at most 3 levels, no
   `..`, absolute or hidden parts, no duplicates even by case).
@@ -813,7 +877,7 @@ game datagram.
 The relay's capacity is counted in **links**. A link is one relay channel that
 carries a race between two players: a player's join channel to the host, or
 the channel of a player pair that could not punch. The server carries at most
-`--relay-links` (default 300) racing links at once. Pairs that connect directly
+`--relay-links` (default 1200) racing links at once. Pairs that connect directly
 never use one.
 
 - **Only while racing.** Channels are still bound in the lobby (a player who
@@ -830,8 +894,8 @@ never use one.
   are granted, usually one round trip later.
 - **Which channels.** After the grant, each of the session's channels takes a
   slot when it first carries data, up to the granted number, and gets the
-  racing flood guard (0.5 Mbit/s each way, about twice the busiest legitimate
-  channel: a host still forwarding four players' states, 0.26 Mbit/s). A
+  racing flood guard (3 Mbit/s each way: a host forwarding a full 32-car field's
+  states to one player, about 2.2 Mbit/s, with room). A
   channel beyond the reservation (a pair that lost its direct link mid-race)
   keeps the lobby rate, which still carries a race link.
 - **Release.** The host sends Release when the race ends (back to the lobby).
@@ -892,9 +956,9 @@ no table may grow without bound.
   | Joins (Incoming to the host) per session | burst 10, then 1 per 2 s | |
   | Pending joins (nonces): per session / total | 16 / 8192 | `--max-pending` |
   | Sessions: total / per source IP | 4000 / 8 | `--max-sessions`, `--sessions-per-ip` |
-  | Relay channels: total / per session | 20000 / 15 pairs + its joins | `--max-channels` |
-  | Racing links (link slots) / lobbies waiting for them | 300 / 100 | `--relay-links`, `--max-queue` |
-  | Racing channel, per direction (a flood guard) | 0.5 Mbit/s | `--channel-mbit` |
+  | Relay channels: total / per session | 20000 / 120 pairs + its joins | `--max-channels` |
+  | Racing links (link slots) / lobbies waiting for them | 1200 / 100 | `--relay-links`, `--max-queue` |
+  | Racing channel, per direction (a flood guard) | 3 Mbit/s | `--channel-mbit` |
   | Lobby channel, per direction / all lobby channels | 256 kbit/s / 20 Mbit/s | `--idle-channel-kbit`, `--idle-mbit` |
 
   `--bench` (load testing only) lets loopback sources (127.0.0.0/8, ::1) past

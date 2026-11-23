@@ -5,6 +5,7 @@
 
 #include "app/screen_race_impl.h"
 #include "game/language_rules.h"
+#include "race/pool_draw.h"
 
 namespace gt3r::race_screen {
 
@@ -31,7 +32,9 @@ DebugPreset read_preset() {
         else if (k == "warp") p.warp = std::atof(v.c_str());
         else if (k == "quit") p.quit = std::atof(v.c_str());
         else if (k == "leave") p.leave = std::atof(v.c_str());
+        else if (k == "place") p.place = std::atoi(v.c_str());
         else if (k == "demo_drive") p.demo_drive = v != "0";
+        else if (k == "line") p.line_pace = float(std::atof(v.c_str()));
         else if (k == "paint") p.paint = std::atoi(v.c_str());
         else if (k == "hud") p.hud = v != "0";
         else if (k == "perf") p.perf = v != "0";
@@ -54,6 +57,9 @@ DebugPreset read_preset() {
         else if (k == "exit_laps") p.exit_laps = std::atoi(v.c_str());
         else if (k == "pause_at") p.pause_at = std::atof(v.c_str());
         else if (k == "skip_at") p.skip_at = std::atof(v.c_str());
+        else if (k == "pod_prompt") p.pod_prompt = std::atoi(v.c_str());
+        else if (k == "pod_stops") p.pod_stops = std::atoi(v.c_str());
+        else if (k == "pod_stops2") p.pod_stops2 = std::atoi(v.c_str());
         else if (k == "split") p.split = v;
         else if (k == "car2") p.car2 = v;
         else if (k == "qm") p.qm = v;
@@ -83,7 +89,7 @@ void RaceScreen::resolve_online() {
     std::optional<game::OnlineCar> oc = game::decode_online_car(net_.car_info);
     if (!oc) return;
     preset_.car = oc->car;
-    preset_.paint = oc->paint;
+    preset_.paint = game::online_car_local_paint(db_, *oc); // (a custom colour: its index here)
     // The exact core's car: its parts and settings, its arcade tyres, its engine condition.
     launch_source_ = exact_online_source(db_, *oc, preset_.course, &run_condition_);
     start_condition_ = run_condition_;
@@ -149,6 +155,7 @@ void RaceScreen::resolve_launch() {
         race_no_rubber_band_ = rq.no_rubber_band;
         race_chosen_laps_ = rq.laps;
         race_player_slot_ = rq.player_slot;
+        race_big_field_ = rq.big_field;
     }
     // Arcade Single Race: the field is drawn from the event's pool with the race module's
     // generator (gt_mode §20.4), slots 1 .. cars-1.
@@ -161,6 +168,16 @@ void RaceScreen::resolve_launch() {
     if (ev && (rq.mode == "time_trial" || rq.mode == "go_license" || rq.mode == "go_machine_test"))
         tt_start_ = event_start(*ev);
     if (ev && rq.mode == "go_license") license_event_ = code;
+    // Concept's test with the pace car (RaceTrainingInformation::vf11): entry 1 is the event pool's third car in its pool
+    // paint (the car's first paint when the pool names none).
+    pace_car_ = ev && rq.mode == "go_license" && rq.lead_car && ev->entries.size() >= 3 && !online_;
+    if (pace_car_) {
+        race_opponents_ = {ev->entries[2]};
+        const u32 id = race::pool_color_id(*ev, 2);
+        race_opponent_color_ids_.clear();
+        race_opponent_paints_ = {id == 0xFFFFFFFFu ? 0 : -1};
+        if (id != 0xFFFFFFFFu) race_opponent_color_ids_ = {id};
+    }
     // The solo modes' event on the exact core (its configuration, start and judging times).
     if (ev && (rq.mode == "time_trial" || rq.mode == "go_license" || rq.mode == "go_machine_test" || rq.mode == "free_run" ||
                rq.mode == "go_free_run"))
@@ -266,6 +283,9 @@ void RaceScreen::resolve_launch() {
     aids_options_apply_ = rq.mode == "single_race" || rq.mode == "free_run" || rq.mode == "two_player_battle";
     asm_on_ = menu::flow::option_value(&app_->config(), "assist_asm") != "off";
     tcs_on_ = menu::flow::option_value(&app_->config(), "assist_tcs") != "off";
+    // Concept's car page: the driving assist chosen there (its buttons: ASM and TCS, TCS only, neither).
+    if (rq.assist >= 0) asm_on_ = rq.assist == 0, tcs_on_ = rq.assist <= 1;
+    assist2_ = rq.assist2; // (player 2's own choice on Concept's 2 player car page)
     // Arcade car page: AUTOMATIC / MANUAL (-1 = not chosen: keep the setting).
     if constexpr (requires { rq.transmission; })
         if (rq.transmission >= 0) preset_.manual = rq.transmission == 1;

@@ -29,6 +29,11 @@
 #include <string>
 #include <vector>
 
+namespace gt3r::texture_pack {
+struct Image;
+class Pack;
+} // namespace gt3r::texture_pack
+
 namespace gt3r::gtm1 {
 
 using Matrix = std::array<float, 16>; // row-vector convention: v' = v * M (rows r0..r3)
@@ -61,6 +66,35 @@ struct Chunk {
     std::vector<Packet> packets;
 };
 
+// A car model's callback (the game's car model callback: the values the car code sets every frame, read by op 0x06 ids
+// 1-10; id 0 is the brake pedal, RunParams::brake). Ids 1-8 set the phase of the next op 0x35 (clamped to 0..1); every
+// id takes a branch (out of range: none). GT3's ids: 1-4 the wheels' flap pendulums (FL, FR, RL, RR: rally cars' mud
+// flaps, race cars' aerials), 5 the steering (formula cars' driver's arms and wheel), each with branch 0. The later builds'
+// (Gran Turismo Concept): 6 the active wing (branch 0); 7 the pod's tail, branch 0 with its lean as the phase, or, while
+// the lean is level (0.5), branch 1 with its nod; 8 the pod's lamps, the branch their class and the phase their fade's
+// weight; 9 and 10 the pod's mood, as the branch (10 also picks the model's CLUT animations of that group).
+inline constexpr u32 kCallbackIds = 11;
+struct CarCallback {
+    std::array<float, kCallbackIds> phase{};
+    std::array<int, kCallbackIds> branch{};
+    bool operator==(const CarCallback&) const = default;
+};
+constexpr bool callback_sets_phase(u32 id) { return id >= 1 && id <= 8; }
+// The ids whose branch the values pick (the others take branch 0).
+constexpr bool callback_branches(u32 id) { return id >= 7 && id < kCallbackIds; }
+// The values before the race sets any (the menus): flaps 0, steering 0.5, wing in, tail level (branch 1, nod 0.5), lamps
+// class 0, mood 0.
+constexpr CarCallback car_callback_defaults() {
+    CarCallback c;
+    c.phase[5] = 0.5f;
+    c.phase[7] = 0.5f, c.branch[7] = 1;
+    return c;
+}
+inline constexpr CarCallback kCarCallbackDefaults = car_callback_defaults();
+// Per callback id the branch a draw is under (RunParams::every_branch), -1 none.
+using CallbackBranches = std::array<s8, kCallbackIds>;
+inline constexpr CallbackBranches kNoBranches{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
 // One draw issued by a node program.
 struct Draw {
     u32 chunk = 0;
@@ -73,9 +107,11 @@ struct Draw {
     // second key frame, phase x count - that index (morph chunks: (1 - w) key 0 + w key 1).
     u32 range_base = 0, range_count = 0;
     float morph = 0;
-    // Car models: the op 0x06 callback id (1-5, RunParams::callback) that set that phase; 0 = op 0x34
+    // Car models: the op 0x06 callback id (1-8, RunParams::callback) that set that phase; 0 = op 0x34
     // (or nothing).
     u8 phase_id = 0;
+    // RunParams::every_branch: the branch of each callback id (7-10) the draw is under, -1 none.
+    CallbackBranches when = kNoBranches;
     // Render state at the time of the draw (node program ops):
     //   op 0x20 u8 mode, u8 fix: GS ALPHA register (A|B<<2|C<<4|D<<6, FIX).
     //     0x44 = (Cs-Cd)*As+Cd (normal), 0x58 = Cs*Ad+Cd (additive, weighted by
@@ -127,19 +163,38 @@ struct RunParams {
     // Operand values written by the +0x3C animators (AnimatedNodes), by operand offset in the
     // block, as raw bits: f32 for ops 0x14 / 0x15 / 0x16 / 0x34, u16 for op 0x05.
     const std::map<u32, u32>* operands = nullptr;
-    // Car models: the car's callback values for op 0x06 ids 1-5, which set the phase of the next
-    // op 0x35 (clamped to 0..1) and take branch 0: ids 1-4 the wheels' flap pendulums (FL, FR, RL,
-    // RR: rally cars' mud flaps, race cars' aerials), id 5 the steering (formula cars' driver's arms
-    // and wheel). nullptr: ids 1-5 are plain switches (selector).
-    const float* callback = nullptr;
+    // Car models: the car's callback values for op 0x06 ids 1-10 (CarCallback). nullptr: they are
+    // plain switches (selector).
+    const CarCallback* callback = nullptr;
+    // With `callback`: every branch of ids 7-10 is run, each draw knowing the branches it is under (Draw::when), instead
+    // of the one the values pick (Options::morphs keeps those draws apart).
+    bool every_branch = false;
 };
 
-// The car callback's values before the race sets any (the menus): flaps 0, steering 0.5.
-inline constexpr std::array<float, 5> kCarCallbackDefaults{0, 0, 0, 0, 0.5f};
+// Skinned models (the riders of the bike/ folder on later discs of this engine). Header +0x40
+// points at the skeleton: one 4x4 matrix per bone, model space -> the bone's space in the
+// stored pose (the inverse bind matrices; they run up to the next block). The packets of such
+// a model unpack a GIF tag, strip lengths and S,T only; the vertices follow the VIF data:
+//
+//   u16 vertex count (the strips' total)   u16 0x80 | 0x40: where the normals go (0x80 lit,
+//                                              0x40 the reflection pass's normal in the UV slot)
+//   groups until the count is reached:
+//     u16 vertices in the group | 0x8000 when another group follows
+//     u16 4                      u8 bone[4]
+//     per vertex 40 bytes: f32 position[3], f32 normal[3], f32 weight[4] (one per bone; 1 in sum,
+//     or a little less: a vertex on more than four bones keeps its four largest)
+//
+// Positions and normals are in model space in the stored pose, so the packet decodes to that
+// pose as it is; a pose is the weighted sum over the bones of vertex x inverse bind x bone.
+struct SkinWeights {
+    std::array<u8, 4> bones{};
+    std::array<float, 4> weights{};
+};
 
 // A decoded VIF packet, vertices in strip order.
 struct DecodedPacket {
     std::vector<scene::Vertex> vertices;
+    std::vector<SkinWeights> skin; // skinned packets: one per vertex; empty otherwise
     std::vector<u32> strips;       // vertex count per triangle strip
     ps2::GifTag tag;
     ps2::Prim prim;
@@ -189,6 +244,8 @@ public:
         std::vector<u32> targets;
     };
     std::vector<Animator> animators;
+    // +0x40 skeleton of a skinned model (see SkinWeights): model space -> bone space; empty otherwise.
+    std::vector<Matrix> inverse_bind;
     // Nodes whose programs hold animator targets, ascending.
     std::vector<u32> animated_nodes() const;
 
@@ -204,7 +261,7 @@ public:
 
 private:
     void run_at(u32 node, const RunParams& p, std::vector<Matrix>& stack, std::vector<Draw>& out, int depth,
-                Draw* state) const;
+                Draw* state, const CallbackBranches& when) const;
 };
 
 // A texture set with CLUT animations that a built model uses: its textures start in the
@@ -216,6 +273,7 @@ struct ClutSet {
 
 class AnimatedNodes;
 class MorphDraws;
+struct ComputedPaint;
 
 struct Options {
     RunParams run;
@@ -223,6 +281,11 @@ struct Options {
     bool reflection = true;   // include environment-map packets (normal in the UV slot)
     bool textures = true;     // decode texture sets into Model::textures
     int paint = 0;            // car colour index (Tex1 paint variant), 0 = default
+    // A computed colour in place of `paint` (its finish selects the material set); see ComputedPaint.
+    const ComputedPaint* computed_paint = nullptr;
+    // A livery (race/custom_paints.h): pictures over the paint, keyed as a texture pack's by the
+    // textures in the livery's paint (`paint`, or the computed colour's finish). See overlay_livery.
+    const texture_pack::Pack* livery = nullptr;
     std::optional<std::array<float, 3>> tint; // multiply vertex colours of tintable packets (RGB 0..1)
     // Course road "sheen": chunks of kind 4 (flag bits 0-4) are a second, lit pass
     // over the same vertices as the node's base pass, drawn with ALPHA 0x58
@@ -253,6 +316,11 @@ struct Options {
     // in the vertex alpha. The env map itself is a runtime slot, so the
     // renderer supplies the reflection colour.
     bool weighted_reflection = false;
+    // Textures whose Tex1 record's TEX1 has MXL 0 (the GS samples only the full-size image) get
+    // Texture::no_mips: no generated mip levels blend a packed picture with its neighbours (the
+    // 787B's far windshield took the orange paint around it, issue 418). Car bodies: every texture
+    // on every disc has MXL 0. Off for courses, whose scenery keeps its mips.
+    bool gs_mip_levels = false;
     // The runtime texture slot (0x1FF, op 0x29) on colour packets: the first texture of this
     // entry of the texture-LOD table in use. Wheels: 1, the rim image the game binds there
     // (docs/formats/car_model.md "GTTW (wheel)"). -1, or a table without the entry: the current
@@ -286,8 +354,9 @@ struct Options {
     // this instead (texture indices: the model's).
     AnimatedNodes* animated = nullptr;
     // When set, the draws whose phase a car callback id sets (Draw::phase_id, op 0x35 after op
-    // 0x06 ids 1-5) are left out of the model and built into this instead (texture indices: the
-    // model's). Needs run.callback.
+    // 0x06 ids 1-8) and, with run.every_branch, the draws under the branches of ids 7-10 (Draw::when)
+    // are left out of the model and built into this instead (texture indices: the model's). Needs
+    // run.callback.
     MorphDraws* morphs = nullptr;
     // Courses drawn with the PS2's frame-buffer alpha (render::DrawItem::frame_alpha): alpha-only
     // passes (FBMSK 0x00FFFFFF, the shadow masks that switch the road sheen off) are kept as
@@ -346,19 +415,21 @@ private:
 };
 
 // A car model's morph draws (Options::morphs): the op 0x35 draws whose phase comes from the car's
-// callback (mud flaps, aerials, formula cars' steering). Car programs take the same branches
-// whatever those values are, so each draw keeps its matrix and every chunk of its range, in the
-// chunk's own space with key frames 0 and 1; meshes() draws the chunk the values pick, morphed.
+// callback (mud flaps, aerials, formula cars' steering, the later builds' wings and pod tails), and the
+// draws under the branches the callback picks (the pod's lamps and faces: RunParams::every_branch).
+// Each draw keeps its matrix, the branches it is under and every chunk of its range, in the chunk's
+// own space with key frames 0 and 1; meshes() draws those the values pick, morphed.
 class MorphDraws {
 public:
     bool empty() const { return draws_.empty(); }
     size_t size() const { return draws_.size(); }
-    // The callback ids (1-5) the draws read, ascending.
+    // The callback ids (1-8) whose phases the draws read, ascending; and the ids (7-10) whose branches they are under.
     std::vector<int> ids() const;
+    std::vector<int> branch_ids() const;
 
-    // The draws for the callback values `values` (ids 1-5): one mesh ("morph", Mesh::lod = the
-    // LOD built), in model space.
-    std::vector<scene::Mesh> meshes(const std::array<float, 5>& values) const;
+    // The draws for the callback values `values`: those under the branches the values take, one mesh ("morph",
+    // Mesh::lod = the LOD built), in model space.
+    std::vector<scene::Mesh> meshes(const CarCallback& values) const;
     // Adds `base` to the parts' texture indices (their model's textures appended to others).
     void rebase_textures(int base);
     // The texture indices the parts use, ascending; and renumbering them (t -> map[t]).
@@ -373,10 +444,12 @@ private:
         std::vector<scene::Primitive> primitives; // first_index into indices
     };
     struct Entry {
-        u8 id = 0;
+        u8 id = 0;                       // the callback id whose phase picks the chunk (0: the draw's own chunk)
+        CallbackBranches when = kNoBranches;
+        float morph = 0;                 // id 0: the draw's own morph weight
         Matrix matrix{};
         bool has_matrix = false;
-        std::vector<Part> chunks; // range_base + k
+        std::vector<Part> chunks; // range_base + k (id 0: the one chunk)
     };
     std::vector<Entry> draws_;
     int lod_ = 0;
@@ -407,6 +480,47 @@ struct PaintVariant {
 };
 std::vector<PaintVariant> paint_variants(ByteSpan tex1);
 
+// A paint colour the disc does not have (docs/dev/CUSTOM_PAINTS.md), computed from the car's own
+// paints. A paint variant only changes which CLUT each texture reads, so every texel is the same
+// palette entry under every paint, and each texel that changes with the paint is fitted against
+// the paints' body colours (their mean over the set's changing texels): texel = s x body colour + h,
+// one s and h for its three channels (the shading and a grey highlight), the paints nearer the new
+// colour weighted more. Texels that never change (trim, lamps, glass) keep their value; alpha (the
+// reflectivity and the cut-outs) is the finish paint's. carcolor.db's colours are only the paints'
+// labels (the R34's paint labelled #D5D5D5 runs #444443 to #727270 on its body): the new colour is taken as
+// such a label, its body colour the colour by the factor the car's own paints show on average.
+struct ComputedPaint {
+    u32 rgb = 0;                // bytes R, G, B
+    int finish = 0;             // the car's paint whose material set and texel alpha it takes
+    std::vector<u32> paint_rgb; // carcolor.db colour (bytes R, G, B) of each of the car's paints, in variant order
+    bool operator==(const ComputedPaint&) const = default;
+};
+// Each paint's body colour: the mean of the texels that change with the paint, over a set's
+// textures (`textures[t][v]`: texture t under paint v; textures with fewer entries are skipped).
+std::vector<u32> paint_body_colours(const std::vector<std::vector<std::vector<u32>>>& textures);
+// The body colour `p.rgb` is given (see ComputedPaint), from the paints' body colours.
+u32 computed_body_colour(const ComputedPaint& p, const std::vector<u32>& body);
+// The texels of one texture in body colour `target`, from the same texture under each paint
+// (`by_paint[v]`, all the same size) and the paints' body colours; alpha from paint `finish`.
+std::vector<u32> computed_paint_texels(const std::vector<std::vector<u32>>& by_paint, const std::vector<u32>& body, u32 target,
+                                       int finish);
+
+// A livery picture over a texture: out = mix(texture, picture, coverage) per texel, the
+// texture's alpha kept (its reflectivity and cut-outs). The coverage is the picture's alpha,
+// except where the picture still shows `templ` (the texture in the livery's paint, at its disc
+// size, as the livery template enlarges it): a canvas painted over the template, opaque, covers
+// only what was painted (fading in over 6 to 18 levels of difference per channel). The result
+// has the larger of the two sizes per side: the texture is enlarged (its colour filtered unless
+// it is point-sampled, its alpha by nearest texel), the picture fitted to it. A picture that
+// covers nothing leaves the texture as it is.
+struct TemplateTexels {
+    const u32* rgba = nullptr;
+    u32 width = 0, height = 0;
+};
+void overlay_livery(scene::Texture& texture, const texture_pack::Image& picture, TemplateTexels templ = {});
+// The coverage overlay_livery gives each texel of `picture` (its size).
+std::vector<u8> livery_coverage(const texture_pack::Image& picture, TemplateTexels templ = {});
+
 // Appends the textures of one Tex1 set (all of them) to `out`; returns the
 // index of the first one. `paint` > 0 selects a colour variant (when the set
 // has one). Indexed textures honour TEX0.CSA. Textures fed by the set's CLUT
@@ -414,7 +528,39 @@ std::vector<PaintVariant> paint_variants(ByteSpan tex1);
 // (empty without animations). Shared by the car/wheel/course loaders.
 // `use_pack`: textures the texture pack replaces (formats/texture_pack.h) take its pictures,
 // and their CLUT animations stop; false gives the disc's textures (the keys are made from them).
+// `computed` (when the set has a variant for each of its paints): that colour instead of `paint`,
+// for the textures the paints recolour (no CLUT animations, like any paint but the first).
+// `livery`: its pictures over the textures whose key (in `paint`, or the computed colour's
+// finish) has one, over the texture pack's picture where there is one.
+// `gs_mip_levels`: Options::gs_mip_levels (pack and livery pictures keep their mips).
 int decode_texture_set(ByteSpan tex1, std::vector<scene::Texture>& out, const std::string& prefix, int paint = 0,
-                       ClutTextures* clut = nullptr, bool use_pack = true);
+                       ClutTextures* clut = nullptr, bool use_pack = true, const ComputedPaint* computed = nullptr,
+                       const texture_pack::Pack* livery = nullptr, bool gs_mip_levels = false);
+
+// A cut-out copy (alpha 0 = cut away, else kept) of a texture the game samples point-filtered:
+// gives every cut texel the mean colour of its nearest kept texels (ring by ring; across the
+// edges unless the texture clamps). The GS never shows a cut texel's colour there, but filtering
+// it (bilinear, mipmaps) would spread it over the kept edge: the Astra Touring Car's headlamp
+// surrounds are keyed in pure red. Alpha is unchanged; no kept texel: no change.
+void colour_cut_texels(scene::Texture& t);
+// The same, across the edges on the axes given (build_model: where a face repeats the texture
+// there). A texture its faces sample clamped takes no colour from its far side: the Astra Touring
+// Car's grille, whose mirrored halves meet on its edge, took the far edge's chrome at the seam
+// (issue 409).
+void colour_cut_texels(scene::Texture& t, bool wrap_u, bool wrap_v);
+
+// Marks the textured primitives of `mesh` whose UVs all lie inside the texture on an axis
+// (scene::kClampU / kClampV): they never repeat it there, so sampling them clamped changes
+// nothing the GS shows, and keeps our filtering (bilinear at the edge texels, MSAA samples past
+// the triangle's edge, coarse mip levels) from blending in the texture's far side: Midfield's
+// pines packed beside other pictures, the Astra Touring Car's grille drawn as two mirrored
+// halves that meet on the texture's edge (issue 409). Environment passes (UVs made per frame)
+// are left alone. With `textures` (the model's), a primitive whose UVs stop inside its texture
+// beside different texels (a picture packed beside another, not the rest of a continuous one)
+// also gets its region (scene::Primitive::uv_region). `key1`: a morph's second key frame,
+// parallel to mesh.vertices. build_model marks every mesh and part it makes. Returns how many
+// it marked.
+int mark_inside_uvs(scene::Mesh& mesh, const std::vector<scene::Vertex>* key1 = nullptr,
+                    const std::vector<scene::Texture>* textures = nullptr);
 
 } // namespace gt3r::gtm1

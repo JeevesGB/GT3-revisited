@@ -4,8 +4,6 @@
 
 #include "app/screen_race_impl.h"
 
-#include <cstdio>
-
 namespace gt3r::race_screen {
 
 // Game text cut to ASCII (a lead byte becomes '-'), for text drawn with the UTF-8 path.
@@ -72,10 +70,10 @@ std::vector<ResultRow> RaceScreen::result_menu_rows() const {
 
 std::vector<ResultRow> RaceScreen::result_panel_rows(race::ResultPage page) const {
     std::vector<ResultRow> rows = result_rows(true);
-    if (page == race::ResultPage::Points) { // the round's points by place
+    if (page == race::ResultPage::Points) { // the round's points by place (0x1756F0)
         for (size_t i = 0; i < rows.size(); ++i)
             rows[i].time = race::result_points_text('+', race::championship_points(int(i)), lang_);
-    } else if (page == race::ResultPage::TotalPoints) { // the totals, highest first
+    } else if (page == race::ResultPage::TotalPoints) { // the totals, highest first (0x175790)
         const std::vector<int>& before_round = launch_.request.champ_points; // the player first, then the opponents
         std::vector<int> before;
         for (const ResultRow& r : rows) {
@@ -130,6 +128,7 @@ menu::flow::GameResult RaceScreen::build_result() const {
         r.finished = finished_;
         r.cars = field_->opponents() + 1;
         r.position = finished_ ? finish_position_ : 0;
+        if (finished_ && preset_.place > 0) r.position = preset_.place; // tests of the result path
         if (finished_) {
             double sum = 0;
             for (double t : lap_times_) sum += t;
@@ -257,17 +256,35 @@ std::string RaceScreen::race_text(const char* key, const char* fallback, bool ga
             LOG_WARN("Race: text/realtime.dat: %s", e.what());
         }
     }
-    if (race_strings_) {
-        int i = race_strings_->find(key);
-        if (i >= 0) {
-            const text::Language own = text::language_from_code(lang_).value_or(text::Language::US);
-            for (text::Language l : {own, text::Language::US}) {
-                if (int(l) >= race_strings_->language_count()) continue;
-                std::string v = game_text ? race_strings_->raw(size_t(i), l) : race_strings_->utf8(size_t(i), l, nullptr);
-                if (!v.empty()) return v;
+    const int i = race_strings_ ? race_strings_->find(key) : -1;
+    auto value = [&](text::Language l) -> std::string {
+        if (i < 0 || !race_strings_->has(l)) return {}; // (a file's pools follow its own order, not the index)
+        return game_text ? race_strings_->raw(size_t(i), l) : race_strings_->utf8(size_t(i), l, nullptr);
+    };
+    if (std::string v = value(text::language_from_code(lang_).value_or(text::Language::US)); !v.empty()) return v;
+    // The program's default (a realtime text slot keeps it while the file leaves the language's value empty or lacks
+    // the key).
+    if (game_text && app_ && app_->vfs()) {
+        const std::string k = key;
+        const size_t us = k.find('_');
+        const std::string group = k.substr(0, us);
+        auto it = program_texts_.find(group);
+        if (it == program_texts_.end()) {
+            std::vector<std::pair<std::string, std::string>> slots;
+            if (std::optional<Bytes> core = app_->vfs()->read(Vfs::kProgramFile)) {
+                try {
+                    slots = game::find_realtime_group(CoreImage::decode(*core), group);
+                } catch (const std::exception& e) {
+                    LOG_WARN("Race: %s: %s", Vfs::kProgramFile, e.what());
+                }
             }
+            it = program_texts_.emplace(group, std::move(slots)).first;
         }
+        if (us != std::string::npos)
+            for (const auto& [name, text] : it->second)
+                if (name == k.substr(us + 1) && !text.empty()) return text;
     }
+    if (std::string v = value(text::Language::US); !v.empty()) return v;
     return fallback;
 }
 

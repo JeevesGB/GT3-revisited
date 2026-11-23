@@ -2,6 +2,7 @@
 
 #include "test_framework.h"
 
+#include "disc/disc.h"
 #include "formats/course/course_model.h"
 #include "formats/model/car_model.h"
 #include "formats/model/gtm1.h"
@@ -11,6 +12,7 @@
 #include "formats/ps2/vif.h"
 #include "game/data/car_database.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -176,7 +178,7 @@ TEST(gtm1_car_morph_draws_synthetic) {
     auto x1 = [](const scene::Mesh& m) { return m.vertices.size() > 1 ? m.vertices[1].pos[0] : -1.0f; };
     // Car programs read the callback: the steering's default 0.5 x 2 chunks -> chunk 1 (x + 10).
     gtm1::Options o;
-    o.run.callback = gtm1::kCarCallbackDefaults.data();
+    o.run.callback = &gtm1::kCarCallbackDefaults;
     scene::Model m = gtm1::build_model(g, o);
     CHECK(m.meshes.size() == 2 && x1(m.meshes[0]) == 11 && x1(m.meshes[1]) == 1);
     // With Options::morphs that draw is left out and kept with both chunks.
@@ -186,8 +188,8 @@ TEST(gtm1_car_morph_draws_synthetic) {
     CHECK(m.meshes.size() == 1 && m.meshes[0].name == "node1");
     CHECK(md.size() == 1 && md.ids() == std::vector<int>{5});
     auto at = [&](float steer) {
-        std::array<float, 5> v = gtm1::kCarCallbackDefaults;
-        v[4] = steer;
+        gtm1::CarCallback v = gtm1::kCarCallbackDefaults;
+        v.phase[5] = steer;
         std::vector<scene::Mesh> ms = md.meshes(v);
         return ms.size() == 1 ? x1(ms[0]) : -1.0f;
     };
@@ -465,6 +467,75 @@ TEST(car_model_disc) {
     CHECK(tris > 2000 && tris < 6000);
 }
 
+// GT3 samples car textures from their full-size images (every car texture's TEX1 has MXL 0): no
+// mips blend a packed picture with its neighbours, as the 787B's far windshield took the orange
+// paint around it (issue 418). Course scenery keeps its mips.
+TEST(car_textures_without_mips_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const Volume::Entry* e = disc->volume().find("cars/eve/ma0095");
+    if (!e) SKIP("no 787B on this disc");
+    const Bytes data = disc->volume().read(*e);
+    for (int lod = 0; lod < 3; ++lod) {
+        CarModelOptions o;
+        o.lod = lod;
+        o.wheels = false;
+        scene::Model m = load_car_model(data, o, "ma0095");
+        CHECK(!m.textures.empty());
+        for (const scene::Texture& t : m.textures) CHECK(t.no_mips);
+    }
+    const Volume::Entry* c = disc->volume().find("courses/US/midfield");
+    if (!c) c = disc->volume().find("courses/midfield"); // (NTSC-J)
+    if (!c) return;
+    course::CourseModelOptions co;
+    co.backdrop = co.course_line = false;
+    scene::Model course = course::build_course_model(disc->volume().read(*c), co, "midfield");
+    CHECK(!course.textures.empty());
+    for (const scene::Texture& t : course.textures) CHECK(!t.no_mips);
+}
+
+// As the later builds' pod lamps: node 0 = op 0x06 callback id 8 with two branches, chunk 0 or chunk 1, meeting again past
+// them (the out-of-range jump past the table); node 1 = a plain draw of chunk 0.
+Bytes make_branch_callback_gtm1() {
+    Bytes g = make_callback_gtm1();
+    std::fill(g.begin() + 0xA0, g.begin() + 0xB4, u8(0));
+    // A0: 06 u16 8, n 2, rel AA, rel AF | A8: 08 -> B2 | AA: 05 u16 0, 08 -> B2 | AF: 05 u16 1 | B2: 00
+    const u8 p0[] = {0x06, 8, 0, 2, 6, 0, 9, 0, 0x08, 9, 0x05, 0, 0, 0x08, 4, 0x05, 1, 0, 0x00};
+    std::memcpy(&g[0xA0], p0, sizeof(p0));
+    return g;
+}
+
+TEST(gtm1_car_callback_branches_synthetic) {
+    Bytes data = make_branch_callback_gtm1();
+    gtm1::Gtm1 g = gtm1::Gtm1::parse(data);
+    auto x1 = [](const scene::Mesh& m) { return m.vertices.size() > 1 ? m.vertices[1].pos[0] : -1.0f; };
+    // The values pick the branch: 0 chunk 0, 1 chunk 1 (x + 10), out of range nothing.
+    gtm1::CarCallback v = gtm1::kCarCallbackDefaults;
+    gtm1::Options o;
+    o.run.callback = &v;
+    auto node0 = [&](int branch) {
+        v.branch[8] = branch;
+        scene::Model m = gtm1::build_model(g, o);
+        return m.meshes.size() == 2 ? x1(m.meshes[0]) : m.meshes.size() == 1 ? 0.0f : -1.0f;
+    };
+    CHECK(node0(0) == 1 && node0(1) == 11 && node0(2) == 0);
+    // Every branch with Options::morphs: both draws left out, each under its branch, drawn as the values pick.
+    gtm1::MorphDraws md;
+    o.morphs = &md;
+    o.run.every_branch = true;
+    v.branch[8] = 0;
+    scene::Model m = gtm1::build_model(g, o);
+    CHECK(m.meshes.size() == 1 && m.meshes[0].name == "node1");
+    CHECK(md.size() == 2 && md.ids().empty() && md.branch_ids() == std::vector<int>{8});
+    auto drawn = [&](int branch) {
+        gtm1::CarCallback w = gtm1::kCarCallbackDefaults;
+        w.branch[8] = branch;
+        std::vector<scene::Mesh> ms = md.meshes(w);
+        return ms.size() == 1 && ms[0].vertices.size() == 4 ? x1(ms[0]) : ms.empty() ? 0.0f : -1.0f;
+    };
+    CHECK(drawn(0) == 1 && drawn(1) == 11 && drawn(2) == 0);
+}
+
 // The cars whose node programs morph parts by the car's callback (op 0x06 ids 1-5, op 0x35): the rally
 // cars' mud flaps and two race cars' aerials (ids 1-4, the wheels' pendulums), the formula cars'
 // driver's arms and steering wheel (id 5).
@@ -490,7 +561,8 @@ TEST(car_morph_draws_disc) {
         found[id] = morphs[0].ids();
         draws[id] = morphs[0].size();
         // The parts move with their value, and the body leaves them out.
-        std::array<float, 5> lo{}, hi{1, 1, 1, 1, 1};
+        gtm1::CarCallback lo = gtm1::kCarCallbackDefaults, hi = lo;
+        for (int i = 1; i <= 5; ++i) lo.phase[size_t(i)] = 0, hi.phase[size_t(i)] = 1;
         std::vector<scene::Mesh> a = morphs[0].meshes(lo), b = morphs[0].meshes(hi);
         bool moved = a.size() == 1 && b.size() == 1 && a[0].vertices.size() == b[0].vertices.size();
         float most = 0;
@@ -513,6 +585,34 @@ TEST(car_morph_draws_disc) {
     };
     CHECK(found == expect);
     CHECK(draws["ty0032"] == 4 && draws["la0011"] == 2 && draws["ml0003"] == 1); // (LOD 1 has as many)
+}
+
+// Issue 379: the RX-8's (ma0100) brake branch draws its round lamps' glow, a red ring on black, with
+// GS ALPHA 0x48 (Cs*As + Cd). It adds to the lens under it; blended over it, the black covered the lens.
+TEST(car_brake_lamp_glow_adds_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const Volume::Entry* e = disc->volume().find("cars/day/ma0100");
+    CHECK(e != nullptr);
+    if (!e) return;
+    const Bytes data = disc->volume().read(*e);
+    auto added = [&](bool brake) {
+        CarModelOptions o;
+        o.lod = 0;
+        o.wheels = false;
+        o.brake = brake;
+        size_t n = 0;
+        for (const scene::Mesh& mesh : load_car_model(data, o).meshes)
+            for (const scene::Primitive& p : mesh.primitives)
+                if ((p.flags & scene::kAdditive) && !(p.flags & scene::kEnvironmentMap) && p.texture >= 0) {
+                    CHECK(!(p.flags & scene::kAlphaBlend));
+                    ++n;
+                }
+        return n;
+    };
+    size_t off = added(false), on = added(true);
+    std::printf("  ma0100: %zu added textured passes, %zu braking\n", off, on);
+    CHECK(on == off + 2); // the glow of each of the two lamp chunks the brake branch adds
 }
 
 TEST(wheel_model_disc) {
@@ -613,6 +713,258 @@ TEST(car_alpha_test_and_reflection_disc) {
     CHECK(per_pixel > 0);
 }
 
+// Issue 368. A cut-out copy of a texture the game samples point-filtered: the cut texels take their
+// nearest kept texels' mean colour, ring by ring, so filtering never brings in the hidden key
+// colour; alpha stays as cut.
+TEST(gtm1_cut_texels_take_their_kept_neighbours_colour) {
+    auto texel = [](u32 r, u32 g, u32 b, u32 a) { return r | g << 8 | b << 16 | a << 24; };
+    const u32 key = texel(255, 0, 0, 0);
+    scene::Texture row;
+    row.width = 5, row.height = 1, row.clamp_u = row.clamp_v = true;
+    row.rgba = {texel(0, 0, 0, 255), key, key, key, texel(200, 100, 50, 255)};
+    gtm1::colour_cut_texels(row);
+    CHECK(row.rgba[1] == texel(0, 0, 0, 0));
+    CHECK(row.rgba[2] == texel(100, 50, 25, 0)); // the second ring: the mean of the first
+    CHECK(row.rgba[3] == texel(200, 100, 50, 0));
+    CHECK(row.rgba[0] == texel(0, 0, 0, 255) && row.rgba[4] == texel(200, 100, 50, 255));
+    // A repeating texture's edges meet: the left texel takes the right edge's colour too.
+    scene::Texture wrap = row;
+    wrap.clamp_u = false;
+    wrap.rgba = {key, texel(10, 20, 30, 255), key, key};
+    wrap.width = 4;
+    gtm1::colour_cut_texels(wrap);
+    CHECK(wrap.rgba[0] == texel(10, 20, 30, 0) && wrap.rgba[3] == texel(10, 20, 30, 0));
+    // Unless no face repeats it there (issue 409): the edge texel takes only what is inside.
+    scene::Texture across = wrap, inside = wrap;
+    across.rgba = inside.rgba = {key, texel(10, 20, 30, 255), key, texel(50, 60, 70, 255)};
+    gtm1::colour_cut_texels(across, true, false);
+    gtm1::colour_cut_texels(inside, false, false);
+    CHECK(across.rgba[0] == texel(30, 40, 50, 0));
+    CHECK(inside.rgba[0] == texel(10, 20, 30, 0));
+    // Nothing kept: nothing to take a colour from.
+    scene::Texture empty = row;
+    empty.rgba = {key, key, key, key, key};
+    gtm1::colour_cut_texels(empty);
+    CHECK(empty.rgba == std::vector<u32>(5, key));
+}
+
+// Primitives that never repeat their texture on an axis sample it clamped there (gtm1::mark_inside_uvs).
+TEST(inside_uvs_clamp_their_axis) {
+    scene::Mesh mesh;
+    auto prim = [&](std::initializer_list<std::array<float, 2>> uvs, int texture = 0, u8 env_kind = 0) {
+        scene::Primitive p;
+        p.first_index = u32(mesh.indices.size());
+        for (const std::array<float, 2>& uv : uvs) {
+            scene::Vertex v;
+            v.uv[0] = uv[0], v.uv[1] = uv[1];
+            mesh.indices.push_back(u32(mesh.vertices.size()));
+            mesh.vertices.push_back(v);
+        }
+        p.index_count = u32(uvs.size());
+        p.texture = texture;
+        p.env_kind = env_kind;
+        mesh.primitives.push_back(p);
+        return mesh.primitives.size() - 1;
+    };
+    const size_t inside = prim({{0.0059f, 0.0089f}, {0.5859f, 0.0089f}, {0.0059f, 0.9922f}}); // a packed picture
+    const size_t edges = prim({{0, 0}, {1, 0}, {1, 1}});
+    const size_t tiled_u = prim({{0, 0}, {2, 0}, {2, 1}});
+    const size_t tiled_v = prim({{0, -0.5f}, {1, -0.5f}, {1, 1}});
+    const size_t untextured = prim({{0.5f, 0.5f}, {0.6f, 0.5f}, {0.6f, 0.6f}}, -1);
+    const size_t env = prim({{0.5f, 0.5f}, {0.6f, 0.5f}, {0.6f, 0.6f}}, 0, 3); // UVs made per frame
+    CHECK(gtm1::mark_inside_uvs(mesh) == 4);
+    auto flags = [&](size_t i) { return mesh.primitives[i].flags & (scene::kClampU | scene::kClampV); };
+    CHECK(flags(inside) == (scene::kClampU | scene::kClampV));
+    CHECK(flags(edges) == (scene::kClampU | scene::kClampV));
+    CHECK(flags(tiled_u) == scene::kClampV);
+    CHECK(flags(tiled_v) == scene::kClampU);
+    CHECK(flags(untextured) == 0 && flags(env) == 0);
+    // A float step past the edge is on it (the Astra Touring Car's grille, issue 409); a texel is not.
+    scene::Mesh near;
+    std::swap(mesh, near);
+    const size_t float_step = prim({{-5.96e-8f, 0}, {0.99999988f, 0}, {0, 1.0000001f}});
+    const size_t texel_out = prim({{-1.0f / 64, 0}, {1, 0}, {1, 1}});
+    gtm1::mark_inside_uvs(mesh);
+    CHECK(flags(float_step) == (scene::kClampU | scene::kClampV));
+    CHECK(flags(texel_out) == scene::kClampV);
+    // A morph's second key frame counts too: its parts blend between the two.
+    scene::Mesh morph;
+    std::swap(mesh, morph);
+    const size_t morphed = prim({{0, 0}, {1, 0}, {1, 1}});
+    std::vector<scene::Vertex> key1 = mesh.vertices;
+    key1[1].uv[0] = 1.5f;
+    gtm1::mark_inside_uvs(mesh, &key1);
+    CHECK(flags(morphed) == scene::kClampV);
+    // With the textures: a face that stops on a texel edge beside different texels (a picture packed
+    // beside another) gets its region; one that stops inside a continuous picture, or off a texel
+    // edge, does not.
+    scene::Mesh packed;
+    std::swap(mesh, packed);
+    scene::Texture t;
+    t.width = 8, t.height = 2;
+    for (u32 y = 0; y < 2; ++y)
+        for (u32 x = 0; x < 8; ++x) t.rgba.push_back(x < 6 ? 0xFF303030u : 0xFF2020C0u); // grey, then red
+    const std::vector<scene::Texture> textures{t};
+    const size_t beside = prim({{0, 0}, {0.75f, 0}, {0.75f, 1}});      // to texel 6: the red starts
+    const size_t within = prim({{0, 0}, {0.5f, 0}, {0.5f, 1}});        // to texel 4: grey goes on
+    const size_t off_edge = prim({{0, 0}, {0.7f, 0}, {0.7f, 1}});      // inside texel 5
+    const size_t whole = prim({{0, 0}, {1, 0}, {1, 1}});
+    gtm1::mark_inside_uvs(mesh, nullptr, &textures);
+    auto region = [&](size_t i) { return std::array<float, 4>{mesh.primitives[i].uv_region[0], mesh.primitives[i].uv_region[1],
+                                                              mesh.primitives[i].uv_region[2], mesh.primitives[i].uv_region[3]}; };
+    CHECK((region(beside) == std::array<float, 4>{0, 0, 0.75f, 0}));
+    CHECK((region(within) == std::array<float, 4>{0, 0, 0, 0}));
+    CHECK((region(off_edge) == std::array<float, 4>{0, 0, 0, 0}));
+    CHECK((region(whole) == std::array<float, 4>{0, 0, 0, 0}));
+}
+
+// Midfield's pines share a repeating texture with other pictures and start their UVs 1.5 texels
+// inside its edge; they sample it clamped, so the picture on its far side never shows as a line
+// down their sides. Tiled faces keep repeating.
+TEST(course_packed_pictures_sample_clamped_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const Volume::Entry* e = disc->volume().find("courses/US/midfield");
+    if (!e) e = disc->volume().find("courses/midfield"); // (NTSC-J)
+    if (!e) SKIP("no Midfield on this disc");
+    course::CourseModelOptions o;
+    o.backdrop = o.course_line = false;
+    o.reflections = o.frame_alpha = true; // (as the race builds it)
+    scene::Model m = course::build_course_model(disc->volume().read(*e), o, "midfield");
+    size_t cut_outs = 0, clamped = 0, tiled = 0, tiled_marked = 0;
+    for (const scene::Mesh& mesh : m.meshes)
+        for (const scene::Primitive& p : mesh.primitives) {
+            if (p.texture < 0 || p.env_kind != 0) continue;
+            const scene::Texture& t = m.textures[size_t(p.texture)];
+            float lo = 1, hi = 0;
+            for (u32 i = p.first_index; i < p.first_index + p.index_count; ++i)
+                lo = std::min(lo, mesh.vertices[mesh.indices[i]].uv[0]), hi = std::max(hi, mesh.vertices[mesh.indices[i]].uv[0]);
+            if (hi > 1.0001f || lo < -1e-4f) { // (past a float step outside the edge)
+                ++tiled;
+                tiled_marked += (p.flags & scene::kClampU) != 0;
+            } else if ((p.flags & scene::kAlphaTest) && !t.clamp_u && lo > 0.0f) {
+                ++cut_outs;
+                clamped += (p.flags & scene::kClampU) != 0;
+            }
+        }
+    CHECK(cut_outs > 0 && clamped == cut_outs);
+    CHECK(tiled > 0 && tiled_marked == 0);
+}
+
+// Trial Mountain's GRAN TURISMO billboards use the left three quarters of a texture whose last
+// quarter holds another picture, from u = -4.5e-8: a float step outside its edge. They sample it
+// clamped like faces exactly on the edge, so that picture never shows as a line down their left
+// side (as the Astra Touring Car's grille, issue 409), and keep to their region on the right,
+// where it starts inside the texture.
+TEST(course_float_step_outside_samples_clamped_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const Volume::Entry* e = disc->volume().find("courses/US/trialmt");
+    if (!e) e = disc->volume().find("courses/trialmt"); // (NTSC-J)
+    if (!e) SKIP("no Trial Mountain on this disc");
+    course::CourseModelOptions o;
+    o.backdrop = o.course_line = false;
+    o.reflections = o.frame_alpha = true; // (as the race builds it)
+    scene::Model m = course::build_course_model(disc->volume().read(*e), o, "trialmt");
+    size_t outside = 0, clamped = 0, billboards = 0, regions = 0;
+    for (const scene::Mesh& mesh : m.meshes)
+        for (const scene::Primitive& p : mesh.primitives) {
+            if (p.texture < 0 || p.env_kind != 0 || (p.flags & scene::kEnvironmentMap)) continue;
+            float lo = 1, hi = 0;
+            for (u32 i = p.first_index; i < p.first_index + p.index_count; ++i)
+                lo = std::min(lo, mesh.vertices[mesh.indices[i]].uv[0]), hi = std::max(hi, mesh.vertices[mesh.indices[i]].uv[0]);
+            if (lo >= 0.0f || lo < -1e-4f || hi > 1.0001f) continue;
+            ++outside;
+            clamped += (p.flags & scene::kClampU) != 0;
+            const scene::Texture& t = m.textures[size_t(p.texture)];
+            const bool billboard = t.width == 256 && t.height == 64 && std::fabs(hi - 0.75f) < 1e-4f;
+            billboards += billboard;
+            // Their right edge meets the other picture inside the texture: they sample only their own part.
+            regions += billboard && p.uv_region[0] == 0.0f && std::fabs(p.uv_region[2] - hi) < 1e-6f;
+        }
+    std::printf("  %zu faces a float step left of their texture, %zu clamped, %zu billboards\n", outside, clamped, billboards);
+    CHECK(outside > 0 && clamped == outside);
+    CHECK(billboards > 0 && regions == billboards);
+}
+
+// Issue 368. The Astra Touring Car's headlamp surround (point-filtered in the game) is keyed in pure
+// red where the lamps show through; its cut-out copy no longer holds that red to filter in.
+TEST(car_cut_outs_hide_their_key_colour_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const auto* e = disc->volume().find("cars/day/op0011"); // Astra Touring Car
+    if (!e) SKIP("no cars/day/op0011 on this disc");
+    CarModelOptions o;
+    o.wheels = false;
+    scene::Model m = load_car_model(disc->volume().read(*e), o, "op0011");
+    const u32 red = 0x0000FFu;
+    size_t point_filtered = 0, keyed = 0;
+    for (const scene::Primitive& p : m.meshes.empty() ? std::vector<scene::Primitive>{} : m.meshes[0].primitives) {
+        if (!(p.flags & scene::kAlphaTest) || p.texture < 0) continue;
+        const scene::Texture& t = m.textures[size_t(p.texture)];
+        if (!t.nearest) continue;
+        ++point_filtered;
+        bool kept_red = false, cut_red = false;
+        for (u32 c : t.rgba) ((c >> 24) ? kept_red : cut_red) |= (c & 0xFFFFFFu) == red;
+        keyed += !kept_red;
+        if (!kept_red) CHECK(!cut_red);
+    }
+    CHECK(point_filtered > 0 && keyed > 0);
+}
+
+// Issue 409. The Astra Touring Car's grille is two mirrored halves whose UVs meet on the texture's
+// right edge (u = 1) at the car's centre line. The GS never samples past that edge; repeating the
+// texture there blended its left edge (the light chrome rim) into a white line down the centre of
+// the grille and badge. Faces that stay inside their texture sample it clamped, on cars too, and
+// the cut texels on that edge (the gaps between the bars) take their colour from inside it.
+TEST(car_mirrored_halves_sample_clamped_disc) {
+    Disc* disc = test::any_region_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    size_t models = 0;
+    for (const char* path : {"cars/day/op0011", "menu/cars/op0011"}) { // Astra Touring Car: race, showroom
+        const auto* e = disc->volume().find(path);
+        if (!e) continue;
+        ++models;
+        CarModelOptions o;
+        o.wheels = false;
+        scene::Model m = load_car_model(disc->volume().read(*e), o, "op0011");
+        CHECK(!m.meshes.empty());
+        if (m.meshes.empty()) continue;
+        const scene::Mesh& body = m.meshes[0];
+        size_t seams = 0, clamped = 0, cut_edges = 0;
+        for (const scene::Primitive& p : body.primitives) {
+            if (p.texture < 0 || p.env_kind != 0 || (p.flags & scene::kEnvironmentMap)) continue;
+            bool inside = true, centre_edge = false;
+            for (u32 i = p.first_index; i < p.first_index + p.index_count; ++i) {
+                const scene::Vertex& v = body.vertices[body.indices[i]];
+                inside &= v.uv[0] >= -1e-4f && v.uv[0] <= 1.0001f; // (its UVs: 0 and 1 give or take a float step)
+                centre_edge |= std::fabs(v.pos[0]) < 1e-3f && v.uv[0] > 0.9999f;
+            }
+            if (!inside || !centre_edge) continue;
+            ++seams;
+            clamped += (p.flags & scene::kClampU) != 0;
+            const scene::Texture& t = m.textures[size_t(p.texture)];
+            if (!t.nearest || !(p.flags & scene::kAlphaTest)) continue;
+            // A cut-out copy: its cut texels coloured as they would be from inside the texture alone.
+            scene::Texture inside_only = t;
+            size_t edge_cuts = 0;
+            for (size_t i = 0; i < inside_only.rgba.size(); ++i)
+                if (!(inside_only.rgba[i] >> 24)) {
+                    inside_only.rgba[i] = 0x00FF00FFu;
+                    edge_cuts += i % t.width == t.width - 1;
+                }
+            gtm1::colour_cut_texels(inside_only, false, false);
+            cut_edges += edge_cuts > 0;
+            CHECK(inside_only.rgba == t.rgba);
+        }
+        std::printf("  %s: %zu faces meet on their texture's edge at the centre line, %zu clamped\n", path, seams, clamped);
+        CHECK(seams > 0);
+        CHECK(clamped == seams);
+        CHECK(cut_edges > 0);
+    }
+    if (!models) SKIP("no op0011 on this disc");
+}
+
 namespace {
 
 // The reflection primitives (kAdditive | kEnvironmentMap | kUnlit | kNoDepthWrite) of a model's body.
@@ -676,6 +1028,48 @@ TEST(car_reflection_hood_reads_its_pass_disc) {
         }
     CHECK(hood > 0);
     CHECK(flat == 0);
+}
+
+// Issue 378. The Celica GT-FOUR's rear window: the frame pass is alpha-tested with the window cut
+// out and the cabin, drawn before it, lies 5-33 cm behind, so the GS keeps the cabin's full alpha
+// (0x80) in the holes. The first reflection pass (destination alpha test: only where the alpha is
+// below 0x80) draws nothing there; the second, over the glass 5 mm inside the first one's
+// triangles, adds at full weight (each reflection leaves 0x80). Measured in the original's frame.
+// The corners alone (nothing written at most of them) gave the holes 0 and the glass the tint's
+// own alpha: a dark patch under the spoiler.
+TEST(car_reflection_rear_window_reads_the_cabin_disc) {
+    Disc* disc = test::test_disc();
+    if (!disc) SKIP("needs GT3R_DISC");
+    const auto* e = disc->volume().find("cars/day/ty0028"); // CELICA GT-FOUR (ST205)
+    if (!e) SKIP("no cars/day/ty0028 on this disc");
+    Bytes data = disc->volume().read(*e);
+    CarModelOptions o;
+    o.wheels = false;
+    scene::Model m = load_car_model(data, o, "ty0028");
+    const scene::Mesh& body = m.meshes.empty() ? scene::Mesh{} : m.meshes[0];
+    size_t holes = 0, glass = 0;
+    for (const scene::Primitive* p : reflection_prims(m))
+        for (u32 i = p->first_index; i + 2 < p->first_index + p->index_count; i += 3) {
+            float c[3] = {0, 0, 0};
+            u32 alpha = 0;
+            for (u32 j = 0; j < 3; ++j) {
+                const scene::Vertex& v = body.vertices[body.indices[i + j]];
+                for (int k = 0; k < 3; ++k) c[k] += v.pos[k] / 3;
+                alpha += v.color >> 24;
+            }
+            if (std::fabs(c[0]) > 0.6f || c[1] < 0.78f || c[2] < -0.8f || c[2] > -0.3f) continue; // the rear glass
+            if (p->flags & scene::kDestAlphaTest) {
+                if (p->under_ref < 0) continue;
+                ++holes;
+                CHECK(p->under_alpha == 1.0f);
+            } else {
+                ++glass;
+                CHECK(p->texture < 0);
+                CHECK(alpha == 3 * 255);
+            }
+        }
+    CHECK(holes > 0);
+    CHECK(glass > 0);
 }
 
 namespace {
@@ -1056,3 +1450,4 @@ TEST(wheel_stand_ins_disc) {
     ms.stand_in_rim = [&] { return asked = true, std::optional<Bytes>(); };
     CHECK(rim_verts(load_car_model(menu_file, ms, "mb0007"), 0) == rim_verts(menu, 0) && !asked);
 }
+

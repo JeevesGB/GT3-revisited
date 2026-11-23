@@ -17,8 +17,8 @@
 // The last choices are kept in config.ini [quickrace].
 //
 // The list's first item is a custom race, the player's own, on one page: any course, the laps
-// and the lineup (app/opponent_grid.h): one to five opponents, as many as the course's start
-// grid holds, and the player's car and place among them. It runs on the arcade's Normal race (Class S's, on dirt the dirt race's):
+// and the lineup (app/opponent_grid.h): one to 31 opponents, as many as the course's field holds
+// (course_field_size: its grid continued along its racing line), and the player's car and place among them. It runs on the arcade's Normal race (Class S's, on dirt the dirt race's):
 // that race's start and tyre wear, and its rubber band if the player turns catch-up on, which
 // would otherwise hold fast opponents back. Each opponent's skill is the driver overrides of
 // the arcade race of that difficulty; the values are the disc's. Custom races can be saved
@@ -32,10 +32,11 @@
 // Scripted runs (tests, screenshots):
 //   GT3R_QUICKRACE="event=Gsunday_e_0001,car=r34_gtr_v_99,paint=1,mt=1,start"
 // selects the event (its id or race code) and car; `start` starts the race at once,
-// `page=setup` / `page=cars` opens that page; `level=0..3` and `course=<label>` set the
+// `page=setup` / `page=cars` opens that page; `level=0..3` (a Concept disc 0..2) and `course=<label>` set the
 // arcade difficulty and course. A custom race: `page=custom` or `race=<saved name>` opens it,
 // with `course`, `car`, `paint`, `mt`, `laps=<n>`, `place=<n>` (1 pole), `catchup=1`,
-// `save=<name>`, `start` and `grid=<car>:<paint>:<skill>/...` (skill 0..3 easy .. professional).
+// `save=<name>`, `start` and `grid=<car>:<paint>:<skill>/...` (skill 0..3 easy .. professional; a Gran Turismo Concept
+// disc's levels 0..2 normal .. ace).
 
 #include "app/app.h"
 #include "app/gt_mode_titles.h"
@@ -49,6 +50,7 @@
 #include "base/log.h"
 #include "formats/course/course_file.h"
 #include "formats/course/road.h"
+#include "game/concept_game.h"
 #include "game/data/car_database.h"
 #include "game/gt_mode.h"
 #include "game/language_rules.h"
@@ -86,7 +88,7 @@ std::string ascii(const std::string& s) {
 
 bool starts(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
-enum class Kind { Race, Arcade, License, Machine, TimeAttack };
+enum class Kind { Race, Arcade, License, Machine, TimeAttack, Pod };
 
 struct QuickEvent {
     std::string id;    // [quickrace] event, GT3R_QUICKRACE event=: the race code, "arcade_<class>"
@@ -224,7 +226,7 @@ public:
         if (!error_.empty()) {
             ui.header("QUICK RACE", "");
             ui.text_center(150, error_, colors::kBad);
-            footer_actions(ui, "", {{"Triangle: back", kFootBack}}, hits_, kHitFooter, pointer_);
+            footer_actions(ui, "", {{"{Triangle}: back", kFootBack}}, hits_, kHitFooter, pointer_);
             return;
         }
         if (page_ == Page::Cars) {
@@ -251,6 +253,7 @@ private:
     // The custom race: the course, its rows and the car at the left, the lineup at the right, the buttons along the bottom.
     static constexpr float kLeftX = 8, kLeftW = 232, kLeftY = 110, kLeftH = 24, kGridX = 248, kGridR = 632, kGridY = 26;
     static constexpr float kButtonY = 316, kButtonH = 24;
+    static constexpr float kGridBottom = kButtonY - 4; // the lineup's rows scroll between kGridY and here
     static constexpr int kSetupCar = -1, kCustomCar = -2; // what the car page chooses, or an opponent's (0 ..)
     enum Hit { kHitRow, kHitLeft, kHitRight, kHitButton, kHitFooter };
     enum Foot { kFootChoose, kFootBack };
@@ -266,6 +269,7 @@ private:
             if (a.kind == K::Back) go_back(app);
             else if (a.kind == K::Hover || a.kind == K::Click) pointer_at(app, a);
             else if (page_ == Page::Events) scroll_list(a);
+            else if (page_ == Page::Custom) scroll_grid(a);
             if (page_ != page || naming_) return; // (the rest was for a page no longer on screen)
         }
     }
@@ -335,6 +339,35 @@ private:
         }
     }
 
+    // The custom race's lineup (a field bigger than its column): a drag or the wheel over it scrolls it.
+    float grid_content() const {
+        float h = 0;
+        for (int r = 0; r < grid_.rows(); ++r) h += grid_.row_h(r);
+        return h;
+    }
+    void clamp_grid_scroll() { grid_scroll_ = std::clamp(grid_scroll_, 0.0f, std::max(0.0f, grid_content() - (kGridBottom - kGridY))); }
+    void scroll_grid(const PointerInput::Action& a) {
+        using K = PointerInput::Action::Kind;
+        if (a.kind == K::DragEnd) {
+            grid_drag_ = false;
+        } else if (a.kind == K::Drag && a.sx >= kGridX && a.sy >= kGridY && a.sy < kGridBottom) {
+            if (!grid_drag_) grid_drag_ = true, drag_scroll_ = grid_scroll_;
+            grid_scroll_ = drag_scroll_ - (a.y - a.sy);
+        } else if (a.kind == K::Wheel && a.x >= kGridX) {
+            grid_scroll_ -= a.wheel * 3 * OpponentGrid::kCarH;
+        }
+        clamp_grid_scroll();
+    }
+    // Scrolls the lineup so the focused row (a key move) is in view.
+    void follow_grid() {
+        const std::vector<CustomRow> rows = custom_rows();
+        if (custom_sel_ < 0 || size_t(custom_sel_) >= rows.size() || rows[size_t(custom_sel_)].kind != CRow::Grid) return;
+        const UiRect& r = rows[size_t(custom_sel_)].r;
+        if (r.y < kGridY) grid_scroll_ -= kGridY - r.y;
+        else if (r.y + r.h > kGridBottom) grid_scroll_ += r.y + r.h - kGridBottom;
+        clamp_grid_scroll();
+    }
+
     // --- data -------------------------------------------------------------------
 
     void init(App& app) {
@@ -350,6 +383,7 @@ private:
         auto data = std::make_shared<game::GtData>();
         if (!data->load(menu::flow::vfs_reader(*app.vfs()))) LOG_WARN("Quick race: GT mode data: %s", data->error().c_str());
         gt_ = std::make_unique<game::GtMode>(data);
+        concept_ = data->game == GameKind::Concept;
         for (const data::Car& c : db_.cars()) {
             std::string model = db_.model_of(c);
             if (model.empty() || !app.vfs()->exists("cars/day/" + model)) continue; // as the race screen lists them
@@ -379,7 +413,11 @@ private:
             if (c.label.rfind("L_", 0) != 0 && has_course(app, c.label))
                 courses_.push_back({c.label, ascii(c.name.empty() ? c.label : c.name)});
         grid_.attach(cars_, art_, car_picker_, [this](const std::string& l) { return grid_car(l); });
-        if (db_.event(arcade_code("S", 1)) && !courses_.empty()) {
+        // A Gran Turismo Concept disc: its single-race levels for skills, each car's own race (game::concept_car_race).
+        grid_.set_concept_levels(concept_);
+        const bool custom_race = concept_ ? !game::concept_car_race(gt_->data(), "", "", 0, false).empty()
+                                          : db_.event(arcade_code("S", 1)) != nullptr;
+        if (custom_race && !courses_.empty()) {
             has_custom_ = true;
             read_custom(app.config(), kCustomSection);
             custom_defaults(app);
@@ -393,7 +431,7 @@ private:
         car_ = find_car(cfg.get("quickrace", "car").value_or(""));
         paint_ = std::max(0, std::atoi(cfg.get("quickrace", "paint").value_or("0").c_str()));
         manual_ = cfg.get("quickrace", "gearbox").value_or("at") == "mt";
-        level_ = std::clamp(std::atoi(cfg.get("quickrace", "level").value_or("1").c_str()), 0, 3);
+        level_ = std::clamp(std::atoi(cfg.get("quickrace", "level").value_or("1").c_str()), 0, levels() - 1);
         arcade_course_ = cfg.get("quickrace", "course").value_or("");
         select_event(cfg.get("quickrace", "event").value_or(""));
         center_row();
@@ -476,6 +514,9 @@ private:
         }
         // Arcade single race: one entry per car class; the difficulty and course are chosen
         // in the setup, as on the arcade pages. Race codes A{E,N,H,P}{C,B,A,S}T0001, dirt A?AD0001.
+        // A Gran Turismo Concept disc: its license tests, Single Race on road and dirt courses (each car's own race at the
+        // level chosen, game::concept_car_race) and the pod race.
+        if (concept_) build_concept_events(app, data, add);
         {
             Category c{"Arcade Single Race", {}};
             static const std::pair<const char*, const char*> kClasses[] = {
@@ -511,6 +552,49 @@ private:
             if (!c.events.empty()) categories_.push_back(std::move(c));
         }
         LOG_INFO("Quick race: %zu events in %zu categories, %zu cars", events_.size(), categories_.size(), cars_.size());
+    }
+
+    // A Gran Turismo Concept disc's events: its ten license tests (each with its test car), Single Race on road courses
+    // and on dirt courses, and the pod race (the pod car on the pod course).
+    template <class Add> void build_concept_events(App& app, const game::GtData& data, Add& add) {
+        auto playable = [&](const std::string& code) {
+            const data::Event* ev = db_.event(code);
+            return ev && has_course(app, ev->course);
+        };
+        if (auto it = data.arcade_classes.find("CLASS_LICENSE"); it != data.arcade_classes.end()) {
+            Category c{"License Tests", {}};
+            for (size_t i = 0; i < it->second.size(); ++i) {
+                const game::GtData::ArcadeCar& a = it->second[i];
+                if (a.race_code.empty() || !playable(a.race_code)) continue;
+                add(c, {a.race_code, a.race_code, "License " + std::to_string(i + 1) + " - " + course_name(db_.event(a.race_code)->course),
+                        Kind::License, {}, a.label});
+            }
+            if (!c.events.empty()) categories_.push_back(std::move(c));
+        }
+        {
+            Category c{"Single Race", {}};
+            for (const auto& [cls, name] : {std::pair<const char*, const char*>{"S", "Single Race"}, {"D", "Single Race - Dirt"}}) {
+                const std::string code = game::concept_car_race(data, "", "", 0, std::string(cls) == "D");
+                if (!code.empty() && game::concept_dirt_entry(concept_entry_of(data, code)) == (std::string(cls) == "D"))
+                    add(c, {std::string("concept_") + cls, code, name, Kind::Arcade, cls, {}});
+            }
+            if (!c.events.empty()) categories_.push_back(std::move(c));
+        }
+        const auto pod = data.arcade_classes.find("CLASS_PODRACE");
+        if (pod != data.arcade_classes.end() && !pod->second.empty() && playable(pod->second[0].race_code)) {
+            Category c{"Pod Race", {}};
+            add(c, {pod->second[0].race_code, pod->second[0].race_code, "Pod Race", Kind::Pod, {}, pod->second[0].label});
+            categories_.push_back(std::move(c));
+        }
+    }
+
+    // The class entry whose race a Concept code is (its label; "" = none).
+    static std::string concept_entry_of(const game::GtData& data, const std::string& code) {
+        for (const auto& [cls, list] : data.arcade_classes)
+            for (const game::GtData::ArcadeCar& a : list)
+                for (int level = 0; level < game::kConceptLevels; ++level)
+                    if (!a.race_code.empty() && game::concept_race_code(a.race_code, level) == code) return a.label;
+        return {};
     }
 
     // "L0B0003" -> "B-3", "LIA0007" -> "IA-7", "L0R0001" -> "R-1".
@@ -574,8 +658,16 @@ private:
     // The race code to run (arcade: of the chosen difficulty).
     std::string event_code() const {
         const QuickEvent& e = event();
-        return e.kind == Kind::Arcade ? arcade_code(e.arcade_class, level_) : e.code;
+        if (e.kind != Kind::Arcade) return e.code;
+        if (!concept_) return arcade_code(e.arcade_class, level_);
+        // A Concept disc: the car's own race at the level, else the first race of the course's kind at that level.
+        const bool dirt = e.arcade_class == "D";
+        std::string code;
+        if (own_car_ && car_ >= 0 && size_t(car_) < cars_.size()) code = concept_race(cars_[size_t(car_)].label, level_, dirt);
+        return code.empty() ? game::concept_race_code(e.code, level_) : code;
     }
+    // The levels of an arcade race: GT3's four difficulties, a Concept disc's three single-race levels.
+    int levels() const { return concept_ ? OpponentGrid::kConceptSkills : OpponentGrid::kSkills; }
 
     // The courses an arcade class races on: dirt courses for the dirt class, else the others.
     std::vector<std::string> arcade_courses() const {
@@ -681,7 +773,8 @@ private:
     }
 
     void render_events(App& app, Ui& ui) {
-        ui.header("QUICK RACE", "Any event, any car - practice: nothing goes into the GT Mode save");
+        ui.header("QUICK RACE", concept_ ? "Any event, any car - practice: nothing goes into the game's save"
+                                         : "Any event, any car - practice: nothing goes into the GT Mode save");
         for (int i = 0; i < kListRows && list_first_ + i < int(rows_.size()); ++i) {
             const ListRow& r = rows_[size_t(list_first_ + i)];
             float y = kListY + float(i) * kRowH;
@@ -698,7 +791,7 @@ private:
         ui.scrollbar(UiRect{8, kListY, kListW - 6, kListRows * kRowH}, float(rows_.size()) * kRowH, float(list_first_) * kRowH);
         if (const int c = rows_[size_t(row_)].custom; c >= 0) render_custom_info(app, ui, c ? saved_[size_t(c - 1)] : last_custom_);
         else render_info(app, ui, true);
-        footer_actions(ui, "Up/Down: event   L1/R1 or Left/Right: category", {{"Cross: choose", kFootChoose}, {"Triangle: back", kFootBack}},
+        footer_actions(ui, "{Up/Down}: event   {L1}/{R1} or {Left/Right}: category", {{"{Cross}: choose", kFootChoose}, {"{Triangle}: back", kFootBack}},
                        hits_, kHitFooter, pointer_);
     }
 
@@ -749,9 +842,9 @@ private:
             else if (e.kind == Kind::TimeAttack) laps = std::to_string(race::kTimeTrialLaps) + " lap"; // (presentation §B7)
             else if (ev->laps == 0 && st.time_limit_s > 0) laps = std::to_string(int(st.time_limit_s / 60 + 0.5)) + " minutes";
             else if (ev->laps) laps = std::to_string(ev->laps) + (ev->laps == 1 ? " lap" : " laps");
-            if (!laps.empty()) line(e.kind == Kind::Race || e.kind == Kind::Arcade ? "Race" : "Run", laps);
+            if (!laps.empty()) line(e.kind == Kind::Race || e.kind == Kind::Arcade || e.kind == Kind::Pod ? "Race" : "Run", laps);
             std::optional<game::EventRules> r = gt_ ? gt_->rules(code) : std::nullopt;
-            if (e.kind == Kind::Race || e.kind == Kind::Arcade)
+            if (e.kind == Kind::Race || e.kind == Kind::Arcade || e.kind == Kind::Pod)
                 line("Field", std::to_string(r && r->cars ? r->cars : int(ev->cars_in_race)) + " cars");
             if (r && e.kind == Kind::License && r->license_ms[0]) {
                 std::string t = "gold " + lap_time(r->license_ms[0] / 1000.0);
@@ -885,7 +978,7 @@ private:
             break;
         case Row::Colour: paint_ = (paint_ + (h < 0 ? -1 : 1) + paint_count(app)) % paint_count(app); break;
         case Row::Gearbox: manual_ = !manual_; break;
-        case Row::Level: level_ = (level_ + (h < 0 ? -1 : 1) + 4) % 4; break;
+        case Row::Level: level_ = (level_ + (h < 0 ? -1 : 1) + levels()) % levels(); break;
         case Row::Course: {
             std::vector<std::string> list = arcade_courses();
             if (list.empty()) break;
@@ -954,7 +1047,7 @@ private:
                 break;
             }
             case Row::Gearbox: label = "Transmission"; value = manual_ ? "Manual" : "Automatic"; break;
-            case Row::Level: label = "Difficulty"; value = OpponentGrid::skill_name(level_); break;
+            case Row::Level: label = concept_ ? "Level" : "Difficulty"; value = OpponentGrid::skill_name(level_, concept_); break;
             case Row::Course: label = "Course"; value = course_name(event_course()); break;
             case Row::Start: label = "Start race"; break;
             }
@@ -962,7 +1055,7 @@ private:
             if (rows[i] != Row::Start) value_arrows(ui, arrows, value, colors::kText, hits_, kHitLeft, kHitRight, int(i), pointer_, indent);
         }
         if (!last_result_.empty()) ui.text(330, Ui::kHeight - 30, Ui::clip(last_result_, 302), colors::kGood);
-        footer_actions(ui, "Up/Down: choose   Left/Right: change", {{"Cross: choose", kFootChoose}, {"Triangle: events", kFootBack}}, hits_,
+        footer_actions(ui, "{Up/Down}: choose   {Left/Right}: change", {{"{Cross}: choose", kFootChoose}, {"{Triangle}: events", kFootBack}}, hits_,
                        kHitFooter, pointer_);
     }
 
@@ -1020,23 +1113,44 @@ private:
             custom_.paint = 0;
         }
         const data::Event* ev = db_.event(custom_event());
-        grid_.fill(app, ev ? ev->entries : std::vector<std::string>{}, custom_.car, OpponentGrid::kMaxCars);
+        grid_.fill(app, ev ? ev->entries : std::vector<std::string>{}, custom_.car, OpponentGrid::kDefaultCount);
         grid_.set_limit(course_grid_limit(app, custom_.course));
         grid_.set_player(custom_.car, custom_.paint);
     }
 
-    // The arcade race a custom race runs on.
-    std::string custom_event() const { return arcade_code(dirt_course(custom_.course) ? "D" : "S", 1); }
+    // The arcade race a custom race runs on; a Concept disc's: the player's car's own single race at Normal (another car's
+    // when it has none).
+    std::string custom_event() const {
+        const bool dirt = dirt_course(custom_.course);
+        if (!concept_) return arcade_code(dirt ? "D" : "S", 1);
+        std::string code;
+        if (custom_.car >= 0 && size_t(custom_.car) < cars_.size()) code = concept_race(cars_[size_t(custom_.car)].label, 0, dirt);
+        return code.empty() ? game::concept_car_race(gt_->data(), "", "", 0, dirt) : code;
+    }
 
-    // The event a skill takes its driver overrides from; "" = none on this disc.
-    std::string skill_event(int skill) const {
-        std::string code = OpponentGrid::skill_race(skill, dirt_course(custom_.course));
+    // A car's own single race at a Concept level: the car by its label (an arcade car, a database car or an event's entry).
+    std::string concept_race(const std::string& label, int level, bool dirt) const {
+        std::string car = db_.car(label) ? label : std::string();
+        if (car.empty())
+            if (const data::CarVariant* v = db_.variant(label)) car = v->car;
+        if (car.empty())
+            for (const data::CarVariant& v : db_.arcade_cars())
+                if (v.label == label) car = v.car;
+        return game::concept_car_race(gt_->data(), label, car, level, dirt);
+    }
+
+    // The event a skill takes its driver overrides from for a car (`label`, the opponent's); "" = none on this disc. GT3:
+    // the arcade race of that difficulty; a Concept disc: the car's own single race at that level.
+    std::string skill_event(int skill, const std::string& label) const {
+        const bool dirt = dirt_course(custom_.course);
+        if (concept_) return concept_race(label, skill, dirt);
+        std::string code = OpponentGrid::skill_race(skill, dirt);
         return db_.event(code) ? code : std::string();
     }
 
     // What a skill sets in a car's driver, in the disc's numbers (the first driveline class's, ai §9.2).
-    std::string skill_facts(int skill) const {
-        const data::Event* ev = db_.event(skill_event(skill));
+    std::string skill_facts(int skill, const std::string& label) const {
+        const data::Event* ev = db_.event(skill_event(skill, label));
         if (!ev || ev->bytes.size() < 0x1F4) return {};
         const sim::exact::DriverOverrides d = sim::exact::driver_overrides(sim::exact::race_config(ev->bytes));
         auto pct = [](u8 v) { return std::to_string(v == 0 || v > 100 ? 100 : int(v)) + "%"; };
@@ -1047,7 +1161,7 @@ private:
     int course_grid_limit(App& app, const std::string& course) {
         auto [it, fresh] = grid_limits_.try_emplace(course, OpponentGrid::kMaxCars);
         if (fresh)
-            if (const int slots = course_grid_size(*app.vfs(), course); slots > 0) it->second = std::clamp(slots - 1, 1, OpponentGrid::kMaxCars);
+            if (const int slots = course_field_size(*app.vfs(), course); slots > 0) it->second = std::clamp(slots - 1, 1, OpponentGrid::kMaxCars);
         return it->second;
     }
 
@@ -1241,7 +1355,7 @@ private:
             rows.push_back({k, -1, {kLeftX, y, kLeftW, kLeftH}});
             y += kLeftH;
         }
-        y = kGridY;
+        y = kGridY - grid_scroll_;
         for (int r = 0; r < grid_.rows(); ++r) {
             rows.push_back({CRow::Grid, r, {kGridX, y, kGridR - kGridX, grid_.row_h(r)}});
             y += grid_.row_h(r);
@@ -1264,6 +1378,7 @@ private:
             custom_sel_ = (custom_sel_ + v + n) % n;
             delete_armed_ = false;
             picker_sound(app, "cursor");
+            follow_grid();
         }
         custom_sel_ = std::clamp(custom_sel_, 0, n - 1);
         int h = m.horizontal();
@@ -1286,7 +1401,7 @@ private:
             auto it = std::find_if(courses_.begin(), courses_.end(), [&](const PickerCourse& c) { return c.label == custom_.course; });
             const int n = int(courses_.size()), i = it == courses_.end() ? 0 : int(it - courses_.begin());
             if (cross) {
-                course_picker_.set_labels("Custom race", "Triangle: back");
+                course_picker_.set_labels("Custom race", "{Triangle}: back");
                 course_picker_.open(courses_, i, [this](const std::string& c) { return course_length(c); });
                 page_ = Page::Courses;
                 picker_sound(app, "ok");
@@ -1333,19 +1448,20 @@ private:
     // What the row under the cursor does, for the footer.
     std::string custom_hint(const CustomRow& row) const {
         if (row.kind == CRow::CatchUp) return "Catch-up: cars far ahead of you slow down, cars far behind you speed up";
-        if (row.kind != CRow::Grid) return "Up/Down: choose   Left/Right: change";
+        if (row.kind != CRow::Grid) return "{Up/Down}: choose   {Left/Right}: change";
         if (row.grid == OpponentGrid::kSkillRow) return "Sets every opponent's skill at once";
         if (row.grid == OpponentGrid::kPlaceRow) return "Where you start, 1st on pole";
         if (row.grid == OpponentGrid::kCountRow)
             return grid_.limit() < OpponentGrid::kMaxCars ? "This course's grid has room for " + std::to_string(grid_.limit()) + " opponents"
-                                                          : "Up/Down: choose   Left/Right: change";
+                                                          : "{Up/Down}: choose   {Left/Right}: change";
         const int who = grid_.who(row.grid);
-        if (who == OpponentGrid::kPlayer) return "Cross: your car and colour";
+        if (who == OpponentGrid::kPlayer) return "{Cross}: your car and colour";
         const int skill = grid_.car(who).skill;
-        return std::string(OpponentGrid::skill_name(skill)) + ": " + skill_facts(skill);
+        return std::string(OpponentGrid::skill_name(skill, concept_)) + ": " + skill_facts(skill, grid_.car(who).label);
     }
 
     void render_custom(App& app, Ui& ui) {
+        clamp_grid_scroll(); // (the lineup may have shrunk)
         ui.header("QUICK RACE", saved_name_.empty() ? "Custom race" : "Custom race: " + saved_name_);
         grid_.set_player(custom_.car, custom_.paint);
         const std::vector<CustomRow> rows = custom_rows();
@@ -1354,7 +1470,8 @@ private:
             const UiRect& b = r.r;
             const bool f = int(i) == custom_sel_;
             if (r.kind == CRow::Grid) {
-                grid_.render_row(app, ui, r.grid, b, f, {hits_, pointer_, kHitRow, kHitLeft, kHitRight, int(i)});
+                if (b.y >= kGridY - 0.5f && b.y + b.h <= kGridBottom + 0.5f) // (the rows scrolled out of the column: not drawn)
+                    grid_.render_row(app, ui, r.grid, b, f, {hits_, pointer_, kHitRow, kHitLeft, kHitRight, int(i)});
                 continue;
             }
             if (r.kind == CRow::Save || r.kind == CRow::Delete || r.kind == CRow::Start) {
@@ -1377,6 +1494,8 @@ private:
             const float vx = label.empty() ? b.x + 2 : b.x + 78;
             value_arrows(ui, {vx, b.y + 1, b.right() - vx - 2, b.h - 4}, value, colors::kText, hits_, kHitLeft, kHitRight, int(i), pointer_);
         }
+        if (const float content = grid_content(); content > kGridBottom - kGridY)
+            ui.scrollbar(UiRect{kGridX, kGridY, kGridR - kGridX + 6, kGridBottom - kGridY}, content, grid_scroll_);
         // The course, and the car under the cursor (an opponent's, else the player's).
         course_art(app, ui, custom_.course, SDL_FRect{kLeftX + 2, 28, kLeftW - 4, 76});
         const CustomRow& at = rows[size_t(std::clamp(custom_sel_, 0, int(rows.size()) - 1))];
@@ -1388,7 +1507,7 @@ private:
         turntable_.draw(app, stage, db_, shown, opponent ? grid_.car(who).paint : custom_.paint, art_);
         ui.text(stage.x + 8, stage.y + 6, Ui::clip(shown.name, stage.w - 16), colors::kText);
         if (!last_result_.empty()) ui.text(stage.x + 8, stage.y + stage.h - 12, Ui::clip(last_result_, stage.w - 16), colors::kGood);
-        footer_actions(ui, custom_hint(at), {{"Cross: choose", kFootChoose}, {"Triangle: back", kFootBack}}, hits_, kHitFooter, pointer_);
+        footer_actions(ui, custom_hint(at), {{"{Cross}: choose", kFootChoose}, {"{Triangle}: back", kFootBack}}, hits_, kHitFooter, pointer_);
     }
 
     void update_courses(App& app) {
@@ -1418,11 +1537,13 @@ private:
             const OpponentGrid::Car& g = grid_.car(k);
             rq.opponents.push_back(g.label);
             rq.opponent_paints.push_back(g.paint);
-            rq.opponent_skills.push_back(skill_event(g.skill));
-            LOG_INFO("Quick race: opponent %d: %s, paint %d, %s", k + 1, g.label.c_str(), g.paint, OpponentGrid::skill_name(g.skill));
+            rq.opponent_skills.push_back(skill_event(g.skill, g.label));
+            LOG_INFO("Quick race: opponent %d: %s, paint %d, %s (%s)", k + 1, g.label.c_str(), g.paint,
+                     OpponentGrid::skill_name(g.skill, concept_), rq.opponent_skills.back().c_str());
         }
         rq.no_rubber_band = !custom_.catch_up;
         rq.player_slot = grid_.player_place();
+        rq.big_field = true;
         LOG_INFO("Quick race: custom race at %s, %d laps, with %s", custom_.course.c_str(), custom_.laps, rq.car.c_str());
         remember(app);
         (void)menu::flow::take_game_result(); // nothing stale from earlier races
@@ -1446,16 +1567,25 @@ private:
             rq.mode = "single_race";
             rq.difficulty = level_;
             rq.course = event_course();
-            rq.car_class = e.arcade_class == "D" ? "class_dirt" : "class_" + std::string(1, char(std::tolower(e.arcade_class[0])));
+            if (!concept_) // (a Concept disc's race is the car's own: no class)
+                rq.car_class = e.arcade_class == "D" ? "class_dirt" : "class_" + std::string(1, char(std::tolower(e.arcade_class[0])));
             break;
-        case Kind::License: rq.mode = "go_license"; break;
+        case Kind::License:
+            rq.mode = "go_license";
+            if (concept_) rq.course = event_course(); // (Concept's tests: the course from the test's race)
+            break;
         case Kind::Machine: rq.mode = "go_machine_test"; break;
         case Kind::TimeAttack: rq.mode = "time_trial"; break;
+        case Kind::Pod: // (Concept's pod race: the pod class's race, its pods as they are)
+            rq.mode = "single_race";
+            rq.course = event_course();
+            rq.car_class = "CLASS_PODRACE";
+            break;
         }
         // The test's own car: the licence test's entry 0 (empty: the race screen takes it with
-        // its parts and colour), the time trial's arcade car.
+        // its parts and colour), the time trial's arcade car, the pod.
         if (own_car_) rq.car = car_key(cars_[size_t(car_)]);
-        else if (e.kind == Kind::TimeAttack) rq.car = e.test_car;
+        else if (e.kind == Kind::TimeAttack || e.kind == Kind::Pod || (concept_ && e.kind == Kind::License)) rq.car = e.test_car;
         rq.car_color = own_car_ ? paint_ : 0;
         rq.transmission = manual_ ? 1 : 0;
         LOG_INFO("Quick race: %s (%s) with %s, paint %d, %s", e.name.c_str(), rq.event.c_str(),
@@ -1514,7 +1644,7 @@ private:
             if (k < 0) k = find_car(base_car(s.car));
             if (k >= 0) car_ = k;
         }
-        if (s.level >= 0) level_ = s.level;
+        if (s.level >= 0) level_ = std::min(s.level, levels() - 1);
         if (!s.course.empty()) arcade_course_ = s.course;
         if (s.mt >= 0) manual_ = s.mt != 0;
         if (s.page.empty() && !s.start) return;
@@ -1563,6 +1693,7 @@ private:
     Page page_ = Page::Events;
     int row_ = 0, list_first_ = 0, setup_sel_ = 0;
     int car_ = -1, paint_ = 0, level_ = 1;
+    bool concept_ = false; // a Gran Turismo Concept disc (its skills: game::concept_car_race)
     bool own_car_ = true, manual_ = false;
     std::string arcade_course_;
     // The custom race on the page (the last one or a saved one, in config.ini).
@@ -1589,7 +1720,9 @@ private:
     PointerInput pointer_; // the list, the setup and the custom race (the pickers have their own)
     HitList hits_;
     bool list_drag_ = false;
-    int drag_first_ = 0;   // the list's first row when a drag began
+    int drag_first_ = 0;
+    float grid_scroll_ = 0, drag_scroll_ = 0; // the custom race's lineup: scrolled by (UI units), when a drag began
+    bool grid_drag_ = false;   // the list's first row when a drag began
     PickerArt art_;
     CarPicker car_picker_;
     CoursePicker course_picker_;

@@ -1,5 +1,6 @@
 #include "race/results.h"
 
+#include "base/ee_float.h"
 #include "base/log.h"
 #include "formats/menu/mbl.h"
 #include "game/data/car_database.h"
@@ -185,7 +186,15 @@ void ResultsOverlay::draw(SDL_Renderer* r, text::GameFonts& fonts, const std::ve
     const menu::Element* seiko = find(page, "z9_seiko");
     if (!title || !bar) return;
     Frame f{dst};
-    size_t n = rows.size();
+    // The rows shown (GT3's races have 6 cars, room for kShownRows): a bigger field's first kShownRows - 1 and the player's
+    // row, each with its own place.
+    std::vector<size_t> shown;
+    for (size_t i = 0; i < rows.size() && shown.size() < kShownRows; ++i) shown.push_back(i);
+    if (rows.size() > kShownRows) {
+        const auto mine = std::find_if(rows.begin(), rows.end(), [](const ResultRow& w) { return w.player; });
+        if (mine != rows.end() && size_t(mine - rows.begin()) >= kShownRows) shown.back() = size_t(mine - rows.begin());
+    }
+    size_t n = shown.size();
     // Bars: title (52 high) at y 44, then the rows and the term bar unroll downwards: each
     // bar's centre approaches (hPrev + hOwn) / 2 below the previous one by 0.19 per frame.
     // Without per-frame state we evaluate the closed form of that approach.
@@ -236,16 +245,17 @@ void ResultsOverlay::draw(SDL_Renderer* r, text::GameFonts& fonts, const std::ve
     // time (t_time right edge 612 - 12; the reference capture).
     for (size_t i = 0; i < n; ++i) {
         if (row_alpha[i] * view.alpha <= 0) continue;
+        const size_t k = shown[i];
         u8 a = u8(255 * row_alpha[i] * view.alpha);
         SDL_Color others{0xCC, 0xCC, 0xCC, a}, mine{0xFF, 0xC8, 0x00, a};
-        SDL_Color c = rows[i].player ? mine : others;
+        SDL_Color c = rows[k].player ? mine : others;
         float y = row_top[i] + 18;
-        text(r, fonts, f, 24 + 18, y, std::to_string(i + 1), "rank#1", 0.5f, 0.5f, others, text::HAlign::Center,
+        text(r, fonts, f, 24 + 18, y, std::to_string(k + 1), "rank#1", 0.5f, 0.5f, others, text::HAlign::Center,
              text::VAlign::Middle);
-        if (icons) (*icons)[i] = {f.x(66), f.y(y - 13), 58 * f.sx(), 26 * f.sy()}; // car picture at 66..124
-        text(r, fonts, f, 144, y, rows[i].name, "sw_16#1", 0.87f, 1.0f, c, text::HAlign::Left,
+        if (icons) (*icons)[k] = {f.x(66), f.y(y - 13), 58 * f.sx(), 26 * f.sy()}; // car picture at 66..124
+        text(r, fonts, f, 144, y, rows[k].name, "sw_16#1", 0.87f, 1.0f, c, text::HAlign::Left,
              text::VAlign::Middle, kGameText);
-        text(r, fonts, f, 600, y, rows[i].time, "sw_16#1", 0.87f, 1.0f, c, text::HAlign::Right, text::VAlign::Middle);
+        text(r, fonts, f, 600, y, rows[k].time, "sw_16#1", 0.87f, 1.0f, c, text::HAlign::Right, text::VAlign::Middle);
     }
 }
 
@@ -357,13 +367,121 @@ void LicenseResultOverlay::draw_fail(SDL_Renderer* r, text::GameFonts& fonts, in
     float ft = std::clamp(float(frame - s) / 60.0f, 0.0f, 1.0f);
     SDL_Color c{160, 192, 64, u8(255 * std::min(1.0f, 2 * t2))}; // u8(t2 x 256) in 0x80 units: full from t2 = 0.5
     float split = float(int((1 - t2) * 30));
-    text(r, fonts, f, 320, 224 - split, msg, "sw_20", 1.25f, 1.25f, c, text::HAlign::Center, text::VAlign::Middle);
+    text(r, fonts, f, 320, 224 - split, msg, "sw_20", 1.25f, 1.25f, c, text::HAlign::Center, text::VAlign::Middle, kGameText);
     if (split > 0)
-        text(r, fonts, f, 320, 224 + split, msg, "sw_20", 1.25f, 1.25f, c, text::HAlign::Center, text::VAlign::Middle);
+        text(r, fonts, f, 320, 224 + split, msg, "sw_20", 1.25f, 1.25f, c, text::HAlign::Center, text::VAlign::Middle,
+             kGameText);
     if (time >= 0) {
         SDL_Color tc{160, 192, 64, u8(255 * ft)};
         text(r, fonts, f, 320, 140, Hud::format_time(time), "sw_20", 1.25f, 1.25f, tc, text::HAlign::Center, text::VAlign::Middle);
     }
+}
+
+// --- ConceptExamMessage ----------------------------------------------------------
+
+namespace {
+
+// SimpleExamMessages' update, then its timer's count: one call each a step.
+struct ExamMessageState {
+    int state = 0, timer = -1;
+    ee::F fade;
+    bool held = false, done = false;
+    void step(bool stay) {
+        const ee::F k = ee::F::raw(ConceptExamMessage::kFadeStepBits), one(1.0f), zero(0.0f);
+        switch (state) {
+        case 0: // started: the fade from 0, and on into state 1 in the same step
+            state = 1;
+            fade = zero;
+            [[fallthrough]];
+        case 1:
+            fade += k;
+            if (fade >= one) timer = ConceptExamMessage::kHold, state = 2;
+            break;
+        case 2:
+            if (timer > 0) break;
+            fade = one;
+            if (stay) held = true; // (state 2 again every step)
+            else state = 3;
+            break;
+        case 3:
+            fade -= k;
+            if (fade < zero) done = true, timer = 120, state = 4; // (the timer: Geneva Europe 100, nothing reads it)
+            break;
+        default: break;
+        }
+        if (timer >= 0) --timer;
+    }
+};
+
+} // namespace
+
+ConceptExamMessage::Look ConceptExamMessage::at(int step, bool stay) {
+    Look l;
+    if (step < start_step()) return l;
+    ExamMessageState m;
+    for (int i = start_step(); i < step && !m.done && !m.held; ++i) m.step(stay); // (held: nothing changes after)
+    if (m.done) return l;
+    l.shown = true;
+    l.held = m.held;
+    l.fade = m.fade.host();
+    return l;
+}
+
+int ConceptExamMessage::fade_in_steps() {
+    static const int n = [] {
+        ExamMessageState m;
+        int i = 0;
+        while (m.state < 2) m.step(false), ++i;
+        return i;
+    }();
+    return n;
+}
+
+int ConceptExamMessage::fade_out_steps() {
+    static const int n = [] {
+        ExamMessageState m;
+        m.state = 3;
+        m.fade = ee::F(1.0f);
+        int i = 0;
+        while (!m.done) m.step(false), ++i;
+        return i;
+    }();
+    return n;
+}
+
+int ConceptExamMessage::alpha128(float fade) {
+    // EE: fade x 128 (exact, a power of two), converted toward zero, the low byte.
+    return int(std::trunc(double(fade) * 128.0)) & 0xFF;
+}
+
+int ConceptExamMessage::split(float fade) {
+    return int((1.0 - double(fade)) * 30.0); // (a double, converted toward zero)
+}
+
+SDL_FRect ConceptExamMessage::text_frame(const SDL_FRect& dst, bool wide) {
+    if (!wide) return dst;
+    const float w = dst.h * 4.0f / 3.0f;
+    return {dst.x + (dst.w - w) / 2, dst.y, w, dst.h};
+}
+
+void ConceptExamMessage::draw(SDL_Renderer* r, text::GameFonts& fonts, const Look& look, const std::string& msg,
+                              const SDL_FRect& dst, bool wide) {
+    if (!look.shown) return;
+    const int a = alpha128(look.fade);
+    // GS alpha in 0x80 units -> SDL's 0..255 (an alpha above 0x80, the fade-in's last step, drawn full)
+    auto to_u8 = [](int a128) { return u8(std::lround(255.0 * std::min(a128, 0x80) / 128.0)); };
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 160, 160, 255, to_u8(a >> 1));
+    SDL_RenderFillRect(r, &dst); // (wide: the original's -107 for 855, the whole 16:9 screen)
+    // Wide: the original's 0.75 x scale on its stretched 16:9 picture is the frame's own 4:3 shape on ours.
+    Frame f{text_frame(dst, wide)};
+    const SDL_Color c{160, 192, 64, to_u8(a)};
+    const int s = split(look.fade);
+    text(r, fonts, f, 320, float(224 + s), msg, "sw_20", 1.5f, 1.5f, c, text::HAlign::Center, text::VAlign::Middle,
+         kGameText);
+    if (s != 0)
+        text(r, fonts, f, 320, float(224 - s), msg, "sw_20", 1.5f, 1.5f, c, text::HAlign::Center,
+             text::VAlign::Middle, kGameText);
 }
 
 // --- QuickMenu -------------------------------------------------------------------
@@ -430,7 +548,8 @@ bool QuickMenu::load(const menu::flow::FileReader& read, SDL_Renderer* r, text::
         return false;
     }
     renderer_ = std::make_unique<menu::MenuRenderer>(r);
-    if (fonts.loaded()) renderer_->set_text_drawer(menu::make_game_font_drawer(fonts));
+    fonts_ = fonts.loaded() ? &fonts : nullptr;
+    if (fonts_) renderer_->set_text_drawer(menu::make_game_font_drawer(fonts));
     return true;
 }
 
@@ -448,6 +567,8 @@ bool QuickMenu::add_page_layout(const Vfs& vfs, SDL_Renderer* r, const std::stri
     }
     inset_renderer_ = std::make_unique<menu::MenuRenderer>(r);
     inset_renderer_->set_scene(&*inset_);
+    if (fonts_) inset_renderer_->set_text_drawer(menu::make_game_font_drawer(*fonts_)); // (a Concept briefing's text line)
+    inset_age_ = 0;
     return true;
 }
 
@@ -498,6 +619,7 @@ QuickMenu::Choice QuickMenu::update(u16 held, double dt) {
     while (acc_ >= 1.0 / 60.0 && n < 8) {
         acc_ -= 1.0 / 60.0;
         ++n;
+        ++inset_age_;
         Choice c = tick(held);
         if (!c.empty() && out.empty()) out = c;
         if (!out.empty()) break; // the caller acts on it before the next frame
@@ -603,7 +725,7 @@ std::vector<ResultRow> result_menu_list(ResultList kind, bool finished, std::vec
 }
 
 bool practice_regrids(std::span<const u32> best) {
-    return !best.empty() && best[0] < kPracticeNoTime; // (a time below GT3's "no time")
+    return !best.empty() && best[0] < kPracticeNoTime; // (0x12E968, 0x133B40: a time below GT3's "no time")
 }
 
 std::vector<int> practice_grid(std::span<const u32> best) {
@@ -625,7 +747,7 @@ std::vector<int> practice_grid(std::span<const u32> best) {
 void practice_list_times(std::vector<ResultRow>& rows, std::span<const u32> best) {
     for (ResultRow& r : rows) {
         const size_t e = size_t(r.car + 1); // the entry: 0 the player, k opponent k - 1
-        r.time = menu_time_text(r.car >= -1 && e < best.size() ? best[e] : kPracticeNoTime);
+        r.time = menu_time_text(r.car >= -1 && e < best.size() ? best[e] : kPracticeNoTime); // (fn_0023B930)
     }
 }
 
@@ -666,7 +788,17 @@ void QuickMenu::draw(SDL_Renderer*, const SDL_FRect& dst) {
     if (inset_ && on_root() && !inset_->file().pages.empty()) {
         menu::SceneOptions io;
         io.show_items = false;
-        inset_renderer_->draw(0, io, ro, dst);
+        // Its texts with their style's effects from the page's start (a Concept briefing's tips line is a marquee).
+        std::vector<menu::ElementDraw> parts;
+        for (const menu::DrawItem& it : inset_->draw_list(0, io)) {
+            menu::ElementDraw d;
+            d.scene = &*inset_;
+            d.element = it.element;
+            d.widget = it.widget;
+            if (it.element && it.element->text) menu::flow::text_effects(d, *it.element, inset_age_);
+            parts.push_back(d);
+        }
+        inset_renderer_->draw_elements(parts, ro, dst);
     }
 }
 

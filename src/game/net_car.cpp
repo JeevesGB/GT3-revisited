@@ -8,8 +8,11 @@
 #include "game/gt_state.h"
 #include "base/ps2_float.h"
 #include "base/sha256.h"
+#include "disc/disc.h"
 #include "net/protocol.h"
 #include "race/arcade_car.h"
+#include "game/livery_package.h"
+#include "race/custom_paints.h"
 #include "race/exact_car.h"
 #include "race/exact_setup.h"
 
@@ -89,7 +92,13 @@ Bytes encode_online_car(const OnlineCar& c) {
     // Then a disc, mod or arcade car's lobby tires and settings (a mod car's donor first, empty or not, which 0.5.0 and later
     // read before them): u8 tire type (0xFF: the car's own), u8 flags (1: settings follow), the settings. Older games ignore
     // them (their digest of the car then differs from ours).
-    const bool lobby = c.kind != OnlineCar::Kind::Garage && (c.tires >= 0 || (c.tune && c.kind != OnlineCar::Kind::Arcade));
+    // Flag 2: a custom colour follows the settings (u8 R, G, B); games before it stop reading after the settings.
+    // Flag 4: a livery's package follows (string hash, u32 size).
+    const bool paintable = c.kind == OnlineCar::Kind::Disc || c.kind == OnlineCar::Kind::Arcade;
+    const bool color = c.color && paintable;
+    const bool livery = paintable && package_hash(c.livery);
+    const bool lobby =
+        c.kind != OnlineCar::Kind::Garage && (c.tires >= 0 || (c.tune && c.kind != OnlineCar::Kind::Arcade) || color || livery);
     if (c.kind == OnlineCar::Kind::Garage && !c.package.empty()) {
         w.str(c.package);
         w.u32_(c.package_size);
@@ -100,10 +109,16 @@ Bytes encode_online_car(const OnlineCar& c) {
     if (lobby) {
         w.u8_(c.tires >= 0 ? u8(c.tires) : u8(0xFF));
         const bool tune = c.tune && c.kind != OnlineCar::Kind::Arcade;
-        w.u8_(tune ? 1 : 0);
+        w.u8_((tune ? 1 : 0) | (color ? 2 : 0) | (livery ? 4 : 0));
         if (tune) {
             sim::CarSettings t = *c.tune;
             each_setting(t, [&](int& v) { w.u32_(u32(s32(v))); });
+        }
+        if (color)
+            for (int k = 0; k < 3; ++k) w.u8_(u8(*c.color >> (8 * k)));
+        if (livery) {
+            w.str(c.livery);
+            w.u32_(c.livery_size);
         }
     }
     return w.data;
@@ -162,6 +177,18 @@ std::optional<OnlineCar> decode_online_car(ByteSpan data) {
             sim::CarSettings tune;
             each_setting(tune, [&](int& v) { v = int(s32(r.u32_())); });
             c.tune = tune;
+        }
+        if (flags & 2) {
+            if (c.kind == OnlineCar::Kind::Mod) return std::nullopt; // (mod cars wear their own paints)
+            u32 rgb = 0;
+            for (int k = 0; k < 3; ++k) rgb |= u32(r.u8_()) << (8 * k);
+            c.color = rgb;
+        }
+        if (flags & 4) {
+            if (c.kind == OnlineCar::Kind::Mod) return std::nullopt;
+            c.livery = r.str();
+            c.livery_size = r.u32_();
+            if (!package_hash(c.livery) || c.livery_size == 0 || c.livery_size > kMaxLiveryBytes + 64 * 1024) return std::nullopt;
         }
     }
     if (!r.ok() || c.car.empty()) return std::nullopt;
@@ -418,6 +445,35 @@ std::optional<sim::CarSpec> online_car_spec(const data::CarDatabase& db, const O
     return s;
 }
 
+namespace {
+std::string online_car_model(const data::CarDatabase& db, const OnlineCar& c) {
+    const data::Car* car = db.car(online_car_base(db, c));
+    return car ? db.model_of(*car) : std::string();
+}
+} // namespace
+
+void set_online_car_paint(const data::CarDatabase& db, OnlineCar& c, int paint) {
+    c.color.reset();
+    c.paint = u8(std::clamp(paint, 0, 255));
+    if (c.kind != OnlineCar::Kind::Disc && c.kind != OnlineCar::Kind::Arcade) return;
+    if (const race::CustomPaint* p = race::custom_paints()->at(online_car_model(db, c), paint)) {
+        c.paint = u8(p->finish);
+        if (p->colour) c.color = p->rgb; // (a livery's pictures stay here: the others see its paint)
+    }
+}
+
+int online_car_local_paint(const data::CarDatabase& db, const OnlineCar& c, const std::string& owner) {
+    if (!c.livery.empty()) { // installed here: our own, or downloaded
+        const std::shared_ptr<const race::CustomPaints> custom = race::custom_paints();
+        std::string id = race::livery_id_for_hash(c.livery);
+        if (id.empty()) id = downloaded_livery_id(c.livery);
+        if (const int k = custom->index_of_livery(online_car_model(db, c), id); k >= 0) return k;
+    }
+    if (!c.color) return c.paint;
+    const int k = race::received_paint(online_car_model(db, c), *c.color, c.paint, owner);
+    return k >= 0 ? k : c.paint;
+}
+
 std::string online_car_base(const data::CarDatabase& db, const OnlineCar& c) {
     if (c.kind == OnlineCar::Kind::Arcade)
         for (const data::CarVariant& v : db.arcade_cars())
@@ -435,8 +491,7 @@ std::optional<sim::exact::ParamImage> online_car_params(const data::CarDatabase&
     const race::ExactCarSource src = race::exact_online_source(db, c, {}, &cond); // (an arcade car: its road tyres)
     std::optional<ex::Equipment> eq = race::exact_equipment(db, src);
     if (!eq) return std::nullopt;
-    ex::ProgramData rules = d.gt3_tables(); // every online race's tables and rules (docs/dev/ONLINE.md "Model")
-    rules.set_behaviour({sim::Program::NtscU, 60});
+    const ex::ProgramData rules = race::online_program_data(d); // every online race's tables and rules (docs/dev/ONLINE.md "Model")
     ex::ConvertInputs in;
     in.base = ex::kParams; // P's address in a race's record (the record at 0)
     in.condition = race::exact_condition_words(cond);
@@ -487,6 +542,23 @@ CarHere online_car_here(const data::CarDatabase& db, const sim::exact::ProgramDa
     const std::string model = car ? db.model_of(*car) : std::string();
     if (model.empty() || !has_model(model)) return CarHere::NoModel;
     return CarHere::Ok;
+}
+
+net::OnlineDisc online_disc(const DiscInfo* info, GameKind game) {
+    net::OnlineDisc d;
+    if (info && (info->verified || info->reported) && !info->modified && info->data.game == GameKind::Gt3) return d;
+    if (!info) {
+        if (game == GameKind::Gt3) return d;
+        d.id = "game:" + std::string(game_name(game));
+        d.name = game_name(game);
+        return d;
+    }
+    d.id = "files:" + info->digest;
+    const std::string serial = " (" + short_serial(info->serial) + ")";
+    if (info->modified) d.name = "a modified copy of " + info->description + serial;
+    else if (info->data.game == GameKind::Concept) d.name = game_name(GameKind::Concept) + serial;
+    else d.name = "an unrecognized disc" + serial;
+    return d;
 }
 
 const char* car_here_text(CarHere h) {
@@ -552,7 +624,7 @@ const char* power_unit(const Units& units) { return units.power; }
 
 int display_torque(int kgfm_x100, const Units& units) {
     const ee::F t = ee::int_to_f(kgfm_x100);
-    return ee::to_int(units.torque_ftlb ? t * ee::F::raw(0x40E773EB) : t); // 7.2329
+    return ee::to_int(units.torque_ftlb ? t * ee::F::raw(0x40E773EB) : t); // 0x350A24: 7.2329
 }
 
 const char* torque_unit(const Units& units) { return units.torque_ftlb ? "ft.lb" : "kgf.m"; }

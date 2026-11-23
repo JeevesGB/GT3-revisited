@@ -16,7 +16,7 @@ void RaceScreen::music_cues(App& app) {
     c.replay = replaying_ || race_preview_; // (a race song's level outside live play)
     c.songs = music_.has_songs();
     bool lic_replay = !license_event_.empty() && !attract_ && (replaying_ || demo_);
-    // (The Preview is an attract demo with the race's own music: needs race +0x7C clear.)
+    // (The Preview is an attract demo with the race's own music: 0x17DD80 needs race +0x7C clear.)
     c.kind = lic_replay                             ? RaceMusic::Kind::LicenseReplay
              : demo_ || (attract_ && !race_preview_) ? RaceMusic::Kind::Demo
              : !license_event_.empty()              ? RaceMusic::Kind::License
@@ -43,6 +43,8 @@ void RaceScreen::music_cues(App& app) {
     // race::license_fail_jingle), a voided time trial.
     c.failed = tt_failed_ || (!license_event_.empty() && license_.state() != LicenseRun::State::Running &&
                               race::license_fail_jingle(license_.state(), shown_medal_));
+    // A pod race's disqualification (one player: the display posts the fail jingle at once; two players none).
+    if (pod_disqualified() && !replaying_) c.finished = c.failed = true;
     c.medal = license_event_.empty() ? -1 : shown_medal_;
     if (lic_replay) { // the replayed / demo run's own end: as its race ends it (demo) or the live run's end time (replay)
         const sim::exact::ExactRace* er = demo_ && exact_field() ? exact_race_of(*exact_field()) : nullptr;
@@ -51,7 +53,7 @@ void RaceScreen::music_cues(App& app) {
         c.finished = demo_end || replay_end;
         // A demonstration: its run's judged result (2..4 a medal; 0 slower than bronze, -1 out of the course: failed);
         // a replay: what its live run played.
-        c.failed = demo_end ? er->kind() == sim::exact::Conductor::License &&
+        c.failed = demo_end ? sim::exact::licence_kind(er->kind()) &&
                                   race::license_fail_jingle(race::license_outcome(er->flow().result, er->flow().result_time, true, -1))
                             : music_license_failed_;
     }
@@ -272,7 +274,27 @@ void RaceScreen::update_tyre_sounds(App& app, const sim::VehicleState& s) {
         opp_sfx_.clear();
         opp_sfx_.resize(size_t(n));
     }
+    // A field bigger than GT3's (more than 8 cars): besides the player's car, only the car the camera follows and the nearest
+    // others to the camera keep their tyres' loops (kTyreCars of them), the rest silent; 8 cars or fewer: every car (as GT3).
+    constexpr int kTyreCars = 7;
+    std::vector<bool> heard(size_t(n), true);
+    if (n > kTyreCars) {
+        const sim::Vec3 eye = to_sim(camera_.eye());
+        std::vector<std::pair<float, int>> near;
+        for (int i = 0; i < n; ++i) {
+            const sim::Vec3& q = f->opponent_state(i).position;
+            const float dx = q.x - eye.x, dy = q.y - eye.y, dz = q.z - eye.z;
+            near.push_back({i + 1 == l.target ? -1.0f : dx * dx + dy * dy + dz * dz, i});
+        }
+        std::partial_sort(near.begin(), near.begin() + kTyreCars, near.end());
+        std::fill(heard.begin(), heard.end(), false);
+        for (int k = 0; k < kTyreCars; ++k) heard[size_t(near[size_t(k)].second)] = true;
+    }
     for (int i = 0; i < n; ++i) {
+        if (!heard[size_t(i)]) {
+            opp_sfx_[size_t(i)].stop(mixer);
+            continue;
+        }
         const sim::VehicleState& os = f->opponent_state(i);
         CarSfx::Step p = step(camera_, os, f->opponent_setup(i), f->opponent_telemetry(i), sound_view(l.kind, i + 1 == l.target));
         p.doppler = l.doppler(os);

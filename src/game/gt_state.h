@@ -6,6 +6,7 @@
 // format in gt_save.h.
 
 #include "base/bytes.h"
+#include "game/concept_state.h"
 #include "sim/car_spec.h"
 
 #include <array>
@@ -17,13 +18,13 @@
 
 namespace gt3r::game {
 
-// Program constants (the PAL and NTSC-J programs hold the same values):
-// - the garage's 200 cars: the dealer and trade checks (slti 0xC8), the
-//   prize-car page and the garage's slot search;
+// Program constants (NTSC-U addresses; the PAL and NTSC-J programs hold the same values):
+// - the garage's 200 cars: the dealer and trade checks (slti 0xC8 at 0x11BCAC / 0x11BD78), the
+//   prize-car page (0x13F128) and the garage's slot search (0x218FAC);
 // - the wheel inventory's 200 slots, the stock-wheel placeholder of a new game included (the
-//   slot search; GameState::wheels holds the bought ones);
+//   slot search 0x21959C; GameState::wheels holds the bought ones);
 // - 6 licences (B, A, IB, IA, S, R = rally) of 8 tests: the completion count's loops
-//   and its total 48.
+//   (0x215B6C, 0x215B3C) and its total 48 (0x215BA4).
 constexpr int kMaxGarageCars = 200;
 constexpr int kMaxWheels = 200;
 constexpr int kLicenseCount = 6;
@@ -126,14 +127,14 @@ struct LicenseTestRecord {
 // Arcade mode progression. The original keeps it
 // in the same game state as GT mode (and saves it with it).
 // The Single Race results: one per difficulty and course of the gcf SINGLE_RACE list (34
-// courses on every disc), record difficulty x <list size> + course; the save's
+// courses on every disc), record difficulty x <list size> + course (0x216640); the save's
 // block has room for 144 (0xB40 bytes of 0x14-byte records). GtMode::arcade_course_count().
 constexpr int kArcadeResultSlots = 144;
-constexpr int kArcadeDifficulties = 4;  // easy, normal, hard, professional (< 4)
+constexpr int kArcadeDifficulties = 4;  // easy, normal, hard, professional (0x216674: < 4)
 constexpr int kArcadeCarLevels = 12;    // car unlock flags 1..12
 // The time trials (AT010001..AT100001, the gcf CLASS_COMPULSORY list): program constant, the
-// game state's 10 records (0x2A4 bytes each, the completion count's loop) and the
-// completion total 10.
+// game state's 10 records (0x2A4 bytes each, the completion count's loop 0x213D50) and the
+// completion total 10 (0x213D84).
 constexpr int kTimeTrials = 10;
 constexpr int kCourseTimeTrials = 44;   // course time-trial rankings in the PS2 save (TIME_ATTACK list order)
 constexpr int kArcadeNoPosition = 8;    // "no result" in the arcade blocks
@@ -154,6 +155,9 @@ struct ArcadeProgress {
         at_best_rank.fill(kArcadeNoPosition);
     }
 };
+
+// The mark Gran Turismo Concept's credit transfer leaves in a Gran Turismo 3 save (scalar +0x12C; program constant).
+constexpr u32 kConceptTransferMark = 0x12345678;
 
 struct GameState {
     s64 credits = 0;
@@ -177,12 +181,18 @@ struct GameState {
     std::vector<SettingFile> setting_files; // oldest first
     MachineRecords machine;
     bool ending_short_seen = false, ending_long_seen = false;
+    // Gran Turismo Concept's credit transfer was made into this game (scalar +0x12C holds 0x12345678; concept §7.6):
+    // a second one is refused.
+    bool concept_transfer = false;
     // Records rankings: "lic:<test>" (6, fastest first), "mt:M400" / "mt:M1000" (12,
     // fastest first), "mt:MMAX" (12, top speed first), "at:<time trial code>" (12).
     std::map<std::string, std::vector<RankEntry>> rankings;
     std::string player_name; // last name entered (the name entry's starting text; empty in a new game, as the original)
     std::string file_comment;           // the game file's name (memory-card File Operation, Edit file name)
     ArcadeProgress arcade;
+    // Gran Turismo Concept's progress (concept_state.h): course licenses, single-race results, presents. Empty in a
+    // Gran Turismo 3 game.
+    ConceptState concept_game;
     // The options block (0x888 bytes) of an imported PS2 save, kept as it is so that an
     // export back to the PS2 restores the player's options, music list and key layout
     // (empty: never imported).

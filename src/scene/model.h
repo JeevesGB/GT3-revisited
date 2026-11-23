@@ -9,6 +9,7 @@
 
 #include <array>
 #include <string>
+#include <memory>
 #include <vector>
 
 namespace gt3r::scene {
@@ -61,6 +62,17 @@ enum PrimitiveFlags : u32 {
     // A car's windows: the glass and the reflection and depth passes drawn over it
     // (mark_car_glass, glTF "glass" materials). Left out where DrawItem::hide_glass asks.
     kGlass = 1u << 16,
+    // Lies on the surface of an earlier primitive of its mesh, built from other vertices (a
+    // window frame on its glass): drawn with a small depth bias towards the eye. GT3's 24-bit Z
+    // makes such faces equal and its GEQUAL test lets the later one win; a float depth buffer
+    // sees their sub-millimetre differences and the two fight (mark_coplanar_overlays).
+    kCoplanarOverlay = 1u << 17,
+    // Every UV of the primitive lies inside the texture on that axis (mark_inside_uvs): sampled
+    // clamped there even when its texture repeats. Pictures packed side by side in one texture
+    // (Midfield's pines) start their UVs a texel or two inside the edge, so the GS never filters
+    // in the far side; our MSAA (shaded at pixel centres past the triangle) and mip levels would.
+    kClampU = 1u << 18,
+    kClampV = 1u << 19,
 };
 
 // Fixed-function lighting material of a lit primitive (GT3 cars: GTM1 material
@@ -114,6 +126,13 @@ struct Primitive {
     // the texel. under_ref < 0: every texel is the weight.
     float under_ref = -1;
     float under_alpha = 0;
+    // The part of its texture the primitive shows, where it stops inside the texture (its UVs'
+    // box: min u, min v, max u, max v; an axis with max <= min: none). Pictures packed side by
+    // side (Trial Mountain's GRAN TURISMO billboards: the left three quarters of a texture whose
+    // last quarter is another picture) sample only inside it: the renderer keeps the sample half
+    // a texel of the mip level in use inside, so filtering never takes in the neighbour, where the
+    // GS's bilinear filter shows it on a sub-pixel strip at its resolution (mark_inside_uvs).
+    float uv_region[4] = {0, 0, 0, 0};
 };
 
 struct Mesh {
@@ -133,7 +152,13 @@ struct Texture {
     u32 width = 0, height = 0;
     std::vector<u32> rgba; // RGBA8 row-major
     bool clamp_u = false, clamp_v = false;
-    bool no_mips = false; // sampled from the full-size image only (GS MXL 0), e.g. the tyres
+    bool no_mips = false; // sampled from the full-size image only (GS MXL 0): tyres, car bodies
+    // The game samples it point-filtered (its Tex1 record's TEX1: MMAG NEAREST): no texel's colour
+    // spreads into its neighbours there (gtm1 cut-out copies rely on it). Texture pack pictures: false.
+    bool nearest = false;
+    // A livery's coverage of each texel (0..255; gtm1::overlay_livery), null when no livery covers it: the
+    // lower-detail models take a livery from the textures that have one (formats/model/livery_transfer.h).
+    std::shared_ptr<const std::vector<u8>> livery_cover;
 };
 
 struct Model {

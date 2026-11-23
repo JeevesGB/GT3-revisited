@@ -30,7 +30,7 @@ struct RaceChange {
         TimeScale = 8,      // ExactRace::set_time_scale(F::raw(a))
         FlowByte = 9,       // ExactRace::set_flow_byte(a)
         Timer = 10,         // ExactRace::set_timer(a)
-        Hit = 11,           // the conductor's hit rule for car's hit of kind a, impulse F::raw(b) (hit_course_out): the
+        Hit = 11,           // the conductor's virtual 41 for car's hit of kind a, impulse F::raw(b) (hit_course_out): the
                             // course's rigid bodies (the game's pylons) touched by the car
     };
     u32 frame = 0;
@@ -44,8 +44,9 @@ void apply_change(ExactRace& race, const RaceChange& c);
 
 struct RaceRecord {
     // The record's own layout (inside a replay file; versions 1 to 5 still read). 6: each recorder snapshot keeps its
-    // car's electric drive (Car::ev), which the car's record image does not hold.
-    static constexpr u32 kVersion = 6;
+    // car's electric drive (Car::ev), which the car's record image does not hold. 7: up to kMaxCars cars and the made grid
+    // (RaceSetup::made_grid).
+    static constexpr u32 kVersion = 7;
 
     // ---- the program and the course ----
     u64 program = 0;        // ProgramData::fingerprint of the program the race ran on
@@ -69,6 +70,7 @@ struct RaceRecord {
     bool effects = true;
     u32 info = 0, conductor = 0, course_addr = 0;
     u32 road_addr = 0; // (version 2)
+    bool made_grid = false; // (version 7) RaceSetup::made_grid
     std::vector<StartEntry> entries;
     // The solo modes' recorders at the run's start (RaceSetup::recorders, version 3: the free run's best lap and ghost carried
     // from the runs before, a whole-run ghost's recording), the ghost car (RaceSetup::ghost_car) and whether its frames are the

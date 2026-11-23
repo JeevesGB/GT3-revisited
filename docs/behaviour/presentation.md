@@ -1667,6 +1667,7 @@ opens the pause, §E2):
   points (its in-car eye, its chase point: `CameraRig::set_car_mounts`, bound
   with the camera's car), and in the in-car view that car is not drawn. Back on the replay cameras the view's
   reset re-arms the shot (§H8). A new or restarted replay starts on the replay cameras.
+  Licence and time-trial demonstrations take Cross the same way.
 - **Cross, Circle, L1, R1** (mode 1): a new cut (§G2).
 - **Up / Down** (mode 1): the race-sound level inside the sections the music
   marks, +0.1 / -0.1, kept in 0 .. 1 (`CutClock::step_level`). Outside such
@@ -2324,7 +2325,7 @@ the view does not judder.
   - Look back takes over while held. No mirror while the view is turned more
     than 0.35 rad (20°) to the side.
   - On phones a drag on the open screen, away from the controls, does the same.
-- **Rear-view mirror** (in-car views, not in replays, not while looking back or
+- **Rear-view mirror** (in-car views, not in replays or demonstrations, not while looking back or
   turned to the side):
   - **Placement.** A 240 x 64 rectangle at (200, 20) of the frame (pushed by
     106.667 in 16:9) with a 1-unit black outline. On a 4:3 2P half it is
@@ -2408,7 +2409,13 @@ attract demo.
   start on, cover the start and run on across the line; then
   k = ((lap - 1) mod nvar) + 1 (`GtrcScript::lap_variant`). This gives
   consecutive laps different cuts. Trial Mountain has 66 records and 3 variants
-  (test `race_replay_cameras`).
+  (test `race_replay_cameras`). Ours draws the car between physics steps, so its
+  drawn s and its lap counter (stepped on the physics step that crosses the line)
+  disagree for a frame at the line; the lap the cameras use steps as the drawn s
+  wraps (`ReplayDirector::seam_lap`, test `replay_director_seam_lap`), and mode 1's
+  cuts take the player's s from the same physics step as its lap. Otherwise that
+  frame put the shot a lap off: a stray cut for a frame or two, then on board
+  (issue 402).
 - **The records at D** (`GtrcScript::records_at`, test `race_replay_lap_variants`).
   Only the last record starting at or before D counts, when D is before its end
   (an earlier record that also contains D is not found). When that is the list's
@@ -2434,8 +2441,8 @@ attract demo.
   - Eye and target come from the curves (or the car, see the kind bits).
   - The zoom is clamped to the record's limits (when max > min) and kept at 0.2
     or more.
-  - The zoom is smoothed towards that value at 4 per second, snapping on a cut.
-    The rate is approximate: the game's is not known.
+  - The zoom moves towards that value on a spring (§H6a), set on a shot's first
+    frame.
 - **Field of view.** The zoom is 1 / tan of the horizontal half-angle across the
   640-pixel frame; on the 448-line frame that gives vertical FOV
   = 2 atan(0.7 / zoom) (`ReplayDirector::zoom_fovy`), as for the player views
@@ -2457,6 +2464,48 @@ point midway between the two, with the shot widened (§G3). Mode 1's procedural
 cameras follow the cut's car alone (§G15). The test reports 197 shots over a
 Trial Mountain lap (lap 1) sampled every 20 m, 190 of them within 160 m of the
 car.
+
+### §H6a The camera operator
+
+A course shot does not hold the car dead centre. Every 60 Hz frame of a course shot
+(any view mode; `race::CourseCameraAim`, `ReplayDirector::evaluate`, test
+`course_camera_aim_*`), angles in degrees, yaw = 180 - atan2(x, z) and pitch =
+-atan2(y, |xz|) (positive looks down) of the direction to the aim point:
+
+- **The shot's first frame** (a cut, or the record set again): the zoom is set to the
+  record's (mode 1's wide shot: 1.0) and each angle's filter is reset to the angle of
+  the aim point now, turning at (now - target) degrees per second, where the target is
+  the angle of last frame's aim point (without its 0.4 m lift) while the cameras follow
+  the same car, else the angle now; mode 1's yaw seed (§G2) adds -90 .. -30 degrees to
+  the yaw target, so the camera starts by swinging off and back. The pitch filter of a
+  record looking at the car aims 0.4 k cos(pitch) degrees higher, k = 30 / zoom: the
+  car sits about a quarter of the half-height below the middle of the picture.
+- **Records looking at the car**, every later frame, for each angle θ (the pitch less
+  0.4 k cos θ):
+  - the lead: θ + 5 Δ, Δ its change since the last frame, led on by
+    k (2u - u²), u = min(5 |Δ| / 3k, 1), in Δ's direction;
+  - the error: (lead - shown), the difference brought into -180 .. 180;
+  - the gain g = (n + 1) / 2 + 0.2, n a random spring's value (below), 0.2 .. 1.2;
+  - the speed v (degrees per second) changes by 2 (300 g e - 30 v) / 60, at most 25
+    either way, and stays within ±250; the angle shown moves by v / 60 (0 .. 360).
+  - The random spring chases targets in -76.8 .. 128 (shown / 128): every third frame
+    a new target with p 1 - (0.99333 - 0.1575 |a|) (a = 1: 16.4 %); the value moves by
+    v' += (60 (target - x) - 10 v') / 60, x += v' / 60. Each filter has its own, seeded
+    from a clock value at the shot's first frame.
+  - The bob: a third spring, its odds raised by a = the yaw's speed / 30 (clamped to
+    ±1), tips the pitch shown by (n / 3) min(k, 5) a degrees: up to 1.7 degrees while the
+    camera pans.
+- **Records aiming at their target curves**: the angles straight at the target.
+- **The zoom** springs towards the record's: v += (30 (want - zoom) p - 10 v) / 60
+  (p = 1 zooming out; zooming in, the aim's move between cars, 1 - frames left / its
+  frames, or 1 with a pair), v within -30 .. 10 per second, zoom += v / 60.
+- Ours steps at 60 Hz, each frame on the aim point and camera where they were at that
+  frame's moment (between the two shown frames around it), and blends the last two
+  frames between them, both angles the short way round (the pitch is 359.x one frame and
+  -0.x the next as the camera aims across level): shown frames at another rate or
+  unevenly paced (a phone missing refreshes) see the same camera as an even 60 Hz
+  (issue 402); the raw angles use
+  the host's atan2 (the program's 0x245C10 is not ported), the rest the EE's arithmetic.
 
 ### §H7 Fallback TV cameras
 
@@ -2767,7 +2816,9 @@ k = 0, so no glare is drawn.
   modelled rims and finer tyres (`menu/cars`, `menu/wheel`). Ours draws the
   menus' wheels at full detail with `[video] showroom_wheels = on` (the default
   except on phones and tablets). A wheel that has only one kind of model (a
-  modified game's) draws that one in both places, whatever the setting. Ours blurs their spinning modelled rims over
+  modified game's) draws that one in both places, whatever the setting. The brake
+  discs and calipers behind a modelled rim sit far enough in to stay behind its
+  hub and spokes. Ours blurs their spinning modelled rims over
   the same turn GT3 blurs its rims over, by copies of the rim itself, so the
   blur grows smoothly from a standstill. The menus' rims have their light painted
   in (one side of the spokes brighter) and never turn there; ours evens that light

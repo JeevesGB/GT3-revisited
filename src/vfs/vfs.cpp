@@ -55,13 +55,17 @@ void collect_files(const std::string& root, const std::string& rel, std::vector<
 } // namespace
 
 bool mod_for_disc(const std::vector<std::string>& discs, std::string_view key, std::string_view serial) {
-    if (discs.empty()) return true;
     const std::string k = to_lower(key), s = to_lower(serial), ss = to_lower(short_serial(serial));
+    bool listed = false, any_listed = false;
     for (const std::string& d : discs) {
-        const std::string n = to_lower(trim(d));
-        if (n == k || (!s.empty() && (n == s || n == ss))) return true;
+        std::string n = to_lower(trim(d));
+        const bool exclude = !n.empty() && n[0] == '!';
+        if (exclude) n = to_lower(trim(std::string_view(n).substr(1)));
+        const bool match = n == k || (!s.empty() && (n == s || n == ss));
+        if (exclude && match) return false;
+        if (!exclude) any_listed = true, listed = listed || match;
     }
-    return false;
+    return !any_listed || listed;
 }
 
 void Vfs::scan_mods(const std::string& mods_dir, const IniDocument* config) {
@@ -99,6 +103,12 @@ void Vfs::scan_mods(const std::string& mods_dir, const IniDocument* config) {
             if (name.size() > 4 && to_lower(name.substr(name.size() - 4)) == ".ini") mod.makers.push_back(root + "/makers/" + name);
         for (const std::string& name : list_host_dir(root + "/events"))
             if (name.size() > 4 && to_lower(name.substr(name.size() - 4)) == ".ini") mod.events.push_back(root + "/events/" + name);
+        for (const std::string& name : list_host_dir(root + "/liveries")) {
+            const std::string path = root + "/liveries/" + name;
+            if (name.size() > 4 && to_lower(name.substr(name.size() - 4)) == ".ini") mod.liveries.push_back(path);
+            else if (host_is_directory(path) && host_path_exists(path + "/livery.ini")) mod.liveries.push_back(path + "/livery.ini");
+        }
+        std::sort(mod.liveries.begin(), mod.liveries.end());
         mod.textures = texture_pack::pictures_in(root + "/textures");
         LOG_INFO("Mod '%s' (%s): %zu files, %zu cars, %zu events, %zu textures, priority %d, %s", mod.name.c_str(),
                  mod.id.c_str(), mod.files.size(), mod.cars.size(), mod.events.size(), mod.textures.size(), mod.priority,
@@ -155,7 +165,7 @@ std::optional<Bytes> Vfs::read(const std::string& path) const {
     if (p == kProgramFile) return base_ ? base_->read_program() : std::nullopt;
     if (p == kRegionFile) {
         if (!base_) return std::nullopt;
-        std::string key = region_key(base_->region());
+        std::string key = base_->region_data().to_text();
         return Bytes(key.begin(), key.end());
     }
     if (p == kDiscKeyFile) {
@@ -230,7 +240,7 @@ std::vector<std::string> Vfs::list_dir(const std::string& dir) const {
 
 RegionData region_data(const std::function<std::optional<Bytes>(const std::string&)>& read) {
     if (std::optional<Bytes> b = read ? read(Vfs::kRegionFile) : std::nullopt)
-        if (std::optional<Region> r = region_from_key(std::string(b->begin(), b->end()))) return {*r};
+        if (std::optional<RegionData> r = RegionData::from_text(std::string(b->begin(), b->end()))) return *r;
     return {};
 }
 

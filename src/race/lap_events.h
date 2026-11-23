@@ -62,7 +62,7 @@ int lap_list_of(int car, HudPlay play, int followed);
 class PassingOrder {
 public:
     static constexpr int kPoints = 4; // up to 3 split points and the line
-    static constexpr int kCars = 8;   // cars kept per point and lap
+    static constexpr int kCars = 32;  // cars kept per point and lap (a field of our own has up to 32)
 
     void reset();
     // A car passes timing point `point` (0..kPoints-1) on lap index `lap` at `ms`. Returns
@@ -123,7 +123,8 @@ std::string split_text(int number, long long ms);
 int license_split_number(bool line, int lap, int point, int points);
 // '+' and the time for a gap >= 0, the font's dash glyph (0x7F) for < 0.
 std::string gap_text(long long gap_ms);
-// '+' (dash glyph when negative) and `format` ("%d Laps") with |laps|.
+// '+' (dash glyph when negative) and `format` ("%d Laps") with |laps| (a format without "%d", as PAL's texts are: the
+// text alone, as the program's sprintf prints it).
 std::string lap_diff_text(int laps, const std::string& format);
 
 // The event display: eight message slots and two timers, the end of the queue and the start

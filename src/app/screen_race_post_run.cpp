@@ -5,6 +5,7 @@
 // (Race screen code map: docs/dev/RACE.md.)
 
 #include "app/screen_race_impl.h"
+#include "game/concept_menu.h"
 #include "sim/exact/race.h"
 
 namespace gt3r::race_screen {
@@ -94,6 +95,13 @@ void RaceScreen::after_run(App& app) {
     o.ranked = record_run();
     const race::PostRun p = race::post_run(kind, o);
     shows = shows || p.name_entry;
+    // A Concept disc's single race or course license that opens a prize: the notice over the race, after the cup and
+    // the name entry (concept §8 step 2).
+    if (concept_menus()) {
+        menu::flow::GameResult res = result_latch_.for_leave(build_result());
+        res.course = courses_[size_t(course_sel_)].label;
+        if (game::queue_concept_notice(res)) shows = true;
+    }
     if (p.replay) {
         replay_pending_ = true; // started once the presentations close, else at once
         if (shows) app.push(make_presentation_screen());
@@ -108,7 +116,7 @@ void RaceScreen::after_run(App& app) {
 }
 
 // The original's ghosts (presentation §G11): licence tests, time trials and machine tests run
-// the session's best run as their ghost, free runs its best lap (solo race's runs; the free
+// the session's best run as their ghost, free runs its best lap (RaceSolitaire's runs; the free
 // practice before a GT race has none).
 bool RaceScreen::whole_run_ghost() const {
     const race::RunKind k = run_kind();
@@ -169,6 +177,7 @@ void RaceScreen::start_auto_replay(App& app) {
     watch_replay();
     replay_to_menu_ = replaying_;
     if (!replaying_) open_quick_menu(app);
+    else if (preset_.rwarp > 0) warp(app, preset_.rwarp); // (tests: GT3R_RACE rwarp= runs the run's replay on too)
 }
 
 // A replay's transition is over: the quick menu cuts in. After the quick menu's demonstration, the menu it was chosen
@@ -188,18 +197,22 @@ void RaceScreen::return_to_menu(App& app) {
     open_quick_menu(app);
 }
 
-// The race behind the quick menu (race::menu_backdrop). The drivers set records off (R+0x6C) and
-// restart the race in play mode 2, the race-flow byte 2, live from its start. Under that byte the solo
-// conductors give the player's car control source 1 (the AI drives, the pad decoded) and the races' every car
-// control source 2; the time trial hands only a pad car back at its first crossing; and with records
-// off the race has no laps and no time limit, so nothing ends it: the computer drives on for as long as the
+// The race behind the quick menu (race::menu_backdrop). The drivers set records off (R+0x6C, 0x130EA8, 0x132E24) and
+// restart the race in play mode 2 (0x130EAC), the race-flow byte 2, live from its start. Under that byte the solo
+// conductors give the player's car control source 1 (0x1F3218: the AI drives, the pad decoded) and the races' every car
+// control source 2 (0x1F3188); the time trial hands only a pad car back at its first crossing (0x1F1CC0); and with records
+// off the race has no laps and no time limit (0x1F35B8), so nothing ends it: the computer drives on for as long as the
 // menu stays, before any run, after a run and after a DEMONSTRATION alike, a GT race's field after its countdown. Records
-// off also set the race's SE mute (race +0x1788), under which the race's set-up leaves the camera's view
-// without the race's input: its camera manager runs the live handler, start.cam over a standing
+// off also set the race's SE mute (0x17BC58, race +0x1788), under which the race's set-up leaves the camera's view
+// without the race's input (0x17BF38): its camera manager runs the live handler (0x20B788), start.cam over a standing
 // hold and then the driver's camera, the view the player last drove with.
 void RaceScreen::start_menu_backdrop(bool before_run) {
     if (backdrop_) end_backdrop_race(); // (again: from the start)
-    switch (race::menu_backdrop(run_kind(), before_run)) {
+    race::MenuBackdrop b = race::menu_backdrop(run_kind(), before_run);
+    // Concept's single race menu, before and after a race: the race behind it (its driver's loop restarts the race in
+    // play mode 2 before every menu, 0x131BF4).
+    if (concept_menus() && run_kind() == race::RunKind::ArcadeRace) b = race::MenuBackdrop::Race;
+    switch (b) {
     case race::MenuBackdrop::None: return;
     case race::MenuBackdrop::Preview: start_preview(); return;
     case race::MenuBackdrop::Race: break;

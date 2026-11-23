@@ -67,7 +67,7 @@ struct AnalyzerTrack {
     float distance_at_frame(u32 f, u32 begin) const;
 };
 
-// GT3's Analyzer samples (its pass over a replay): after every step, the car's distance into its first lap (the race
+// GT3's Analyzer samples (its pass over a replay, 0x135788): after every step, the car's distance into its first lap (the race
 // progress with its laps less one, the first sample at most 0) in bins of the lap's length / 16383 (at least 0.5 m); per bin
 // its speed (m/s), throttle and brake, each taken as linear between two steps and averaged over the bin, its gear and its
 // drawn position (course x, z) where the bin ends; the speed kept x 40 in 13 bits, the pedals x 255 in a byte, the position
@@ -140,6 +140,8 @@ public:
     void set_tracks(AnalyzerTrack a, AnalyzerTrack b);
     void open(View v);
     View view() const { return view_; }
+    // The page has Gran Turismo 3's bottom band (its "bg" element); Gran Turismo Concept's page has none.
+    bool has_band() const;
     bool imperial = true;
 
     // One 60 Hz frame (menu keys, menu::flow::MenuKeys bits). False: the analyzer was left.

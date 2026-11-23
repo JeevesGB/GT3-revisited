@@ -203,11 +203,8 @@ public:
 
         if (!fullscreen_) draw_list(ui);
         draw_stats(app, ui, vr);
-        if (modded_menu_open_) draw_modded_tracks_menu(ui);
-        ui.footer(modded_menu_open_
-                      ? "Up/Down: pick GLB  Cross: convert to .gz course  Select+Cross: prefer positions  Triangle: cancel"
-                      : (fullscreen_ ? "Stick: orbit L1/R1: zoom X: spin []: wire Sel: LOD Start: cull R2: export L2: modded tracks Tri: back"
-                                     : "Up/Down: select  Cross: view  R2: export  L2: modded tracks  Triangle: back"));
+        ui.footer(fullscreen_ ? "Stick: orbit L1/R1: zoom X: spin []: wire Sel: LOD Start: cull R2: export Tri: back"
+                              : "Up/Down: select  Cross: view  Square: wireframe  L1/R1: zoom  R2: export  Triangle: back");
     }
 
 private:

@@ -86,6 +86,10 @@ struct HudData {
     bool pole_icon = false;
     bool finished = false;  // the followed car has finished: the Lap line goes (with the list or Last)
     bool wrong_way = false;
+    // Another of the car's messages, in WRONG WAY's place (Gran Turismo Concept's pod prompts, concept §9.2: messages
+    // 0x10 in amber and 0x11 in red), as game text; "" none.
+    std::string car_message;
+    bool car_message_red = false;
     int total_laps = 0;     // race: laps to run (0 = time trial)
     int position = 0, cars = 0; // race: current position of `cars`
     double countdown = -1;  // race: seconds to the start (> 0), 0 = "GO", < 0 = none
@@ -130,33 +134,10 @@ struct HudData {
     std::vector<EventDisplay::Message> events;
     bool event_icon = false;
     float event_icon_dx = 0, event_icon_dy = 0;
-
-    // Extra HUD (optional): 0 off, 1 compact, 2 full (H cycles; [hud] extra=0/1/2).
-    int extra_hud = 0;
-    float gap_ahead_m = -1.0f;
-    float gap_behind_m = -1.0f;
-    float gap_leader_m = -1.0f;
-    float gap_ahead_s = -1.0f;
-    float gap_behind_s = -1.0f;
-    float gap_leader_s = -1.0f;
-    float delta_best_s = 0.0f;
-    bool have_delta_best = false;
-    std::string ahead_name;
-    bool ahead_ghosted = false;
-    // Sector deltas vs session best (seconds).
-    float sector_delta_s[3] = {0, 0, 0};
-    bool sector_delta_on[3] = {false, false, false};
-    // Same-maker rival ahead (when different from overall ahead).
-    float gap_class_m = -1.0f, gap_class_s = -1.0f;
-    std::string class_ahead_name;
-    struct Nameplate {
-        float x = 0, y = 0;
-        std::string text;
-        bool player = false;
-        bool ghosted = false;
-    };
-    std::vector<Nameplate> nameplates;
 };
+
+// A race place as the HUD's rank font draws it: "1st", "2nd", "3rd", "4th" .. "11th", "12th", "13th", "21st", "32nd".
+std::string rank_ordinal(int n);
 
 class Hud {
 public:
@@ -193,6 +174,8 @@ public:
     void draw_replay_pause(SDL_Renderer* r, int selected, const SDL_FRect* viewport = nullptr, bool four_three = false);
     // `viewport` (UI coordinates): draw into that rectangle instead of the whole screen (split screen).
     void draw(SDL_Renderer* r, const HudData& d, const SDL_FRect* viewport = nullptr);
+    // The Analyzer's REPLAY: the logger display's rows (HudMode::Logger) for one car, `dx` frame units to the right.
+    void draw_logger(SDL_Renderer* r, const HudData& d, float dx = 0, const SDL_FRect* viewport = nullptr);
     text::GameFonts& fonts() { return fonts_; }
     const text::GameFonts& fonts() const { return fonts_; }
     // Where the last draw() / draw_split() put the event display's car picture (UI units;
@@ -276,6 +259,12 @@ private:
     void draw_meters(SDL_Renderer* r, const HudData& d);
     void draw_panel(SDL_Renderer* r, float x, float y, float w, float h);
     void draw_gear(SDL_Renderer* r, const HudData& d, float gx, float gy, float gw, float gh, float dx, float dy);
+    // The steering and accel / brake monitors on a row (either release's kind), `dx` frame units to the right.
+    void draw_steering_row(SDL_Renderer* r, const HudData& d, const HudRow& row, float dx);
+    void draw_pedals_row(SDL_Renderer* r, const HudData& d, const HudRow& row, float dx);
+    // Gran Turismo Concept's accel / brake boxes and hybrid store monitor in a row's box (frame units, aligned).
+    void draw_pedal_boxes(SDL_Renderer* r, const HudData& d, float x, float y, float w, float h);
+    void draw_capacity(SDL_Renderer* r, const HudData& d, float x, float y, float w, float h);
     void draw_times(SDL_Renderer* r, const HudData& d, int view);
     void draw_map(SDL_Renderer* r, const HudData& d, int view);
     void draw_rank(SDL_Renderer* r, const HudData& d, int view);

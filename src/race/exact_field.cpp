@@ -9,6 +9,7 @@
 #include "race/interp.h"
 #include "race/exact_setup.h"
 #include "race/net_race.h"
+#include "sim/exact/hybrid.h"
 #include "sim/exact/pad_read.h"
 #include "sim/exact/race.h"
 #include "sim/exact/race_record.h"
@@ -188,7 +189,7 @@ public:
     };
 
     explicit ExactField(const FieldConfig& cfg) : cfg_(cfg), opts_(cfg.exact), player_(*this, 0) {}
-    // The visit's free run recorders as the run leaves them (the race's end closes its recordings).
+    // The visit's free run recorders as the run leaves them (the race's end closes its recordings, 0x17AA48).
     ~ExactField() override {
         if (visit_ && race_)
             if (const ex::SoloRecorders* s = race_->recorders()) *visit_ = *s, visit_->end();
@@ -217,18 +218,27 @@ public:
             return false;
         }
         if (opts_.playback) return build_playback(db, error);
-        const int slots = std::min(int(course_->query->grid().size()), 8); // (a race has at most 8 cars)
+        // The course's grid slots (GT3's races: at most 8 cars). A bigger field of our own (FieldConfig::made_grid) has up to
+        // kMaxCars, the places past the course's table made along its main line (sim/exact/start.h made_grid_slot).
+        const int table = std::min(int(course_->query->grid().size()), int(ex::kGt3Cars));
+        const int main_line = course_->ai.resolve(6);
+        const bool made = cfg_.made_grid && table > 0 && main_line >= 0 && !course_->ai.lines[size_t(main_line)].empty() &&
+                          opts_.kind == ex::Conductor::SinglePlayer;
+        const int slots = made ? int(ex::kMaxCars) : table;
         if (slots < humans_) {
             if (error) *error = "the course has no start grid for the race";
             return false;
         }
         const data::Event* ev = cfg_.event.empty() ? nullptr : db.event(cfg_.event);
-        const bool solo = exact_solo_kind(opts_.kind);
+        // The pace-car test (Concept's RaceTraining) is the licence test with one computer car, the given opponent: the solo
+        // modes' race information, a race's field.
+        const bool training = opts_.kind == ex::Conductor::Training;
+        const bool solo = exact_solo_kind(opts_.kind) || training;
         std::vector<std::string> labels = cfg_.opponents;
-        if (labels.empty() && ev && !battle) labels = ev->entries;
-        // The player alone (and a ghost car); free practice runs the race's field (GT3's race information with
-        // every entry, the race's start-up giving the conductor a car for each).
-        if (solo && opts_.kind != ex::Conductor::FreePractice) labels.clear();
+        if (labels.empty() && ev && !battle && !training) labels = ev->entries;
+        // The player alone (and a ghost car); free practice runs the race's field (0x1330E0: GT3's race information with
+        // every entry, RaceBase::vf9 giving the conductor a car for each).
+        if (solo && opts_.kind != ex::Conductor::FreePractice && !training) labels.clear();
         if (int(labels.size()) > cfg_.max_opponents) labels.resize(size_t(std::max(0, cfg_.max_opponents)));
         // Never more cars than the course's grid slots, as GT3's menus never make such a field (every event's cars fit its
         // course; the arcade's dirt races are one against one). The race start itself reads a slot past the grid table as the
@@ -313,6 +323,7 @@ public:
         rs.data = data_.get();
         rs.db = &db;
         rs.course = course_;
+        rs.made_grid = made;
         static const std::vector<u8> kNoEvent(0x200, 0);
         rs.event = ev && ev->bytes.size() >= 0x1F4 ? ev->bytes : ByteSpan(kNoEvent.data(), kNoEvent.size());
         ex::RaceConfig own_rules{};
@@ -329,7 +340,7 @@ public:
         rs.laps = opts_.laps;
         if (solo) {
             // The licence test's and machine test's laps byte is their type: the event's. The race information's words.
-            if (opts_.kind == ex::Conductor::License || opts_.kind == ex::Conductor::MachineTest || opts_.laps <= 0) rs.laps = -1;
+            if (ex::licence_kind(opts_.kind) || opts_.kind == ex::Conductor::MachineTest || opts_.laps <= 0) rs.laps = -1;
             for (size_t k = 0; k < 4; ++k) rs.session.sector[k] = opts_.session[k];
             rs.session.lap = opts_.session[4];
             rs.licence_times = opts_.licence_times;
@@ -343,7 +354,7 @@ public:
         } else {
             rs.start_type = 2;
         }
-        // The solo modes' start (the race's start-up: the time trial's and free run's start type a moving start, the base conductor's
+        // The solo modes' start (RaceBase::vf9: the time trial's and free run's virtual 9 a moving start, the base conductor's
         // none with the configuration's +0 set).
         if (solo)
             rs.start_type = ev && ev->bytes.size() >= 0x1F4 ? demo_start_type(*ev, opts_.kind)
@@ -398,16 +409,16 @@ public:
             rs.entries.push_back(*e2);
         }
         bool ghost_entry = false;
-        if (opts_.ghost && !opts_.ghost->entries.empty()) { // the whole-run ghost: its run's car 0, on the pad
+        if (opts_.ghost && !opts_.ghost->entries.empty() && !training) { // the whole-run ghost (none with the pace car): its run's car 0, on the pad
             ex::StartEntry g = opts_.ghost->entries[0];
             g.human = 1, g.player = true;
             g.car = 0;
             rs.entries.push_back(g);
-            rs.ghost_switch = 1; // (drawn translucent: the draw mode 2)
+            rs.ghost_switch = 1; // (drawn translucent: 0x1E0668's draw mode 2)
             ghost_entry = true;
         } else if (opts_.kind == ex::Conductor::FreeRun && opts_.free_run_ghost && slots >= 2) {
             // The free run's ghost car: the player's car once more on the next slot with an input device (the ghost's
-            // playback), driven from the race's recorders; the start's entry set-up flags car 1 a ghost (F +0x3EA = 2).
+            // playback), driven from the race's recorders; the start's virtual 24 flags car 1 a ghost (F +0x3EA = 2).
             ex::StartEntry g = *e1;
             g.grid_slot = p2;
             rs.entries.push_back(g);
@@ -451,10 +462,10 @@ public:
         }
         // The solo modes' recorders (the race object's: the player's device recording the run, the ghost's playing, the free
         // run's lap recording and best lap): a free run's carried from the visit's runs, a whole-run ghost's recording on the
-        // ghost's device (the kind 0).
+        // ghost's device (0x17AAD8's kind 0).
         if (solitaire(opts_.kind)) {
             const bool fr = opts_.kind == ex::Conductor::FreeRun;
-            ex::SoloRecorders r = fr && opts_.free_run ? *opts_.free_run : ex::SoloRecorders(fr);
+            ex::SoloRecorders r = fr && opts_.free_run ? *opts_.free_run : ex::SoloRecorders(fr, ex::later_store(data_->behaviour()));
             r.ghost_option = opts_.ghost_option;
             if (opts_.ghost && ghost_entry) r.run_to_ghost(ex::run_recording_of(*opts_.ghost));
             r.start();
@@ -519,15 +530,15 @@ public:
         ex::RaceSetup rs = r.setup(*data_, db, course_);
         if (opts_.logger) rs.logger = 1; // (the Analyzer's pass over the replay)
         if (opts_.logger_record) rs.logger_record = 1;
-        // The Analyzer's race (GT3's logger race, the solo race's devices both playing): car 0 plays track A's recording,
-        // car 1, a ghost car (the solo conductors' entry set-up flags it) with track B's car, plays track B's. Only track A's
+        // The Analyzer's race (GT3's logger race, RaceSolitaire::vf58's devices both playing): car 0 plays track A's recording,
+        // car 1, a ghost car (the solo conductors' virtual 24 flags it) with track B's car, plays track B's. Only track A's
         // car takes the record's changes.
         std::shared_ptr<ex::RaceRecord> analysed;
         if (opts_.analysis && solitaire(r.kind) && r.kind != ex::Conductor::FreeRun) {
             analysed = std::make_shared<ex::RaceRecord>(r);
             std::erase_if(analysed->changes, [](const ex::RaceChange& c) { return c.car != 0; });
             rs.entries.resize(1);
-            ex::SoloRecorders s(false);
+            ex::SoloRecorders s(false, ex::later_store(data_->behaviour()));
             const ex::RaceRecord* b = opts_.analysis_b.get();
             rs.sparks.resize(std::min<size_t>(rs.sparks.size(), 1));
             if (b && !b->entries.empty()) {
@@ -593,7 +604,7 @@ public:
             if (c.ev.on) LOG_INFO("Race (exact): %s is an electric mod car: the electric drive", v.label.c_str());
             v.setup = exact_setup(c);
             v.facts = exact_facts(c);
-            exact_state(c, v.setup, v.state);
+            exact_state(c, v.setup, v.state, &race_->inputs().later.moods);
             exact_telemetry(c, wear_on_, 0, v.tel);
             v.prev = v.state;
         }
@@ -607,7 +618,7 @@ public:
                  rs.start_type, p1, sim::program_name(data_->behaviour().rules), sim::program_name(data_->program()), int(tick_hz()));
     }
 
-    // The race modes with the race object's recorders (solo race): the time trial, licence test, machine test, free run.
+    // The race modes with the race object's recorders (RaceSolitaire): the time trial, licence test, machine test, free run.
     static bool solitaire(ex::Conductor k) {
         return k == ex::Conductor::TimeTrial || k == ex::Conductor::License || k == ex::Conductor::MachineTest ||
                k == ex::Conductor::FreeRun;
@@ -701,7 +712,7 @@ public:
         for (size_t i = 0; i < cars_.size(); ++i) {
             CarView& v = cars_[i];
             const ex::Car& c = race_->cars()[i];
-            exact_state(c, v.setup, v.state);
+            exact_state(c, v.setup, v.state, &race_->inputs().later.moods);
             exact_telemetry(c, wear_on_, v.wall, v.tel);
             v.impact = std::max(v.wall, v.car) * c.p.inv_mass.host();
         }
@@ -710,7 +721,7 @@ public:
         crossings_.clear();
         lap_done_ = false;
         const long long now_ms = (long long)(race_->flow().clock / 3);
-        // The race display's sector events of the step (12 the car's lap and sector, then 14 its time since its last
+        // The race display's sector events of the step (0x1EC520: 12 the car's lap and sector, then 14 its time since its last
         // crossing at the sector line, within the step; NTSC-J posts no 14).
         struct Sector {
             s32 lap = 0, sector = 0;
@@ -738,7 +749,7 @@ public:
                 x.ms = c.x530;
                 x.split_ms = (long long)c.x530 - (long long)b.x530;
                 if (k == 0) lap_done_ = true, last_lap_s_ = double(x.split_ms) / 1000.0;
-                // A licence test's line short of its end: its conductor posts the sector events with the time since
+                // A licence test's line short of its end: its conductor (0x1F0ED8) posts the sector events with the time since
                 // its lap start, which it never moves (the run's start), instead of a lap.
                 if (const std::optional<Sector>& sx = sector_of[size_t(k)]) {
                     x.sector = true;
@@ -762,7 +773,7 @@ public:
             if (c.finished && !b.finished) {
                 CarView& v = cars_[size_t(k)];
                 v.finish = double(c.x530) / 1000.0;
-                if (race_->kind() == ex::Conductor::License) { // (the test's time: its lap time event keeps it as the best lap)
+                if (ex::licence_kind(race_->kind())) { // (the test's time: its lap time event keeps it as the best lap)
                     if (c.best_lap == ex::kNoTime)
                         LOG_INFO("Race (exact): car %d (%s) ended the licence test without a time", int(k), v.label.c_str());
                     else
@@ -776,6 +787,16 @@ public:
         }
         for (const ex::PitEvent& p : race_->pit_events())
             if (p.type == 1 && p.car >= 0 && p.car < race_->size() && p.car != ghost_car_) pit_entries_.push_back(id_of(p.car));
+        // The later builds' pod race: the race's note 7 of a stop and its event of a car that missed its stops.
+        for (const ex::RaceEvent& e : race_->events()) {
+            if (e.car < 0 || e.car >= race_->size() || e.car == ghost_car_) continue;
+            if (e.type == ex::kStopsMissedEvent) {
+                pod_notes_.push_back({id_of(e.car), true});
+                LOG_INFO("Race (exact): car %d missed its stops: disqualified", int(e.car));
+            } else if (e.type == 18 && e.value == 7) {
+                pod_notes_.push_back({id_of(e.car), false});
+            }
+        }
     }
 
     // --- RaceField ---
@@ -852,6 +873,11 @@ public:
     void set_laps(int laps) override { (void)laps; } // set at the start (ExactFieldOptions::laps)
     const std::vector<CarCrossing>& last_crossings() const override { return crossings_; }
     std::vector<int> take_pit_entries() override { return std::exchange(pit_entries_, {}); }
+    int car_message(int player) const override {
+        const size_t k = player == 2 ? 1 : 0;
+        return k < size_t(race_->size()) && (k == 0 || humans_ > 1) ? race_->cars()[k].x51c : 0;
+    }
+    std::vector<PodNote> take_pod_notes() override { return std::exchange(pod_notes_, {}); }
     bool opponent_in_pits(int i) const override {
         const u8 k = race_->cars()[size_t(opp0_ + i)].driver_kind;
         return k >= 2 && k <= 4;
@@ -950,6 +976,7 @@ public:
     net::CarEntry player_entry() const { return car_entry(race_->cars()[0], opts_.player.asm_on, opts_.player.tcs_on); }
 
     const ex::ExactRace& race() const { return *race_; }
+    const ex::ProgramData* data() const { return data_.get(); }
     const std::vector<ex::PadFrame>& frames() const { return frames_; }
     const LapSource& laps() const { return laps_; }
 
@@ -975,7 +1002,7 @@ public:
     const ex::Car& record(int i) const { return race_->cars()[size_t(i)]; }
     ex::Car& record(int i) { return race_->cars()[size_t(i)]; }
     void player_step(const sim::ControlInputs& in, double dt) { step(in, dt); }
-    // On the race's AI course: the AI drives car i on.
+    // 0x1E3C78 on the race's AI course: the AI drives car i on.
     bool drive_on(int i) {
         if (play_) return true; // (a replay has it among its changes)
         const bool ok = race_->drive_on(i);
@@ -994,7 +1021,7 @@ public:
         if (!rec_) return nullptr;
         auto r = std::make_shared<ex::RaceRecord>(*rec_);
         r->final_hash = ex::race_hash(*race_);
-        // The player's recording as the race's end closes it: a whole-run ghost plays it.
+        // The player's recording as the race's end closes it (0x17AA48): a whole-run ghost plays it.
         if (const ex::SoloRecorders* s = race_->recorders()) {
             ex::SoloRecorders done = *s;
             done.end();
@@ -1028,10 +1055,12 @@ public:
         return true;
     }
     // A hit of car i that is not one of the collision step's (kind 2: the course's rigid bodies, the game's pylons): the
-    // conductor's hit rule before the next step, recorded.
+    // conductor's virtual 41 before the next step, recorded.
     void report_hit(int i, int kind) {
         if (i >= 0 && i < race_->size()) change({0, ex::RaceChange::Hit, u8(i), u32(kind), 0});
     }
+    // Car i's views (its state, setup and telemetry as the last step left them); null when there is no such car.
+    const CarView* car_view(int i) const { return i >= 0 && size_t(i) < cars_.size() ? &cars_[size_t(i)] : nullptr; }
     bool ghost(float alpha, sim::VehicleState& out, const sim::VehicleSetup** setup) const {
         if (ghost_car_ < 0) return false;
         const ex::Car& c = race_->cars()[size_t(ghost_car_)];
@@ -1138,6 +1167,7 @@ private:
     std::vector<std::string> labels_;
     std::vector<CarCrossing> crossings_;
     std::vector<int> pit_entries_;
+    std::vector<PodNote> pod_notes_; // the later builds' pod race: stops noted, cars disqualified
     int humans_ = 1, contacts_ = 0;
     int opp0_ = 1, ghost_car_ = -1; // the first opponent's car; the ghost car (-1 none)
     // The free run's recorders: the visit's (ExactFieldOptions::free_run), else the field's own (a replay's: its record's).
@@ -1285,6 +1315,31 @@ bool exact_exit_finish(RaceField& f, bool top_speed_test) {
 bool exact_ghost(const RaceField& f, float alpha, sim::VehicleState& state, const sim::VehicleSetup** setup) {
     const auto* e = dynamic_cast<const ExactField*>(&f);
     return e && e->ghost(alpha, state, setup);
+}
+
+bool exact_car_display(const RaceField& f, int car, float alpha, CarDisplay& out) {
+    const auto* e = dynamic_cast<const ExactField*>(&f);
+    const auto* v = e ? e->car_view(car) : nullptr;
+    if (!v || size_t(car) >= e->race().cars().size()) return false;
+    const ex::Car& c = e->race().cars()[size_t(car)];
+    const sim::VehicleState s = interpolate(v->prev, v->state, alpha);
+    out = CarDisplay{};
+    out.speed_kmh = s.speed_kmh, out.rpm = s.engine_rpm, out.gear = s.gear;
+    out.rev_limit_rpm = v->setup.rev_limit_rpm;
+    out.shift_rpm = v->setup.upshift_rpm > 0 ? v->setup.upshift_rpm : v->setup.rev_limit_rpm - 500;
+    // The car's steering byte (percent of full lock, left positive) and pedals, as the replay's monitors read them.
+    out.steer = -float(c.steer_pct) / 100.0f, out.throttle = c.throttle_pedal.host(), out.brake = c.brake_pedal.host();
+    // The store monitor's (0x1DA790: drive layout 7; 0x1DA7C0: the store over its capacity; 0x1DA7E0: the flow display's
+    // byte at 0 or above).
+    if (e->data() && c.p.d.layout == 7 && !sim::gt3_program(c.behaviour.rule(ex::Rule::HybridStep))) {
+        const ex::Hybrid hy = ex::hybrid_settings(*e->data());
+        if (hy.capacity.host() > 0) {
+            out.hybrid = true;
+            out.hybrid_level = ex::hybrid_store(c).host() / hy.capacity.host();
+            out.hybrid_charging = s8(c.later.special[5]) >= 0;
+        }
+    }
+    return true;
 }
 
 std::optional<bool> exact_playback_matches(const RaceField& f) {

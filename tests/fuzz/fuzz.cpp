@@ -1,6 +1,6 @@
 // Fuzz targets for every reader that sees untrusted bytes: files in downloaded mod car
 // packages (PNG, glTF, JSON, car definitions, the package container), the player's own music
-// (tags, the MP3 / FLAC / WAV decoders and their loudness, the remembered song list) and
+// (tags, the MP3 / FLAC / WAV / Ogg Vorbis decoders and their loudness, the remembered song list) and
 // network input (game datagram payloads, car descriptors, rendezvous messages, version
 // strings and the relay's versions file).
 // docs/dev/ONLINE.md "Fuzzing".
@@ -12,7 +12,7 @@
 //   cmake --build build-fuzz --target gt3r_fuzz
 //   build-fuzz/gt3r_fuzz all 60          # every target, 60 s each (built-in mutation fuzzer)
 //   build-fuzz/gt3r_fuzz glb 600 crash.bin  # one target; extra files are replayed first (and
-//                                          # mutated: real MP3 / FLAC files seed music_decode)
+//                                          # mutated: real MP3 / FLAC / Ogg files seed music_decode)
 //
 // With clang's libFuzzer (Linux): add -DGT3R_LIBFUZZER=ON and run
 //   GT3R_FUZZ_TARGET=glb build-fuzz/gt3r_fuzz corpus/  (coverage guided)
@@ -24,6 +24,7 @@
 #include "formats/png_reader.h"
 #include "formats/png_writer.h"
 #include "game/data/mod_cars.h"
+#include "game/livery_package.h"
 #include "game/mod_package.h"
 #include "game/net_car.h"
 #include "net/protocol.h"
@@ -31,6 +32,9 @@
 #include "net/rendezvous.h"
 #include "net/session.h"
 #include "race/custom_music.h"
+#include "race/custom_paints.h"
+
+#include "../music_fixtures.h"
 
 #include <chrono>
 #include <cmath>
@@ -127,10 +131,10 @@ Bytes tiny_flac_tags() {
     return b;
 }
 
-// Byte 0 picks the format (bits 0-1: MP3, FLAC, WAV, MP3) and for decoding a loop (bit 2).
+// Byte 0 picks the format (bits 0-1: MP3, FLAC, WAV, Ogg) and for decoding a loop (bit 2).
 MusicFileType fuzz_music_type(ByteSpan d) {
     static const MusicFileType kTypes[4] = {MusicFileType::Mp3, MusicFileType::Flac, MusicFileType::Wav,
-                                            MusicFileType::Mp3};
+                                            MusicFileType::Ogg};
     return d.empty() ? MusicFileType::Mp3 : kTypes[d[0] & 3];
 }
 
@@ -204,6 +208,12 @@ std::vector<Target> targets() {
                  o.max_texture_dim = 2048;
                  load_glb(d, o, "fuzz");
              } catch (const std::exception&) {}
+             try { // a downloaded body's images as ours; what it writes loads
+                 const Bytes ours = reencode_glb_images(d, 2048);
+                 try {
+                     load_glb(ours, {}, "fuzz");
+                 } catch (const std::exception&) {} // (geometry the loader refuses stays refused)
+             } catch (const std::exception&) {}
          },
          [] { return std::vector<Bytes>{tiny_glb()}; }},
         {"music_tags", // byte 0: the format; then the file's start (its last 128 bytes are an MP3's tail)
@@ -216,7 +226,8 @@ std::vector<Target> targets() {
          [] {
              return std::vector<Bytes>{music_input(0, tiny_id3(Bytes(160, 0))), music_input(1, tiny_flac_tags()),
                                        music_input(2, tiny_wav(1, 2, 16, "Seed")),
-                                       music_input(0, tiny_id3(tiny_flac_tags()))};
+                                       music_input(0, tiny_id3(tiny_flac_tags())),
+                                       music_input(3, Bytes(test::kTinyOgg, test::kTinyOgg + sizeof(test::kTinyOgg)))};
          }},
         {"music_decode", // byte 0: the format and a loop; then the file, decoded up to 64k frames
          [](ByteSpan d) {
@@ -242,7 +253,8 @@ std::vector<Target> targets() {
          [] {
              return std::vector<Bytes>{music_input(2, tiny_wav(1, 2, 16)), music_input(6, tiny_wav(1, 1, 8)),
                                        music_input(2, tiny_wav(1, 6, 24)), music_input(2, tiny_wav(3, 2, 32)),
-                                       music_input(2, tiny_wav(0xFFFE, 2, 16)), music_input(0, tiny_id3(Bytes(400, 0xFF)))};
+                                       music_input(2, tiny_wav(0xFFFE, 2, 16)), music_input(0, tiny_id3(Bytes(400, 0xFF))),
+                                       music_input(7, Bytes(test::kTinyOgg, test::kTinyOgg + sizeof(test::kTinyOgg)))};
          }},
         {"song_list", // the remembered songs (music_songs.txt), a file in the user data folder
          [](ByteSpan d) {
@@ -272,6 +284,9 @@ std::vector<Target> targets() {
              try {
                  json::Value v = json::Value::parse(std::string_view(reinterpret_cast<const char*>(d.data()), d.size()));
                  (void)v["a"][size_t(3)]["b"].integer();
+                 // What dump writes reads back to the same text.
+                 const std::string once = v.dump();
+                 if (json::Value::parse(once).dump() != once) std::abort();
              } catch (const std::exception&) {}
          },
          [] {
@@ -286,6 +301,23 @@ std::vector<Target> targets() {
              data::parse_tire_size(std::string_view(reinterpret_cast<const char*>(d.data()), std::min<size_t>(d.size(), 32)));
          },
          [] { return std::vector<Bytes>{text(kIni)}; }},
+        {"livery_ini", // a custom paint colour (race/custom_paints.h): a mod's, from a download
+         [](ByteSpan d) {
+             std::string err;
+             race::parse_custom_paint(std::string_view(reinterpret_cast<const char*>(d.data()), d.size()), &err);
+         },
+         [] { return std::vector<Bytes>{text("[livery]\nname = Blue ; comment\nmodel = am0006\ncolor = #1E3A8A\nfinish = 4\n")}; }},
+        {"livery_package", // a livery from another player (game/livery_package.h): the structure checks
+         [](ByteSpan d) {
+             std::string err;
+             game::parse_livery_package(d, &err);
+         },
+         [] {
+             game::LiveryPackage p;
+             p.files.push_back({"livery.ini", text("[livery]\nmodel = ni0137\npaint = 0\n")});
+             p.files.push_back({"p-0123456789abcdef.png", text("not really a png")});
+             return std::vector<Bytes>{game::serialize_livery_package(p)};
+         }},
         {"package",
          [](ByteSpan d) {
              std::string err;
@@ -341,8 +373,13 @@ std::vector<Target> targets() {
              game::OnlineCar md = m; // a mod car's donor after the digest
              md.digest = a.digest;
              md.donor = "legacy_gtb_96";
+             game::OnlineCar ac = a; // an arcade car in a custom colour (lobby flag 2)
+             ac.color = 0x8A3A1Eu;
+             ac.paint = 4;
+             ac.livery = std::string(64, 'd'); // and a livery (lobby flag 4)
+             ac.livery_size = 4096;
              return std::vector<Bytes>{game::encode_online_car(g), game::encode_online_car(m), game::encode_online_car(a),
-                                       game::encode_online_car(gm), game::encode_online_car(md)};
+                                       game::encode_online_car(gm), game::encode_online_car(md), game::encode_online_car(ac)};
          }},
         {"rendezvous",
          [](ByteSpan d) {

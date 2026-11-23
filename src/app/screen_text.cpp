@@ -39,7 +39,12 @@ public:
         case Mode::Strings:
             if (table_.size()) sel_ = std::clamp(sel_ + m.vertical() + page, 0, int(table_.size()) - 1);
             if (m.horizontal()) preview_font_ = (preview_font_ + m.horizontal() + 4) % 4;
-            if (m.pressed(PadButton::Cross)) lang_ = (lang_ + 1) % kLanguageCount;
+            if (m.pressed(PadButton::Cross) && table_.language_count()) {
+                // The file's next pool (its languages, in its order: a nine-pool file has KR and TW after SP).
+                const std::vector<Language>& ls = table_.languages();
+                const auto it = std::find(ls.begin(), ls.end(), Language(lang_));
+                lang_ = int(ls[it == ls.end() ? 0 : size_t(it - ls.begin() + 1) % ls.size()]);
+            }
             break;
         case Mode::Fonts: {
             int n = int(fonts_.names().size());
@@ -61,7 +66,7 @@ public:
         ui.header("TEXT & FONTS", kModeNames[int(mode_)]);
         if (!error_.empty()) {
             ui.text_center(150, error_, colors::kBad);
-            ui.footer("Triangle: back");
+            ui.footer("{Triangle}: back");
             return;
         }
         switch (mode_) {
@@ -117,7 +122,8 @@ private:
         TextStyle st;
         st.scale = 18.0f / font->line_height(); // ~18 px per line
         float y = py + 18;
-        for (int l = 0; l < table_.language_count() && l < kLanguageCount; ++l) {
+        for (const Language lang : table_.languages()) {
+            const int l = int(lang);
             const std::string& raw = table_.raw(sel_, Language(l));
             Color c = l == lang_ ? colors::kAccent : colors::kDim;
             ui.text(px + 6, y + 4, language_code(Language(l)), c);
@@ -141,7 +147,7 @@ private:
         big.valign = VAlign::Middle;
         big.color = {120, 200, 255, 255};
         if (!raw.empty() && y < py + ph - 60) font->draw_game(px + pw / 2, (y + py + ph - 30) / 2, raw, big);
-        ui.footer("Up/Down: key  Left/Right: font  Cross: language  Square: mode  Triangle: back Smeg");
+        ui.footer("Up/Down: key  Left/Right: font  Cross: language  Square: mode  Triangle: back");
     }
 
     void render_fonts(Ui& ui) {
@@ -180,7 +186,7 @@ private:
         st.color = {255, 200, 40, 255};
         st.scale *= 0.75f;
         f->draw(280, 160, d.first > 0x41 || d.last < 0x7A ? sample_digits(d) : "GT3 A-spec  1'23.456  Lap 3/5", st);
-        ui.footer("Left/Right: font  Up/Down: variant  Square: mode  Triangle: back");
+        ui.footer("{Left/Right}: font  {Up/Down}: variant  {Square}: mode  {Triangle}: back");
     }
 
     static std::string sample_digits(const LatinFont& d) {
@@ -219,7 +225,7 @@ private:
                     ui.text(8 + kKanjiCols * cell + 8, 40 + r * cell + 7, code, colors::kDim);
                 }
             }
-        ui.footer("Up/Down: scroll  L1/R1: page  Cross: variant  Square: mode  Triangle: back");
+        ui.footer("{Up/Down}: scroll  {L1}/{R1}: page  {Cross}: variant  {Square}: mode  {Triangle}: back");
     }
 
     bool loaded_ = false;

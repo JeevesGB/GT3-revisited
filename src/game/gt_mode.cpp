@@ -1,4 +1,6 @@
 #include "game/gt_mode.h"
+
+#include "game/concept_game.h"
 #include "game/language_rules.h"
 #include "sim/engine_condition.h"
 
@@ -48,8 +50,9 @@ const char* league_key_tier(const std::string& key) {
     return nullptr;
 }
 
-// The completion a completion prize key needs, 0 for another key: program constants 0.5,
-// 0.75 and 1.0.
+// The completion a completion prize key needs, 0 for another key: program constants 0.5
+// (0x214BFC), 0.75 (0x214C84) and 1.0 (0x214D0C). PAL 0x215B3C / 0x215BC4 / 0x215C4C,
+// NTSC-J 0x211F04 / 0x211F8C / 0x212014.
 float completion_key_ratio(const std::string& key) {
     if (key == "achieve_half") return 0.5f;
     if (key == "achieve_3_quoter") return 0.75f;
@@ -63,6 +66,8 @@ constexpr size_t kEvRegulation = 0x190, kEvLaps = 0x199, kEvLicKind = 0x19A, kEv
                  kEvClass = 0x1F4, kEvAspiration = 0x1F5, kEvDrive = 0x1F6;
 
 u32 license_time(ByteSpan r, size_t off) { return u32(r[off]) * 60000 + u32(r[off + 1]) * 1000 + rd16(r, off + 2); }
+
+} // namespace
 
 // Settings groups re-initialised when a part of the table is fitted.
 void refresh_settings(sim::CarSettings& s, const sim::CarSettings& stock, int table) {
@@ -85,8 +90,6 @@ void refresh_settings(sim::CarSettings& s, const sim::CarSettings& stock, int ta
     default: break;
     }
 }
-
-} // namespace
 
 const char* license_name(License l) {
     static const char* const n[] = {"B", "A", "IB", "IA", "S", "R"};
@@ -138,7 +141,7 @@ const char* check_name(Check c) {
 }
 
 std::string format_credits(s64 v) {
-    // "%ld", then from the
+    // 0x23B868 (PAL 0x23C8E8, NTSC-J 0x238688, every language alike): "%ld", then from the
     // right a ',' (immediate 0x2C) after every third character that has more before it. A
     // minus sign counts as a character (-100 -> "-,100"; the game never shows negative money).
     const std::string d = std::to_string(v);
@@ -167,7 +170,8 @@ std::string fill(std::string_view format, std::initializer_list<std::string_view
 }
 } // namespace
 
-// Program constants, the same strings in the PAL and NTSC-J programs.
+// Program constants, the same strings in the PAL and NTSC-J programs (PAL 0x352C98 /
+// 0x315280, NTSC-J 0x34B4D8 / 0x30E390).
 std::string credits_text(s64 v) { return fill("Cr. %s", {format_credits(v)}); }
 std::string prize_remain_text(std::string_view prefix, s64 v) { return fill("%s Cr. %s", {prefix, format_credits(v)}); }
 
@@ -217,6 +221,9 @@ std::string record_date_text(u32 stamp, Language lang) {
 std::string GtData::ArcadeCar::image() const {
     // "arm_tt_00" -> "tt_00"; "nsx_s_zero_97_290" -> "nsx_s_zero_97" (the power suffix).
     if (label.rfind("arm_", 0) == 0) return label.substr(4);
+    // Gran Turismo Concept's entries: "gtcmr_sl500_02" -> "sl500_02" (the car's label; no GT3 label starts "gtc").
+    if (label.rfind("gtc", 0) == 0)
+        if (const size_t u = label.find('_'); u != std::string::npos) return label.substr(u + 1);
     size_t u = label.rfind('_');
     if (u == std::string::npos || u + 1 >= label.size()) return label;
     for (size_t i = u + 1; i < label.size(); ++i)
@@ -262,15 +269,14 @@ std::vector<std::string> find_builtin_names(const CoreImage& img) {
     return out;
 }
 
-// The slots of a realtime text group (text/realtime.dat keys "<group>_<name>") with their
-// built-in default texts, used when the language's value is empty. The program registers
-// each group with its name, an array of slot names, an array of the slots' texts (initially
-// the defaults) and the slot count, all set up just before the call: the name's address built
-// from its two halves, each array's address from its two halves too (DATABASEPARTS, 80 slots)
-// or as an offset from the global pointer (PRIZE_RT_MSG, one slot), the
-// count a small constant. The global pointer is the value the start-up code builds and hands
-// the thread setup.
-// Empty when the program has no such group.
+} // namespace
+
+// The program registers each realtime text group with its name, an array of slot names, an
+// array of the slots' texts (initially the defaults) and the slot count, all set up just
+// before the call: the name's address built from its two halves, each array's address from
+// its two halves too (DATABASEPARTS, 80 slots: 0x23B568) or as an offset from the global
+// pointer (PRIZE_RT_MSG, one slot: 0x174460), the count a small constant. The global pointer is the value the start-up code builds and hands
+// the thread setup (0x100034 / 0x100048 / 0x10005C).
 std::vector<std::pair<std::string, std::string>> find_realtime_group(const CoreImage& img, std::string_view group) {
     const Bytes& p = img.program;
     const u32 base = img.load_address, end = base + u32(p.size());
@@ -314,6 +320,8 @@ std::vector<std::pair<std::string, std::string>> find_realtime_group(const CoreI
     return out;
 }
 
+namespace {
+
 // One slot's built-in default text ("" when the program has no such slot).
 std::string find_realtime_default(const CoreImage& img, std::string_view group, std::string_view name) {
     for (const auto& [n, t] : find_realtime_group(img, group))
@@ -336,6 +344,7 @@ bool GtData::load(const Reader& read) {
         // and game config; the units, money and names.
         const RegionData rd = region_data(read);
         region = rd.region;
+        game = rd.game;
         language = language_of(read);
         units = language_units(language);
         money_scale = gt3r::money_scale(language);
@@ -348,8 +357,10 @@ bool GtData::load(const Reader& read) {
             if (!b) throw FormatError(p + " not found");
             return std::move(*b);
         };
-        gcf = Gcf::parse(need(rd.gcf_path()));
-        // The game's sums, by name (gcf tag 10; x100 in Japanese). The program reads
+        game_config = rd.gcf_path();
+        game_config_per_language = rd.gcf_per_language;
+        gcf = Gcf::parse(need(game_config));
+        // The game's sums, by name (gcf tag 10; x100 in Japanese, 0x21DCE0). The program reads
         // a missing one through a null pointer, so a game config without them is refused.
         auto sum = [&](const char* name) {
             std::optional<u32> v = gcf.value(name);
@@ -382,8 +393,8 @@ bool GtData::load(const Reader& read) {
         }
         // From the program (CORE.GT3): its built-in record names and realtime-text defaults.
         builtin_names.clear();
-        std::string prize_default;
-        std::vector<std::pair<std::string, std::string>> parts_slots;
+        std::string prize_default, title_default;
+        std::vector<std::pair<std::string, std::string>> parts_slots, setting_slots;
         if (auto core = read(Vfs::kProgramFile)) {
             try {
                 const CoreImage img = CoreImage::decode(*core);
@@ -392,6 +403,8 @@ bool GtData::load(const Reader& read) {
                 if (prize_default.empty()) LOG_WARN("gt mode: the program's PRIZE_RT_MSG_BONUS_PREFIX was not found");
                 parts_slots = find_realtime_group(img, "DATABASEPARTS");
                 if (parts_slots.empty()) LOG_WARN("gt mode: the program's DATABASEPARTS texts were not found");
+                setting_slots = find_realtime_group(img, "SETTING");
+                if (game == GameKind::Concept) title_default = find_realtime_default(img, "MEMORYCARDTEXT", "GTCGameData");
             } catch (const std::exception& e) {
                 LOG_WARN("gt mode: %s: %s", Vfs::kProgramFile, e.what());
             }
@@ -401,16 +414,21 @@ bool GtData::load(const Reader& read) {
         prize_prefix = prize_default;
         part_texts.clear();
         for (const auto& [name, text] : parts_slots) part_texts[name] = text;
+        setting_texts.clear();
+        for (const auto& [name, text] : setting_slots) setting_texts[name] = text;
+        save_title = title_default;
         if (auto rt = read("text/realtime.dat")) {
             try {
                 const text::StringTable t = text::StringTable::parse(*rt);
                 auto value = [&](std::string_view key) -> std::optional<std::string> {
                     const int k = t.find(key);
-                    if (k < 0 || int(language) >= t.language_count() || t.raw(size_t(k), language).empty())
+                    if (k < 0 || !t.has(language) || t.raw(size_t(k), language).empty())
                         return std::nullopt;
                     return t.raw(size_t(k), language);
                 };
                 if (auto v = value("PRIZE_RT_MSG_BONUS_PREFIX")) prize_prefix = *v;
+                if (game == GameKind::Concept)
+                    if (auto v = value("MEMORYCARDTEXT_GTCGameData")) save_title = *v;
                 const std::string group = "DATABASEPARTS_";
                 if (parts_slots.empty()) {
                     for (size_t i = 0; i < t.size(); ++i)
@@ -418,6 +436,8 @@ bool GtData::load(const Reader& read) {
                 }
                 for (auto& [name, text] : part_texts)
                     if (auto v = value(group + name)) text = *v;
+                for (auto& [name, text] : setting_texts)
+                    if (auto v = value("SETTING_" + name)) text = *v;
             } catch (const std::exception& e) {
                 LOG_WARN("gt mode: text/realtime.dat: %s", e.what());
             }
@@ -505,6 +525,24 @@ bool GtData::load(const Reader& read) {
             c.variant = s32(e.u32_at(se + 0xC));
             arcade_classes[e.name].push_back(std::move(c));
         });
+        // Prizes named by arcade class and place (PrizeCar::arcade_class): the disc's own entry of that class.
+        for (PrizeSet& p : prizes)
+            for (PrizeCar& c : p.cars) {
+                const size_t hash = c.car.find('#');
+                if (hash == std::string::npos || hash + 1 >= c.car.size()) continue;
+                const auto cls = arcade_classes.find(c.car.substr(0, hash));
+                size_t place = 0;
+                bool digits = true;
+                for (size_t i = hash + 1; i < c.car.size(); ++i) {
+                    digits = digits && c.car[i] >= '0' && c.car[i] <= '9';
+                    place = place * 10 + size_t(c.car[i] - '0');
+                }
+                if (cls == arcade_classes.end() || !digits || place >= cls->second.size()) continue;
+                c.arcade_class = cls->first;
+                c.arcade_index = int(place);
+                c.car = cls->second[place].label;
+            }
+        concept_lists = game == GameKind::Concept ? concept_rules(*this) : ConceptRules{};
         // Mod cars join their arcade class after the disc's own (game/data/mod_cars.h [arcade]).
         for (const data::ModCar& m : db.mod_cars()) {
             if (m.arcade_class.empty()) continue;
@@ -567,9 +605,9 @@ std::string GtData::model(const std::string& car) const {
     return c ? db.model_of(*c) : std::string();
 }
 
-// Mod cars' own paints ([paints]) get ids of their own: kModColor | car << 12 | paint.
+// Mod cars' own paints ([paints]) get ids of their own (race::mod_paint_id), the ids the race lists them under.
 namespace {
-constexpr u32 kModColor = 0xF0000000u;
+constexpr u32 kModColor = race::kModPaint;
 const data::ModCar* mod_with_paints(const data::CarDatabase& db, const std::string& car) {
     const data::ModCar* m = db.mod_car(car);
     return m && !m->paints.empty() ? m : nullptr;
@@ -592,8 +630,7 @@ int GtData::color_index(const std::string& car, int color_id) const {
 u32 GtData::color_id(const std::string& car, int index) const {
     if (const data::ModCar* m = mod_with_paints(db, car)) {
         if (index < 0 || index >= int(m->paints.size())) return 0xFFFFFFFFu;
-        u32 car_no = u32(m - db.mod_cars().data());
-        return kModColor | (car_no & 0xFFFFu) << 12 | u32(index);
+        return race::mod_paint_id(size_t(m - db.mod_cars().data()), index);
     }
     return colors_.id_at(model(car), index);
 }
@@ -689,7 +726,7 @@ int pick_trophy_index(float completion, u32& rng) {
 }
 
 s64 GtMode::car_price(const std::string& car) const {
-    // The car record's u32 +0xEC, x100 in Japanese.
+    // 0x237BC0: the car record's u32 +0xEC, x100 in Japanese.
     const data::Car* c = db().car(car);
     return c ? s64(data_->money(c->price)) : 0;
 }
@@ -706,27 +743,34 @@ u8 GtMode::car_category(const std::string& car) const {
 
 s64 GtMode::sell_price(const GarageCar& c) const {
     // Program constant: the catalogue price (scaled) / 4, a signed 32-bit division (sra 2 after
-    // the round-toward-zero +3): the sale, the garage car page's price
-    // and the garage list's price column (garage button). The same in the
-    // PAL and NTSC-J programs.
+    // the round-toward-zero +3): the sale 0x219368 (at 0x2193B0), the garage car page's price
+    // 0x11CD28 and the garage list's price column (GarageButton, 0x1BE99C). The same in the
+    // PAL (0x21A3D0) and NTSC-J (0x2166A0) programs.
     return s64(s32(car_price(c.car)) / 4);
 }
 
-std::bitset<88> GtMode::stock_ownership(const std::string& label) const {
+std::bitset<88> GtMode::fitted_ownership(const data::Car& car) const {
     std::bitset<88> owned;
-    const data::Car* car = db().car(label);
-    if (!car) return owned;
-    for (size_t i = 0; i < car->parts.size(); ++i)
-        if (int id = stock_goods(db(), *car, i); id >= 0) owned.set(size_t(id));
+    for (size_t i = 0; i < car.parts.size(); ++i)
+        if (int id = stock_goods(db(), car, i); id >= 0) owned.set(size_t(id));
     // Front tire goods also own the matching rear set.
     for (int f = 56; f <= 65; ++f)
         if (owned.test(size_t(f))) owned.set(size_t(f + 11));
+    return owned;
+}
+
+std::bitset<88> GtMode::stock_ownership(const std::string& label) const {
+    const data::Car* car = db().car(label);
+    if (!car) return {};
+    std::bitset<88> owned = fitted_ownership(*car);
     // Rally cars come with dirt tyres.
     if (car_category(label) == 2) owned.set(66), owned.set(77);
     return owned;
 }
 
 void GtMode::own_stock_goods(GameState& s) const {
+    // (Gran Turismo Concept's garage cars are made from arcade rows and own what the game gives them: concept_new_car.)
+    if (data_->game == GameKind::Concept) return;
     for (GarageCar& c : s.garage) c.owned |= stock_ownership(c.car);
 }
 
@@ -893,7 +937,7 @@ std::string GtMode::sort_value(const GarageCar& c, int key) const {
         return car ? car->maker : std::string();
     }
     case 3: return data_->color_name(data_->color_id(c.car, c.color));
-    // The price column (garage button): what the car sells for, digits only; "-" for
+    // The price column (GarageButton 0x1BE948): what the car sells for, digits only; "-" for
     // a car that cannot be sold (flag bit 1).
     case 4: return car_flags(c.car) & 2 ? std::string("-") : format_credits(sell_price(c));
     case 5: std::snprintf(b, sizeof b, "%.1f km", c.cond.odometer_m / 1000.0); return b;
@@ -974,8 +1018,8 @@ bool GtMode::fit_part(int goods) {
     GarageCar* c = state_.ride_car();
     if (!c || goods < 0 || goods >= kGoodsCount || !c->owned.test(size_t(goods))) return false;
     if (!fit(*c, goods)) return false;
-    // The shop fits a tire set: a front goods fits the matching rear tire too. Change Parts
-    // fits one end only (fit_goods).
+    // The shop fits a tire set: a front goods fits the matching rear tire too (0x126730). Change Parts
+    // fits one end only (fit_goods, 0x167038).
     if (int r = rear_tire_goods(goods); r >= 0) fit(*c, r);
     return true;
 }
@@ -1047,7 +1091,7 @@ Check GtMode::can_buy_wheel(const std::string& wheel) const {
 
 bool GtMode::buy_wheel(const std::string& wheel) {
     // The inventory's slots hold the stock-wheel placeholder too; with none free the original
-    // adds nothing and charges nothing, as here.
+    // adds nothing and charges nothing (0x2196A8), as here.
     if (can_buy_wheel(wheel) != Check::Ok || int(state_.wheels.size()) + 1 >= kMaxWheels) return false;
     state_.credits -= data_->wheel_price();
     state_.wheels.push_back(wheel);
@@ -1065,12 +1109,12 @@ bool GtMode::fit_wheel(int index, const std::string& wheel) {
 }
 
 bool GtMode::fit_shop_wheel(const std::string& wheel) {
-    // The shop's fit action (the same code): the ride
+    // The shop's fit action (0x126160; PAL 0x126268, NTSC-J 0x1259E0, the same code): the ride
     // car's wheel becomes the id of the focused wheel's name, the wheel the purchase was asked
-    // for (set_focus_wheel_code; the purchase hands the same name to the slot search).
+    // for (set_focus_wheel_code; the purchase 0x126120 hands the same name to the slot search).
     // It checks neither the inventory nor the car's no-wheel-change flag (the shop does not open
     // for such a car) and charges nothing. After a purchase refused for want of a free slot the
-    // car so wears a wheel the inventory does not hold: the garage's wheel list then
+    // car so wears a wheel the inventory does not hold: the garage's wheel list (0x1C0D18) then
     // marks none of its buttons as the car's, and the car keeps the wheel until it is changed
     // (the PS2 save stores the car's wheel by id, the inventory's wheels by name).
     GarageCar* c = state_.ride_car();
@@ -1255,8 +1299,8 @@ std::optional<EventRules> GtMode::rules(const std::string& code) const {
     x.cars = r[kEvCars];
     x.laps = r[kEvLaps];
     // Program constant: the prizes and the bonus are stored in hundreds of credits; the readers
-    // multiply by 100 (immediate 0x64: race prizes, the championship bonus),
-    // then x100 again in
+    // multiply by 100 (immediate 0x64: race prizes 0x238950 at 0x238960, the championship bonus
+    // 0x238BC0 at 0x238BCC and 0x133CB0; PAL 0x2399E0, NTSC-J 0x235900), then x100 again in
     // Japanese.
     constexpr u32 kHundreds = 100;
     for (int p = 0; p < 6; ++p) x.prize[size_t(p)] = data_->money(u32(rd16(r, kEvPrize + 2 * size_t(p))) * kHundreds);
@@ -1278,9 +1322,9 @@ std::optional<EventRules> GtMode::rules(const std::string& code) const {
 
 bool GtMode::tuned(const GarageCar& c) const { return tuned(db(), c.car, c.parts); }
 
-// GT3's test (NTSC-U; the entry check and the race information page's Tuning row
-// call it): the car's own record must be found and every fitted part be the car's stock part,
-// and then each of these parts must be its kind's first stage, a missing record
+// GT3's test 0x2362B8 (NTSC-U; the entry check and the race information page's Tuning row
+// call it): the car's own record must be found and every fitted part be the car's stock part
+// (0x236088), and then each of these parts must be its kind's first stage, a missing record
 // counting as that stage. Only the parts count; the settings are never read.
 bool GtMode::tuned(const data::CarDatabase& db, const std::string& label, const std::array<u64, 27>& parts) {
     using T = data::TableId;
@@ -1374,11 +1418,12 @@ std::vector<int> GtMode::pool_paints(const std::string& code, const std::vector<
     bool any = false;
     for (const std::string& l : labels) {
         u32 id = 0xFFFFFFFFu;
-        for (size_t k = 0; k < pool.size(); ++k)
-            if (!used[k] && pool[k] == l) {
-                used[k] = true, id = race::pool_color_id(*ev, int(k));
-                break;
-            }
+        size_t k = 0;
+        while (k < pool.size() && (used[k] || pool[k] != l)) ++k;
+        if (k < pool.size()) used[k] = true;
+        else // a repeat (more opponents than entries): an entry of its car
+            k = size_t(std::find(pool.begin(), pool.end(), l) - pool.begin());
+        if (k < pool.size()) id = race::pool_color_id(*ev, int(k));
         out.push_back(pool_paint(l, id));
         any = any || out.back() >= 0;
     }
@@ -1469,7 +1514,7 @@ Award GtMode::record_round(int place, const std::vector<int>& order) {
     }
     // A round the player left (pause EXIT, not finished) still counts: every other car takes the
     // points of its place in the order (no one moves up), the player none; a finished round
-    // scores every car.
+    // scores every car (0x18EAB8, 0x18E838).
     const bool player_scores = place >= 0;
     for (size_t p = 0; p < finish.size() && p < 6; ++p)
         if (finish[p] >= 0 && finish[p] < n && (player_scores || finish[p] != 0))
@@ -1489,7 +1534,7 @@ Award GtMode::record_round(int place, const std::vector<int>& order) {
             // The trophy_get presentation picks its trophy (its weights from the completion
             // before the title counts), then the title is recorded under the championship's own
             // code (round code with the round number 00: …_0501 -> …_0500), then car_get rolls
-            // the prize car.
+            // the prize car (0x133D30, 0x133D3C, 0x133D48).
             a.trophy = pick_trophy();
             std::string champ = code.substr(0, code.size() - 2) + "00";
             state_.race_best[champ] = 0;
@@ -1518,11 +1563,11 @@ bool GtMode::league_complete(const std::string& tier) const {
 }
 
 float GtMode::completion() const {
-    // gt_mode §4: four (done, total) pairs. GT Mode: the gcf tag-4 result slots won
-    // over their count; arcade: the Clear Status count over the courses
-    // of the gcf SINGLE_RACE list over a fixed 102; time trials beaten
-    // over 10; licence tests with a medal over 48.
-    // All done = 1, else the ratio, at most 0.99. Program constants: the three
+    // 0x219918 (gt_mode §4): four (done, total) pairs. GT Mode: the gcf tag-4 result slots won
+    // over their count (0x216F80 / 0x216FE0); arcade: the Clear Status count over the courses
+    // of the gcf SINGLE_RACE list (0x216980) over a fixed 102 (0x216AE8); time trials beaten
+    // (0x213D48) over 10 (0x213D80); licence tests with a medal (0x215B00) over 48 (0x215BA0).
+    // All done = 1, else the ratio, at most 0.99 (0x350924). Program constants: the three
     // fixed totals and the cap; the same in the PAL and NTSC-J programs.
     constexpr int kArcadeTotal = 102;
     constexpr float kCap = 0.99f;
@@ -1573,8 +1618,8 @@ std::vector<int> GtMode::award_prizes(const std::string& code) {
             auto [races, won] = series_results(n);
             eligible = won == races;
         }
-        // A league's key only with a code of that league (by the code's class; the G
-        // codes' league by "_e_" / "_n_" / "_h_"): the league is complete.
+        // A league's key only with a code of that league (0x214868 by the code's class; the G
+        // codes' league by "_e_" / "_n_" / "_h_", 0x214048): the league is complete.
         else if (const char* tier = league_key_tier(n)) eligible = code_league(code) == tier && league_complete(tier);
         // The whole game: checked with a GT-mode code (not arcade), every GT-mode result won.
         else if (n == "gtmode_complete") eligible = gt_mode_code(code) && all_races_won();
@@ -1841,7 +1886,7 @@ bool GtMode::arcade_all_won_at(int d) const {
 }
 
 int GtMode::arcade_completion() const {
-    // Per course of the SINGLE_RACE list, won at Easy, Normal or Hard; at Normal or
+    // 0x216980: per course of the SINGLE_RACE list, won at Easy, Normal or Hard; at Normal or
     // Hard; at Hard.
     int n = 0;
     for (int i = 0; i < arcade_course_count(); ++i)
@@ -1918,7 +1963,7 @@ GtMode::ArcadeOutcome GtMode::arcade_single_race(const std::string& code, const 
         ++state_.trophies;
         a.awards |= 0x1000u << d;
     }
-    int& best = a.best[size_t(d * arcade_course_count() + i)]; // difficulty x list size + course
+    int& best = a.best[size_t(d * arcade_course_count() + i)]; // 0x216640: difficulty x list size + course
     if (place < best) {
         best = place;
         out.improved = true;

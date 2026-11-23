@@ -16,6 +16,7 @@
 #include "game/data/mod_cars.h"
 #include "exact_drive.h"
 #include "race/exact_setup.h"
+#include "race/paint.h"
 #include "race/results.h"
 #include "sim/car_spec.h"
 #include "sim/exact/race_flow.h"
@@ -136,6 +137,37 @@ TEST(modcar_parse) {
     warns.clear();
     CHECK(data::parse_mod_car("[car]\nlabel = x\nname = X\ndonor = y\nspoiler = big\n", &err, &warns).has_value());
     CHECK(warns.size() == 1);
+}
+
+TEST(modcar_model_scenes) {
+    // Issue 412: a menu model (no driver) and race models (with one), each falling back so
+    // any single file serves every scene.
+    using data::CarScene;
+    auto files = [](const std::string& model) {
+        std::string err;
+        auto d = data::parse_mod_car("[car]\nlabel = x\nname = X\ndonor = y\n[model]\n" + model, &err);
+        CHECK(d.has_value());
+        return d ? data::resolve_model_files(*d) : std::array<std::string, data::kCarScenes>{};
+    };
+    auto is = [](const std::array<std::string, data::kCarScenes>& f, const char* menu, const char* day,
+                 const char* eve, const char* night) {
+        return f[size_t(CarScene::Menu)] == menu && f[size_t(CarScene::Day)] == day &&
+               f[size_t(CarScene::Eve)] == eve && f[size_t(CarScene::Night)] == night;
+    };
+    CHECK(is(files("wheel = a\n"), "", "", "", ""));
+    CHECK(is(files("file = a.glb\n"), "a.glb", "a.glb", "a.glb", "a.glb"));
+    CHECK(is(files("menu = m.glb\n"), "m.glb", "m.glb", "m.glb", "m.glb"));
+    CHECK(is(files("race = r.glb\n"), "r.glb", "r.glb", "r.glb", "r.glb"));
+    CHECK(is(files("menu = m.glb\nrace = r.glb\n"), "m.glb", "r.glb", "r.glb", "r.glb"));
+    CHECK(is(files("file = a.glb\nrace = r.glb\n"), "a.glb", "r.glb", "r.glb", "r.glb"));
+    CHECK(is(files("file = a.glb\nmenu = m.glb\n"), "m.glb", "a.glb", "a.glb", "a.glb"));
+    CHECK(is(files("menu = m.glb\nrace = r.glb\nnight = n.glb\n"), "m.glb", "r.glb", "r.glb", "n.glb"));
+    // Only some times of day: the others take the first given, then the menus do too.
+    CHECK(is(files("night = n.glb\n"), "n.glb", "n.glb", "n.glb", "n.glb"));
+    CHECK(is(files("eve = e.glb\nnight = n.glb\nmenu = m.glb\n"), "m.glb", "e.glb", "e.glb", "n.glb"));
+    std::string err;
+    auto d = data::parse_mod_car("[car]\nlabel = x\nname = X\ndonor = y\n[model]\nfile = a.glb\nmenu = a.glb\nday = d.glb\n", &err);
+    CHECK(d && data::model_files_of(*d) == std::vector<std::string>({"a.glb", "d.glb"}));
 }
 
 TEST(adpcm_encode_roundtrip) {
@@ -281,6 +313,65 @@ TEST(modcar_texts_game_text) {
         CHECK(db->mod_makers()[0].name == disc_maker);
         CHECK(db->mod_makers()[0].description == "\x81\xC0 Paris");
     }
+}
+
+// Issue 413: a mod car's own paints ([paints]) are listed for the race under the car (mod cars may share a body), with
+// the ids GT Mode gives them, so a chosen paint holds and "draw at start" draws from the car's own list, not paint 0.
+TEST(modcar_race_paints) {
+    auto db = cardb::empty_database();
+    CHECK(db != nullptr);
+    if (!db) return;
+    cardb::add_car(*db, "syn_donor", 300, 75, "zz0001");
+    const ByteSpan* rec = db->record(data::TableId::Car, "syn_donor");
+    CHECK(rec != nullptr);
+    if (!rec) return;
+    Bytes car(rec->begin(), rec->end());
+    for (const auto& [t, slot, l] : {std::tuple{data::TableId::Drivetrain, 13, "dt_syn_donor"},
+                                     std::tuple{data::TableId::Gear, 18, "ge_syn_donor"}}) {
+        db->add_label(l);
+        Bytes r(0x40);
+        cardb::put64(r, 0, db::id_hash(l));
+        cardb::put64(r, 8, db::id_hash("syn_donor"));
+        db->put_record(t, r);
+        cardb::put64(car, size_t(8 + 8 * slot), db::id_hash(l));
+    }
+    db->put_record(data::TableId::Car, car);
+    db->rebuild();
+    std::string err;
+    auto plain = data::parse_mod_car("[car]\nlabel = syn_plain\nname = Plain\ndonor = syn_donor\n", &err);
+    auto painted = data::parse_mod_car("[car]\nlabel = syn_painted\nname = Painted\ndonor = syn_donor\n"
+                                       "[paints]\nRed = #FF0000\nGreen = #00FF00\nBlue = #0000FF\n",
+                                       &err);
+    CHECK(plain && painted);
+    if (!plain || !painted) return;
+    CHECK(data::add_mod_car(*db, *plain, &err) && data::add_mod_car(*db, *painted, &err));
+    db->rebuild();
+    const std::string model = db->model_of(*db->car("syn_painted"));
+    CHECK(model == "zz0001"); // the donor's body
+    CHECK(race::paint_key(*db, "syn_donor", model) == model);
+    CHECK(race::paint_key(*db, "syn_plain", model) == model); // no paints of its own: the body's list
+    const std::string key = race::paint_key(*db, "syn_painted", model);
+    CHECK(key == "mod:syn_painted");
+    size_t mod_no = size_t(db->mod_car("syn_painted") - db->mod_cars().data());
+    race::CarColors colors;
+    colors.add_mod_cars(*db);
+    const std::vector<u32>* ids = colors.ids(key);
+    CHECK(ids && ids->size() == 3);
+    CHECK(colors.ids(model) == nullptr); // the disc's list (none here) is left alone
+    CHECK(colors.id_at(key, 1) == race::mod_paint_id(mod_no, 1) && colors.index_of(key, race::mod_paint_id(mod_no, 2)) == 2);
+    CHECK(colors.rgb(colors.id_at(key, 0)) == 0x0000FFu && colors.rgb(colors.id_at(key, 2)) == 0xFF0000u); // bytes R, G, B
+    // A chosen paint holds; unset ones are drawn from the car's own three, so the field is not all paint 0.
+    std::vector<race::PaintEntry> e(4, race::PaintEntry{key});
+    e[1].id = colors.id_at(key, 2);
+    race::PaintRng rng;
+    std::vector<int> p = race::assign_paints(colors, e, rng);
+    CHECK(p.size() == 4 && p[1] == 2);
+    bool all_first = true;
+    for (int k : p) {
+        CHECK(k >= 0 && k < 3);
+        all_first = all_first && k == 0;
+    }
+    CHECK(!all_first);
 }
 
 // Through CarDatabase::load with a mods list: the disc's JIS table (font/jis2uni.dat) encodes Japanese in a mod's names
@@ -842,7 +933,7 @@ TEST(example_mod_car) {
     }
 
     // The body: a glTF the loader reads, sized like the [body] numbers, with paint and glass.
-    auto glb = read_host_file(m->model_file);
+    auto glb = read_host_file(m->model_file(data::CarScene::Menu));
     CHECK(glb.has_value() && glb->size() < 4u * 1024 * 1024);
     if (!glb) return;
     scene::Model body = load_glb(*glb, GlbOptions{}, label);
@@ -863,6 +954,37 @@ TEST(example_mod_car) {
     CHECK(std::fabs((body.bounds_max[0] - body.bounds_min[0]) - 2.34f) < 0.03f); // with the mirrors
     CHECK(body.bounds_min[2] < -2.2f && body.bounds_max[2] < 2.1f);               // longer front overhang
     CHECK(body.bounds_min[1] > 0.05f && body.bounds_min[1] < 0.15f && std::fabs(body.bounds_max[1] - 1.149f) < 0.02f);
+    // One `file`: every scene draws it.
+    for (size_t i = 1; i < data::kCarScenes; ++i) CHECK(m->model_files[i] == m->model_files[0]);
+    {
+        // A menu model and a race model (issue 412): the menus draw one, races of every time
+        // of day the other.
+        const std::filesystem::path dir2 = test::temp_path("scene_models");
+        std::filesystem::create_directories(dir2 / "cars");
+        const std::string race_glb = (dir2 / "race.glb").string();
+        CHECK(write_host_file(race_glb, *glb));
+        std::string ini(text->begin(), text->end());
+        const size_t at = ini.find("\nfile = ");
+        CHECK(at != std::string::npos);
+        if (at == std::string::npos) return;
+        ini.replace(at, ini.find('\n', at + 1) - at, "\nmenu = " + m->model_files[0] + "\nrace = race.glb");
+        const std::string file2 = (dir2 / "cars" / (label + ".ini")).string();
+        CHECK(write_host_file(file2, Bytes(ini.begin(), ini.end())));
+        data::CarDatabase db2;
+        CHECK(db2.load(disc->volume()));
+        data::load_mod_maker_file(db2, dir + "/makers/gt3r.ini", "example_coupe");
+        data::load_mod_car_files(db2, {file2}, "scene_models");
+        db2.rebuild();
+        CHECK(db2.mod_car_errors().empty());
+        const data::ModCar* m2 = db2.mod_car(label);
+        CHECK(m2 && m2->model_file(data::CarScene::Menu) == m->model_files[0]);
+        if (!m2) return;
+        for (data::CarScene sc : {data::CarScene::Day, data::CarScene::Eve, data::CarScene::Night})
+            CHECK(m2->model_file(sc) == race_glb);
+        CarBodyMod menu_body = body_mod_for_car(db2, label, 0, data::CarScene::Menu);
+        CarBodyMod race_body = body_mod_for_car(db2, label, 0, data::CarScene::Night);
+        CHECK(menu_body.glb && race_body.glb && menu_body.glb != race_body.glb);
+    }
     // The engine's wheels match the modelled ones (768 mm across).
     auto ws = wheel_spec_for_car(db, label);
     CHECK(ws.has_value() && std::fabs(ws->radius[0] - 0.384f) < 0.01f && std::fabs(ws->radius[1] - 0.384f) < 0.01f);
@@ -902,7 +1024,7 @@ TEST(example_mod_car_electric) {
     CHECK(db.mod_car_errors().empty());
     const data::ModCar* m = db.mod_car(label);
     const data::ModCar* c = db.mod_car(coupe);
-    CHECK(m && c && m->electric && !c->electric && m->model_file == c->model_file);
+    CHECK(m && c && m->electric && !c->electric && m->model_files == c->model_files);
     if (!m) return;
     CHECK(m->for_sale && !m->picture.empty() && !m->thumb.empty());
     for (const std::string* png : {&m->picture, &m->thumb}) {
@@ -1036,4 +1158,30 @@ TEST(mod_car_arcade_matches_garage) {
     const data::Car* none = db.car("test_arcade_none");
     const ByteSpan* en = none ? db.record(T::Engine, none->parts[6]) : nullptr;
     CHECK(en && en->size() > 0x45 && (*en)[0x45] == 72);
+}
+
+// A glTF body's textures the game draws white are named for the modder: a JPEG, a file beside the .glb.
+TEST(mod_car_glb_image_warnings) {
+    auto glb_with = [](const std::string& images) {
+        std::string json = R"({"asset":{"version":"2.0"},"images":)" + images + "}";
+        while (json.size() % 4) json += ' ';
+        Bytes g;
+        auto u32le = [&](u32 v) { for (int i = 0; i < 4; ++i) g.push_back(u8(v >> (8 * i))); };
+        g.insert(g.end(), {'g', 'l', 'T', 'F'});
+        u32le(2);
+        u32le(u32(12 + 8 + json.size()));
+        u32le(u32(json.size()));
+        u32le(0x4E4F534A);
+        g.insert(g.end(), json.begin(), json.end());
+        return g;
+    };
+    CHECK(glb_image_warnings(glb_with(R"([{"bufferView":0,"mimeType":"image/png"}])")).empty());
+    const std::vector<std::string> w =
+        glb_image_warnings(glb_with(R"([{"bufferView":0,"mimeType":"image/png"},{"bufferView":1,"mimeType":"image/jpeg","name":"door"},{"uri":"x.png"}])"));
+    CHECK(w.size() == 2);
+    if (w.size() == 2) {
+        CHECK(w[0] == "texture \"door\": JPEG, shows white (use PNG)");
+        CHECK(w[1] == "texture 2: separate file, shows white (embed it)");
+    }
+    CHECK(glb_image_warnings(Bytes{'n', 'o'}).empty());
 }

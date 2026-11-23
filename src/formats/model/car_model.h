@@ -80,7 +80,13 @@ struct CarModelOptions {
     bool effects = false;      // include the extra nodes (ground shadow, glow shells)
     bool floor_shadow = false; // include node 6 (mesh "node6"): in menu/cars files the showroom's floor shadow
     bool reflection = true;    // include the environment-map (reflection) passes
-    int paint = 0;             // colour index into the car's list in database/carcolor.db
+    int paint = 0;             // colour index into the car's list in database/carcolor.db (past it: computed paints)
+    // A computed colour in place of `paint` (gtm1::ComputedPaint). Unset: load_car_model asks the
+    // paint resolver (set_paint_resolver) about `paint`.
+    std::optional<gtm1::ComputedPaint> computed_paint;
+    // A livery's pictures over the paint (gtm1::Options::livery); unset: as the resolver says.
+    std::shared_ptr<const texture_pack::Pack> livery;
+    bool resolve_paint = true; // false: `paint` is a disc paint, whatever the resolver says
     bool wheels = true;        // add wheels + generated tyres
     bool menu_tyres = false;   // the menus' tyres (30 segments) and brake parts; else the race's tyres for each LOD (tyre_model.h)
     // Another wheel to fit instead of the car's own: the contents of a wheel/<label>
@@ -103,11 +109,15 @@ struct CarModelOptions {
     std::optional<WheelSpec> wheel_spec; // placement; estimated from the body when absent
     bool brake = false;        // the brake-lamp branch of the node programs (lit lenses)
     CarBodyMod body_mod;       // mod cars: stretched or replaced body
-    // When set, the draws the car's callback morphs (mud flaps, aerials, steering) are left
-    // out of the body and built into these, one per LOD that has any (texture indices: the
-    // returned model's). Without it they are drawn with the callback's defaults
+    // When set, the draws the car's callback morphs (mud flaps, aerials, steering, the later
+    // builds' wings) and the draws under the callback's branches (the pod's tail, lamps and faces)
+    // are left out of the body and built into these, one per LOD that has any (texture indices:
+    // the returned model's). Without it they are drawn with the callback's defaults
     // (gtm1::kCarCallbackDefaults). Not for mod bodies.
     std::vector<gtm1::MorphDraws>* morphs = nullptr;
+    // When set, receives the texture sets with CLUT animations the model uses (the pod's faces: the
+    // callback's id 10 plays the group of its mood), `first` the returned model's texture index.
+    std::vector<gtm1::ClutSet>* clut_sets = nullptr;
 };
 
 // Flags a car body's windows scene::kGlass, for a view from inside without them. GT3 glass is a
@@ -124,6 +134,18 @@ void mark_car_glass(scene::Model& model);
 
 // Number of distinct LOD branches node `node` takes (1 when it has no LOD switch).
 int gtm1_lod_count(const gtm1::Gtm1& g, u32 node);
+
+// Paint indices past a model's disc colours name the custom colours installed for it
+// (race/custom_paints.h, docs/dev/CUSTOM_PAINTS.md). The app sets the resolver that turns
+// (model, paint) into one; none set, or none for that index: the index as it is.
+struct ResolvedPaint {
+    int paint = 0;                                   // the disc paint underneath (material set; a livery's keys)
+    std::optional<gtm1::ComputedPaint> computed;     // a computed colour
+    std::shared_ptr<const texture_pack::Pack> livery; // a livery's pictures
+};
+using PaintResolver = std::function<std::optional<ResolvedPaint>(const std::string& model, int paint)>;
+void set_paint_resolver(PaintResolver resolver);
+std::optional<ResolvedPaint> resolve_paint(const std::string& model, int paint);
 
 // Decodes a whole car file into a Model: mesh "body" (+ "node<N>" effects,
 // + "wheel_fl/fr/rl/rr"). Textures of every set used are included.

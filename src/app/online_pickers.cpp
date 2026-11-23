@@ -5,6 +5,7 @@
 #include "app/app.h"
 #include "app/ui.h"
 #include "base/log.h"
+#include "formats/course/ai_lines.h"
 #include "formats/course/course_file.h"
 #include "formats/course/road.h"
 #include "formats/model/car_model.h"
@@ -16,6 +17,7 @@
 #include "menu/flow/menu_sound.h"
 #include "menu/flow/options.h"
 #include "race/backend.h"
+#include "race/custom_paints.h"
 #include "race/paint.h"
 #include "render/gpu_model.h"
 #include "render/showroom.h"
@@ -97,6 +99,24 @@ int course_grid_size(const Vfs& vfs, const std::string& course) {
     try {
         const course::CourseFile cf = course::CourseFile::parse(*f);
         return int(course::Road::parse(cf.section(*f, course::kSlotRoad)).grid.size());
+    } catch (const std::exception& e) {
+        LOG_WARN("%s's start grid: %s", course.c_str(), e.what());
+        return 0;
+    }
+}
+
+int course_field_size(const Vfs& vfs, const std::string& course) {
+    std::optional<Bytes> f = vfs.read(course_file_path(vfs, course));
+    if (!f) return 0;
+    try {
+        const course::CourseFile cf = course::CourseFile::parse(*f);
+        const int grid = int(course::Road::parse(cf.section(*f, course::kSlotRoad)).grid.size());
+        if (grid <= 0) return 0;
+        const ByteSpan lines = cf.section(*f, course::kSlotAiLines);
+        bool line = false;
+        if (!lines.empty())
+            for (const course::AiLine& l : course::AiLines::parse(lines).lines) line = line || !l.points.empty();
+        return line ? kMaxFieldCars : std::min(grid, 8);
     } catch (const std::exception& e) {
         LOG_WARN("%s's start grid: %s", course.c_str(), e.what());
         return 0;
@@ -510,7 +530,7 @@ void CarTurntable::draw(App& app, const SDL_FRect& dst, const data::CarDatabase&
                 opt.menu_tyres = true;
                 opt.paint = paint;
                 opt.wheel_spec = race::car_setup_from_database(db, car.label).wheels;
-                opt.body_mod = body_mod_for_car(db, car.label, paint);
+                opt.body_mod = body_mod_for_car(db, car.label, paint, data::CarScene::Menu);
                 std::optional<Bytes> wheel_file;
                 if (!car.wheel.empty()) wheel_file = app.vfs()->read("wheel/" + car.wheel);
                 else if (!opt.body_mod.wheel.empty()) wheel_file = app.vfs()->read("wheel/" + opt.body_mod.wheel);
@@ -716,6 +736,14 @@ std::vector<PaintInfo> CarPicker::paints(App& app, const PickerCar& c) const {
             int n = gd->color_count(c.label);
             for (int i = 0; i < n; ++i) out.push_back(info(gd->color_id(c.label, i)));
         }
+    } else if (const data::ModCar* m = db_ ? db_->mod_car(c.label) : nullptr; m && !m->paints.empty()) {
+        // A mod car's own paints ([paints]), as the race draws them (race::CarColors::add_mod_cars).
+        auto byte = [](float v) { return u32(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+        for (size_t i = 0; i < m->paints.size(); ++i)
+            if (c.garage < 0 || int(i) == c.paint) {
+                const std::array<float, 3>& v = m->paints[i].second;
+                out.push_back({byte(v[0]) | byte(v[1]) << 8 | byte(v[2]) << 16, ""});
+            }
     } else if (app.vfs()) {
         static race::CarColors colors; // the disc's paint table, when GT Mode data is not loaded
         static bool loaded = colors.load(*app.vfs());
@@ -729,6 +757,13 @@ std::vector<PaintInfo> CarPicker::paints(App& app, const PickerCar& c) const {
             }
     }
     if (out.empty()) out.push_back({0x808080, ""});
+    // The model's custom colours after the disc's (race/custom_paints.h): paint index disc count + k.
+    if (c.garage < 0 && !c.mod) {
+        std::shared_ptr<const race::CustomPaints> custom = race::custom_paints();
+        if (custom->disc_count(c.model) == int(out.size()))
+            for (const race::CustomPaint& p : custom->of(c.model))
+                if (p.listed()) out.push_back({p.rgb, p.name});
+    }
     return out;
 }
 
@@ -1030,7 +1065,7 @@ void CarPicker::render(App& app, Ui& ui) {
         ui.clear();
         ui.header("CAR SELECT", "");
         ui.text_center(150, "No cars", colors::kBad);
-        footer_actions(ui, "", {{"Triangle: back", kBack}}, hits_, kFooter, pointer_);
+        footer_actions(ui, "", {{"{Triangle}: back", kBack}}, hits_, kFooter, pointer_);
         return;
     }
     if (in_group_ && !groups_.empty()) render_cars(app, ui);
@@ -1066,19 +1101,19 @@ void CarPicker::render_groups(App& app, Ui& ui) {
     ui.header("CAR SELECT", by_class_ ? "Choose a class" : "Choose a maker");
     render_tabs(app, ui, kTabsY);
     std::vector<FooterAction> foot;
-    if (!groups_.empty()) foot.push_back({"Cross: its cars", kChoose});
-    if (has_classes_) foot.push_back({by_class_ ? "L1/R1: makers" : "L1/R1: classes", kSwitchView});
-    if (allowed_) foot.push_back({allowed_only_ ? "Square: all cars" : "Square: allowed only", kToggleFilter});
-    foot.push_back({"Triangle: back", kBack});
+    if (!groups_.empty()) foot.push_back({"{Cross}: its cars", kChoose});
+    if (has_classes_) foot.push_back({by_class_ ? "{L1}/{R1}: makers" : "{L1}/{R1}: classes", kSwitchView});
+    if (allowed_) foot.push_back({allowed_only_ ? "{Square}: all cars" : "{Square}: allowed only", kToggleFilter});
+    foot.push_back({"{Triangle}: back", kBack});
     if (groups_.empty()) {
         if (!filtering()) {
             ui.text_center(130, "No cars here.", colors::kText);
         } else {
             ui.text_center(130, by_class_ ? "No class car meets this lobby's rules." : "No maker's car meets this lobby's rules.",
                            colors::kText);
-            ui.text_center(146, !has_classes_ ? "Show all cars (Square)."
-                                : by_class_   ? "Try the makers (L1/R1), or show all cars (Square)."
-                                              : "Try the classes (L1/R1), or show all cars (Square).",
+            ui.text_center(146, !has_classes_ ? "Show all cars ({Square})."
+                                : by_class_   ? "Try the makers ({L1}/{R1}), or show all cars ({Square})."
+                                              : "Try the classes ({L1}/{R1}), or show all cars ({Square}).",
                            colors::kDim);
         }
         footer_actions(ui, "", foot, hits_, kFooter, pointer_);
@@ -1122,7 +1157,7 @@ void CarPicker::render_groups(App& app, Ui& ui) {
         ui.scrollbar(view, float(rows) * (gr.h + gr.gap), float(group_scroll_) * (gr.h + gr.gap));
     }
     ui.text_center(gr.y0 + float(gr.rows) * (gr.h + gr.gap) + 2, groups_[size_t(group_)].title, colors::kAccent);
-    footer_actions(ui, "Arrows: choose", foot, hits_, kFooter, pointer_);
+    footer_actions(ui, "{Arrows}: choose", foot, hits_, kFooter, pointer_);
 }
 
 void CarPicker::render_cars(App& app, Ui& ui) {
@@ -1256,12 +1291,12 @@ void CarPicker::render_cars(App& app, Ui& ui) {
     std::string note = note_ ? note_(car_, paint) : "";
     if (!note.empty()) ui.text_center(kStripY + 38, Ui::clip(note, 600), colors::kBad);
     else ui.text_center(kStripY + 38, std::to_string(pos_ + 1) + " / " + std::to_string(n), colors::kDim);
-    std::vector<FooterAction> foot{{"Cross: choose", kChoose}};
-    if (allowed_) foot.push_back({allowed_only_ ? "Square: all cars" : "Square: allowed only", kToggleFilter});
+    std::vector<FooterAction> foot{{"{Cross}: choose", kChoose}};
+    if (allowed_) foot.push_back({allowed_only_ ? "{Square}: all cars" : "{Square}: allowed only", kToggleFilter});
     const char* groups = by_class_ ? "classes" : "makers";
-    if (!from_groups_) foot.push_back({std::string("Circle: ") + groups, kGroups});
-    foot.push_back({from_groups_ ? std::string("Triangle: ") + groups : std::string("Triangle: back"), kBack});
-    footer_actions(ui, "Left/Right: car (L1/R1: x10)   Up/Down: paint", foot, hits_, kFooter, pointer_);
+    if (!from_groups_) foot.push_back({std::string("{Circle}: ") + groups, kGroups});
+    foot.push_back({from_groups_ ? std::string("{Triangle}: ") + groups : std::string("{Triangle}: back"), kBack});
+    footer_actions(ui, "{Left/Right}: car ({L1}/{R1}: x10)   {Up/Down}: paint", foot, hits_, kFooter, pointer_);
 }
 
 // --- course picker ---
@@ -1355,7 +1390,7 @@ void CoursePicker::render(App& app, Ui& ui, PickerArt& art) {
     if (!n) {
         ui.header("COURSE SELECT", "");
         ui.text_center(150, "No courses", colors::kBad);
-        footer_actions(ui, "", {{"Triangle: back", 1}}, hits_, kFooter, pointer_);
+        footer_actions(ui, "", {{"{Triangle}: back", 1}}, hits_, kFooter, pointer_);
         return;
     }
     const PickerCourse& c = (*courses_)[size_t(sel_)];
@@ -1431,7 +1466,7 @@ void CoursePicker::render(App& app, Ui& ui, PickerArt& art) {
         ui.text_right(Ui::kWidth - 6, kY + 17, ">", colors::kAccent);
         hits_.add({Ui::kWidth - 20, kY - 4, 20, kIconH + 8}, kStripArrow, 1);
     }
-    footer_actions(ui, "Left/Right: course (L1/R1: x10)", {{"Cross: choose", 0}, {back_, 1}}, hits_,
+    footer_actions(ui, "{Left/Right}: course ({L1}/{R1}: x10)", {{"{Cross}: choose", 0}, {back_, 1}}, hits_,
                    kFooter, pointer_);
 }
 

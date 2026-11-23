@@ -1,6 +1,6 @@
 #pragma once
 
-// The lineup of a race the player sets up: one to five CPU cars, each any car in any of its colours with a skill, and the
+// The lineup of a race the player sets up: one to kMaxCars CPU cars (as many as the course's field holds, set_limit), each any car in any of its colours with a skill, and the
 // player's own place among them, pole first. Rows for the page that shows them (Quick race's custom race): the number of
 // opponents, the player's place, every opponent's skill, then the lineup. The page keeps the cursor and the car page; action()
 // says whose car is to be chosen. The page gives the grid the cars, and the limit its course's start grid sets (0: no room, no rows).
@@ -28,13 +28,16 @@ class CarDatabase;
 
 class OpponentGrid {
 public:
-    static constexpr int kMaxCars = 5; // (a race has six cars, the player's included)
+    static constexpr int kMaxCars = kMaxFieldCars - 1; // (a field of our own has up to 32 cars, the player's included)
+    static constexpr int kDefaultCount = 5;             // the opponents of a lineup not set up yet (GT3's six-car races)
     static constexpr int kPlayer = kMaxCars; // who: the player, as against opponents 0 .. kMaxCars - 1
     static constexpr int kNobody = -1;
     static constexpr int kSkills = 4;
+    static constexpr int kConceptSkills = 3; // a Gran Turismo Concept disc's single-race levels
     static constexpr int kDefaultSkill = 1;
     static constexpr float kRowH = 22, kCarH = 37;
-    static const char* skill_name(int skill); // "Easy" .. "Professional"
+    // "Easy" .. "Professional"; on a Gran Turismo Concept disc its levels "Normal", "Professional", "Ace".
+    static const char* skill_name(int skill, bool concept_levels = false);
     static std::string ordinal(int n);        // "1st", "2nd", ...
     // The arcade race a skill's driver overrides come from on a course's surface (A{E,N,H,P}ST0001, dirt A?AD0001), and the
     // overrides themselves as this disc has them (nullopt: no such race on this disc).
@@ -72,6 +75,10 @@ public:
         count_text_ = std::move(count), place_text_ = std::move(place), players_text_ = std::move(players);
     }
     void set_read_only(bool on) { read_only_ = on; } // no arrows; action() changes nothing
+    // A Gran Turismo Concept disc: the skills are its three single-race levels (concept_cpu_driver).
+    void set_concept_levels(bool on);
+    bool concept_levels() const { return concept_; }
+    int skills() const { return concept_ ? kConceptSkills : kSkills; }
     int count() const { return count_; }
     void set_count(int n) { count_ = n; }
     void set_place(int k, Car c); // (finds its car)
@@ -104,6 +111,7 @@ private:
     std::array<Car, kMaxCars> cars_;
     int count_ = 0, limit_ = kMaxCars, place_ = kMaxCars, min_ = 1;
     bool read_only_ = false;
+    bool concept_ = false;
     std::string count_text_ = "Opponents", place_text_ = "Your place", players_text_;
     int player_car_ = 0, player_paint_ = 0;
     const std::vector<PickerCar>* list_ = nullptr;

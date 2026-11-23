@@ -277,9 +277,12 @@ There is one shader pair. Per-primitive state comes from
 | `kAdditive \| kDestAlphaAdd` | GS ALPHA 0x58 (Cs·Ad + Cd): with `DrawItem::frame_alpha`, added weighted by the frame-buffer alpha (`BlendMode::DestAlphaAdd`); elsewhere plain additive (src·α + dst). The course road sheen and other blended ALPHA 0x58 course packets |
 | `Material::specular_local` | the road sheen's VU program (chunk kind 4): the texel × the first light's specular only, Phong with a local viewer 2 m above the camera (× `DrawItem::modelview_scale` rules), not clamped, fogged to black (see "GT3 lighting") |
 | `kAdditive \| kEnvironmentMap \| kUnlit` (or untextured) | car reflection pass (PS2 ALPHA Cs·Ad + Cd): `env_color(reflect(view, n))` × min(vertex RGB × weight, 255/128) × `DrawOptions::reflection_strength`, added with weight = vertex alpha × texture alpha. The bound texture is the base pass's texture with its UVs; its alpha is the per-pixel reflectivity (0 in cut-outs). The per-vertex weight is the primitive's reflection rows `env_c0 + env_c1 × min(V·N, 0)` (decoded from the node program), else `1 + reflection_fresnel × min(V·N, 0)`. See docs/formats/car_model.md. |
+| car reflection pass with `Primitive::under_ref` ≥ 0 and `under_alpha` > 0 | over an alpha-tested pass, its failing texels weighted by the alpha under it: drawn twice, the cut-out's hole with the item's opaque passes (before the items after it: GT3 draws a car's wheels after its body, so they cover a reflection across a wheel arch's hole, which wrote no depth), the rest in the blended phase |
 | `DrawOptions::env_sphere` | car reflection passes sample this 2D sphere map in eye space (GT3's kernel: s = 0.5 + 0.5 Rx / m, t = 0.5 − 0.5 Ry / m, m = \|R + (0, 0, 1)\|) instead of the cube / gradient: the menu showrooms' fixed reflection image |
 | `DrawOptions::quantize_rgb5` | every fragment stored at 5 bits per channel (c8 >> 3 << 3): set while the race renders GT3's reflection map (a PSMCT16 frame buffer) into the cube, so the reflection lookup filters between quantised texels as the GS does |
 | `kMultiplyDest` | GS ALPHA 0x89 (Cd·As): destination × fragment alpha (prize cup rims) |
+| `kClampU` / `kClampV` | every UV of the primitive lies inside its texture on that axis (within a float step; `gtm1::mark_inside_uvs`, on every GTM1 model): sampled clamped there, so filtering never takes in the texture's far side (Midfield's pines, the Astra Touring Car's mirrored grille halves) |
+| `Primitive::uv_region` | the primitive stops on a texel edge inside its texture beside different texels (a picture packed beside another: Trial Mountain's GRAN TURISMO billboards end at texel 192 of 256): `region_uv` in `model.frag` keeps the sample half a texel of the mip level in use (the larger footprint) inside the UVs' box. Only such primitives carry one, as a fragment uniform: a face ending inside a continuous picture gets none, so draws keep merging |
 | textured `kEnvironmentMap` with `DrawItem::sphere_map` | prize scenes: the model's own sphere map, UVs from the reflected view vector in view space (GT3's reflection kernel), vertex colour × the reflection rows |
 | `DrawItem::frame_alpha` (race course scenery) | the PS2's frame-buffer alpha: every pass writes its fragment alpha unblended (`AlphaWrite::Write`; `kKeepAlpha` = FBMSK 0xFF000000 keeps it), `kAlphaOnly` passes (FBMSK 0x00FFFFFF shadow masks) write only the alpha, and the road sheen is added as Cs·Ad (`BlendMode::DestAlphaAdd`, GS ALPHA 0x58). `kAlphaOnly` primitives of other items are not drawn |
 | `kDestAlphaTest` (car reflection passes) | GS TEST.DATE with DATM 0: drawn only where the frame alpha < 0x80. The fragment is discarded where its weight (texel × vertex alpha) reaches 0x80 (`output_mode.w`); the 0x80 an earlier reflection pass leaves is the decoder's part (it drops the triangles the pass repeats). See docs/formats/car_model.md |
@@ -442,7 +445,7 @@ screen-linear by hand (above), and the background warm-up builds all 72 pipeline
 
 There are eight samplers: the `clamp_u`/`clamp_v` combinations (otherwise repeat), each with
 mipmaps or without (`scene::Texture::no_mips`: the full-size image only, no anisotropy; the
-tyres).
+tyres, and the car bodies, whose textures all have TEX1 MXL 0).
 `texture = -1` binds a 1×1 white texture.
 
 Out-of-range indices are dropped on upload. A primitive's `index_count` is
@@ -468,7 +471,7 @@ uses a slightly depth-biased projection, so it works without
 | `dof` | GT3's replay depth of field, before those passes: the scene pass keeps its depth; five small single-sample pictures (`PipelineKey::single`, model.frag's `RESAMPLE` variant) downsampled from the picture, then a pass over the (multisampled) target draws the layers of `dof_layers` as quads at their depth, tested GEQUAL against the scene's depth. The OpenGL ES backend keeps the depth between the passes (a stored depth is not invalidated) |
 | `haze`; `overlay`; `vignette` | `render::ScreenBatch` triangles in their own rectangle's units, in GT3's order after the scene and `dof` ([RACE](RACE.md#passes-after-the-3d-picture)): `haze` samples a copy of the picture (the scene pass, or the depth of field's last pass, then stores its picture and depth, and a second pass draws the haze, the `DrawItem::late` items and the overlay; depth-of-field frames get that pass too), `overlay` is added before the grade (sun glare, lamp glows), `vignette` is blended over the graded picture before the dissolve and the trail. Uploaded once per draw (one vertex and index buffer); the model shader's unlit and post modes, no shader of their own |
 | `DrawItem::late` | drawn after every other item of the pass, with the scene's depth (the tyre smoke) |
-| `DrawItem::spin_turn` | a modelled rim's spin blur (showroom wheels): the item is drawn as n instances turned about its own x axis by k / n of the turn (the `SPIN_COPIES` shaders). Each copy writes only its share of each pixel's samples (`gl_SampleMask`), so the resolve averages the copies a pixel holds and each copy's own depth keeps the brake parts behind its spokes sharp; past the sample count the copies take cells of a 4 x 4 ordered pixel pattern (`spin_copy_at`), and after the scene `spin_resolve` filters each rim's place on screen with a kernel weighing every cell alike (two or four bilinear taps a pixel apart each way: a 3 x 3 tent or 1 2 2 2 1), at the weight of how far apart a pixel's copies lie, for the mean of all of them. n doubles from the sample count while the copies would lie more than 1.5 pixels apart at the rim's edge, up to 64 and 16 cells and no more than fit 1.5 pixels apart over a radian of the edge (`spin_copy_count`). OpenGL ES 3.0: a copy a pixel. Views without the filter (VR, offscreen, the reflection cube): a copy a sample |
+| `DrawItem::spin_turn` | a modelled rim's spin blur (showroom wheels): the item is drawn as n instances turned about its own x axis by k / n of the turn (the `SPIN_COPIES` shaders). Each copy writes only its share of each pixel's samples (`gl_SampleMask`), so the resolve averages the copies a pixel holds and each copy's own depth keeps the brake parts behind its spokes sharp; past the sample count the copies take cells of a 4 x 4 ordered pixel pattern (`spin_copy_at`), and after the scene `spin_resolve` filters each rim's place on screen with a kernel weighing every cell alike (two or four bilinear taps a pixel apart each way: a 3 x 3 tent or 1 2 2 2 1), at the weight of how far apart a pixel's copies lie, for the mean of all of them. The filter reads and changes only the rim's own pixels: a mask pass draws every copy on every sample again over the scene's depth (`Items::SpinMask`, `PipelineKey::spin_mask`, kept depth), so the body, a car in front or the tyre around the rim stay sharp (public issue 350: a hidden wheel's rectangle blurred the bodywork over it). n doubles from the sample count while the copies would lie more than 1.5 pixels apart at the rim's edge, up to 64 and 16 cells and no more than fit 1.5 pixels apart over a radian of the edge (`spin_copy_count`). OpenGL ES 3.0: a copy a pixel. Views without the filter (VR, offscreen, the reflection cube): a copy a sample |
 
 `DrawItem::background` draws an item first, without depth writes, culling or
 fog (sky domes; pass `translate(eye)` as the transform). `DrawItem::in_order`
@@ -514,6 +517,18 @@ Coordinate conventions:
   a car body stay in front in the replay cameras' telephoto shots (100-150 m, a field of
   view down to 1.4 degrees), where the usual 0..1 mapping resolved only about 1 cm and they
   flickered against the body.
+- That precision also separates course faces GT3's Z buffer merges: a face drawn over an
+  earlier one from other vertices, on its plane to within millimetres (Midfield's grandstand
+  windows: the frames lie 0.1 mm from their glass, issue 349). GT3's 24-bit Z gives both the
+  same depth and GEQUAL lets the later face win; ours sees sub-millimetre differences that
+  change with the camera, and the two fight. `gtm1::mark_coplanar_overlays`
+  (`formats/model/coplanar_overlays.h`, run on every course GTM1 mesh as it loads) marks
+  such later primitives `scene::kCoplanarOverlay`: same facing, every corner within 5 mm of
+  an earlier depth-writing triangle's plane of the same mesh, overlapping it (not just along
+  an edge); passes over a marked primitive's vertices are marked too. Those draw with
+  `PipelineKey::depth_bias`: 64 units of a float depth buffer (2^-23 of the depth each,
+  about 0.5 mm at 60 m, under GT3's Z step there) plus a slope factor of 1. It takes
+  16-75 ms per course on the development Mac (Seattle the most).
 - `scene::Mesh::transform` is column-major and applied as
   `item.transform * mesh.transform`.
 - `Model::compute_bounds` ignores mesh transforms. Decoders with

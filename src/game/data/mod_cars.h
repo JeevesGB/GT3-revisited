@@ -33,6 +33,8 @@ namespace gt3r::data {
 // One parsed definition file. Unset optional values keep the donor's.
 struct ModCarDef {
     std::string label, name, maker, donor, model;
+    std::string records;    // [car] records: an exported car's records file (relative to the mod folder); no donor then
+    std::string sound_bank; // [sound] bank: a folder of engine sound banks (engine/<id>, normal0/<id>...), mod-relative
     std::string mod; // providing mod id (filled by the loader)
     std::string file; // host path (filled by the loader)
     std::optional<u16> year;
@@ -76,8 +78,12 @@ struct ModCarDef {
     // tyres, not to the shop's upgrade compounds.
     std::optional<float> grip_pct;
 
-    // [model] a body of its own (binary glTF), relative to the mod folder
-    std::string model_file;
+    // [model] a body of its own (binary glTF), relative to the mod folder: `file` for every
+    // scene, or a model per scene (GT3's menu model has an empty cockpit, its race models a
+    // driver): `menu`, `race`, or one per race time of day (`day`, `eve`, `night`). Any one
+    // of them is enough; the others fall back (resolve_model_files).
+    std::string model_file, model_menu, model_race;
+    std::array<std::string, 3> model_time; // day, eve, night
     float model_lower_mm = 0; // [model] lower_mm: move the body down (negative = up)
     std::string wheel; // [model] wheel: a rim from the disc (wheel/<label>) instead of the donor's
     // [paints] name = #RRGGBB, in menu order
@@ -108,6 +114,31 @@ struct ModCarDef {
     std::vector<Poke> pokes;
 };
 
+// An exported car's records file (`[car] records`): each record as its table keeps it, with its
+// label, and the texts it refers to (engine layout, displacement...) as game text, since a text
+// field is an index into the disc's string tables; and the labels of the ids it holds that name no
+// record (its body's model), which the loader adds to the database's names.
+struct CarRecordFile {
+    struct Text {
+        enum Kind : u8 { String = 0, Unistring = 1, Label = 2 };
+        u16 offset = 0;
+        Kind kind = Unistring; // String: a u16 index into paramstr; Unistring: into paramunistr (display names);
+                               // Label: the u64 id of this label
+        std::string text;      // game text, or the label
+    };
+    struct Record {
+        TableId table = TableId::Car;
+        std::string label;
+        Bytes bytes;
+        std::vector<Text> texts;
+    };
+    std::vector<Record> records;
+};
+Bytes serialize_car_records(const CarRecordFile& f);
+std::optional<CarRecordFile> parse_car_records(ByteSpan data, std::string* error = nullptr);
+// The fields of a record that are string indexes: offset, and whether into paramunistr.
+std::vector<std::pair<u16, bool>> record_text_fields(TableId t);
+
 // Parses a definition. Returns nullopt with *error on a hard error;
 // warnings (unknown keys) go to *warnings.
 std::optional<ModCarDef> parse_mod_car(std::string_view text, std::string* error,
@@ -132,6 +163,15 @@ void load_mod_car_files(CarDatabase& db, const std::vector<std::string>& files, 
 // The name and description go in as game text (add_mod_car).
 void load_mod_maker_file(CarDatabase& db, const std::string& file, const std::string& mod = {},
                          const text::JisTable* jis = nullptr);
+
+// The body file each scene draws (by CarScene; mod-relative as written), all empty without
+// one. A race's time of day takes its own key, else `race`, else `file`, else another time
+// of day's (day, eve, night), else `menu`; the menus take `menu`, else `file`, else the
+// race's (`race`, day, eve, night). So one model serves every scene, and a menu + race pair
+// serves both kinds.
+std::array<std::string, kCarScenes> resolve_model_files(const ModCarDef& d);
+// Every distinct body file the definition names (the package's .glb files).
+std::vector<std::string> model_files_of(const ModCarDef& d);
 
 // "255/35R21" <-> the stored size. nullopt on malformed text or sizes the
 // disc format cannot hold (width and aspect must be multiples of 5).

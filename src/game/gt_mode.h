@@ -34,6 +34,10 @@
 #include <utility>
 #include <vector>
 
+namespace gt3r {
+struct CoreImage;
+}
+
 namespace gt3r::game {
 
 // A prize set of product.gcf section 15: one or more candidate cars.
@@ -42,6 +46,10 @@ struct PrizeCar {
     std::string car;     // car label (table 30)
     int color_id = -1;   // carcolor id, -1 (or an id not in the model's list) = a random paint
     int weight = 1;
+    // Gran Turismo Concept's game configs name a prize by its place in an arcade class, "CLASS_S#008" (class, '#',
+    // place from 0): `car` is then that entry's arcade car label (table 35), and these say where it was found.
+    std::string arcade_class;
+    int arcade_index = -1;
 };
 struct PrizeSet {
     std::string name;    // "Gsunday_e_0000", "Galtezza_n_0500", "Erome2h_n_0001", "L0B0000", ...
@@ -83,9 +91,20 @@ public:
     // The game's language (disc/region.h) and what it decides: the menus' units (miles, HP
     // and ft.lb in US English; imperial(): units.mph or the player's speed_unit), money x100
     // in Japanese (money(): every price, prize and game-config sum GtData and GtMode hand out
-    // is scaled, as the program's readers do when its language test finds 0), and
+    // is scaled, as the program's readers do when its language test 0x231680 finds 0), and
     // the arcade car filter's language index.
     Region region = Region::America; // the disc's release (its PS2 save names and versions)
+    GameKind game = GameKind::Gt3;   // Gran Turismo 3 or Gran Turismo Concept (its own front end, concept_game.h)
+    // A Concept disc's lists for its rules (concept_state.h): courses, license tests, prize keys. Empty on GT3.
+    ConceptRules concept_lists;
+    // The game config the disc's program loads ("gameconf/product.gcf", "gameconf/concept_eu.gcf"): it tells a game's
+    // releases apart where their programs' own constants differ (a Concept release's memory-card names).
+    std::string game_config;
+    // Its program names a config per language (RegionData::gcf_per_language: Tokyo-Seoul v1.02, the 2001 program).
+    bool game_config_per_language = false;
+    // A Concept disc's game save title on the memory card, in the game's text encoding: the realtime text
+    // MEMORYCARDTEXT_GTCGameData in the language, else the program's built-in default. Empty on GT3.
+    std::string save_title;
     Language language = Language::US;
     Units units = language_units(Language::US);
     // Speeds in mph and distances in miles: the player's speed unit, else the language's.
@@ -120,8 +139,8 @@ public:
     std::map<std::string, std::vector<ArcadeCar>> arcade_classes;
 
     // The game config's sums (gcf tag 10), scaled (money()): a new game's credits ("initial")
-    // and the wheel shop / car wash / oil change prices, read by name as the program does.
-    // load() refuses a game config without one of them (the program has no
+    // and the wheel shop / car wash / oil change prices, read by name as the program does
+    // (0x21DCE0). load() refuses a game config without one of them (the program has no
     // fallback: its lookup reads the missing entry's value through a null pointer).
     u32 starting_credits() const { return initial_credits_; }
     u32 car_wash_price() const { return car_wash_price_; }
@@ -138,6 +157,8 @@ public:
     // text/realtime.dat value, else the program's built-in default (the NTSC-J disc's file
     // lacks 26 of the 80 slots).
     std::map<std::string, std::string> part_texts;
+    // The settings menu's own words, by slot of the realtime text group SETTING ("TIRE_SOFT"), filled the same way.
+    std::map<std::string, std::string> setting_texts;
     const PrizeSet* prize_set(const std::string& name) const;
     // A prize candidate as the car_get roll sees it in the game's language (docs/dev/GT_MODE.md "Language",
     // prize_car_label): a swapped label has no fixed colour.
@@ -160,6 +181,10 @@ private:
     std::map<u32, std::pair<std::string, std::string>> color_names_; // id -> {the language's, the first}
     std::string error_;
 };
+
+// The settings a part of `table` owns, taken from `stock` (the settings the fitted parts start with): what fitting
+// such a part re-initialises.
+void refresh_settings(sim::CarSettings& s, const sim::CarSettings& stock, int table);
 
 // Refusals (the page the original shows instead of continuing).
 enum class Check {
@@ -261,7 +286,7 @@ public:
     u8 car_flags(const std::string& car) const;  // car +0xF0: 1 not for buy, 2 not for sell, 4 no wheel change
     u8 car_category(const std::string& car) const; // car +0xF1: 0 production, 1 race, 2 rally
     s64 sell_price(const GarageCar& c) const;    // car_price / 4
-    // A part's price as the tune shop charges it (the part record's price, scaled);
+    // A part's price as the tune shop charges it (the part record's price, scaled: 0x237C80);
     // part_offer() applies it.
     u32 part_price(u32 stored) const { return data_->money(stored); }
     Check can_buy_car(const std::string& car) const;
@@ -290,6 +315,9 @@ public:
     std::optional<GarageCar> make_car(const std::string& car) const;
     // Gives every car of a loaded save the goods it comes with: a save from an older version
     // lacks those of its empty stock slots, so the car could not go back to stock.
+    // The goods of the parts a car wears (`car.parts`: its own, or another set on a copy of its record), as a new
+    // garage car owns them (0x236A68 in GT3; Concept's 0x239620).
+    std::bitset<88> fitted_ownership(const data::Car& car) const;
     void own_stock_goods(GameState& s) const;
 
     // --- Tune shop (always the ride car) ---------------------------------
@@ -300,6 +328,8 @@ public:
     bool fit_part(int goods);         // the shop's fit: must be owned (stage-0 goods = back to stock); a front tire fits its rear too
     // Fits one goods on any car (Change Parts' rule: one slot, so a front tire leaves the rear alone; ownership not checked).
     bool fit_goods(GarageCar& c, int goods) const { return fit(c, goods); }
+    // A car built elsewhere into the garage, at its head (Gran Turismo Concept's garage cars); -1 when it is full.
+    int add_garage_car(GarageCar c) { return place_in_garage(std::move(c)); }
     Check can_buy_all_tires() const;
     s64 all_tires_price() const;
     bool buy_all_tires();
@@ -396,7 +426,8 @@ public:
     std::vector<std::string> pick_opponents(const std::string& code, GameRandom& rng = race_info_random(),
                                             std::vector<int>* paints = nullptr);
     // The pool paints of opponents drawn earlier (a championship's field in its first round): each
-    // label's first entry not yet matched. Empty when no entry gives a paint.
+    // label's first entry not yet matched (a repeat of a car: its first entry's). Empty when no entry
+    // gives a paint.
     std::vector<int> pool_paints(const std::string& code, const std::vector<std::string>& labels) const;
     int pool_paint(const std::string& label, u32 color_id) const;
 
@@ -447,7 +478,7 @@ public:
     // (M4.., M1.., MM..); not arcade (A...) or anything else. Only a check with such a
     // code can award the whole-game prize set (gtmode_complete).
     static bool gt_mode_code(const std::string& code);
-    // The league a checked code belongs to for the league prize keys: a G
+    // The league a checked code belongs to for the league prize keys (0x214048, 0x214868): a G
     // code by "_e_" / "_n_" / "_h_" ("beginner", "amateur", "pro"), E "end", D "dirt", else "".
     static std::string code_league(const std::string& code);
     // Every GT-mode result slot (gcf section 4: 364 on this disc) won.
@@ -594,12 +625,16 @@ int pick_trophy_index(float completion, u32& rng);
 // Formatting helpers for the menus.
 std::string format_credits(s64 v);      // "18,000": digits grouped by ',' in every language
 // The game's money texts (its own format strings, the same in every language and release):
-// "Cr. %s" ("Cr. 18,000": the dealer's car price with the string, the
-// prize pages' balance) and the prize pages' amount left to
-// count, "%s Cr. %s" with the language's prefix (GtData::prize_prefix):
+// "Cr. %s" ("Cr. 18,000": the dealer's car price 0x11D2F8 with the string at 0x351178, the
+// prize pages' balance 0x129F50 / 0x12A140 with 0x3512E8) and the prize pages' amount left to
+// count, "%s Cr. %s" (0x129D68, 0x313A20) with the language's prefix (GtData::prize_prefix):
 // "Prize Cr. 991".
 std::string credits_text(s64 v);
 std::string prize_remain_text(std::string_view prefix, s64 v);
+// The slots of the program's realtime text group `group` (text/realtime.dat keys "<group>_<name>") with their built-in
+// default texts (game text), in the program's order: what the game shows for a slot whose value the language's file
+// leaves empty or lacks. Empty when the program has no such group.
+std::vector<std::pair<std::string, std::string>> find_realtime_group(const CoreImage& img, std::string_view group);
 // A time in the menus' format (race::menu_time_text): "1'02.400", "1:02'03.400" from an hour on,
 // the font's dashes for the "no time" value 359,999,999 ms.
 std::string format_time_ms(u32 ms);

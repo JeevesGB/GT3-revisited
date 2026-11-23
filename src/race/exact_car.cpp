@@ -74,7 +74,7 @@ sim::VehicleSetup exact_setup(const ex::Car& c) {
     return s;
 }
 
-void exact_state(const ex::Car& c, const sim::VehicleSetup& setup, sim::VehicleState& out) {
+void exact_state(const ex::Car& c, const sim::VehicleSetup& setup, sim::VehicleState& out, const ex::MoodTables* moods) {
     const sim::Vec3 fwd = exact_to_world(c.fwd), lat = exact_to_world(c.lat), up = exact_to_world(c.up);
     const sim::Vec3 cog = exact_to_world(c.pos), cl = setup.cog_offset;
     out.orientation = axes_quat(lat, up, fwd);
@@ -87,6 +87,7 @@ void exact_state(const ex::Car& c, const sim::VehicleSetup& setup, sim::VehicleS
     out.speed_kmh = h(c.speedo) * 3.6f;
     out.rev_limiter = c.rev_limiter != 0;
     out.steer = -h(c.steer_cmd);
+    out.special = moods ? ex::special_look(c, *moods) : sim::VehicleState::Special{};
     for (size_t i = 0; i < 4; ++i) {
         const ex::Wheel& w = c.w[i];
         const ex::Ground& g = c.g[i];
@@ -94,7 +95,7 @@ void exact_state(const ex::Car& c, const sim::VehicleSetup& setup, sim::VehicleS
         o.contact = {h(g.x), h(w.ground), h(g.z)};
         o.steer_angle = -h(w.steer);
         o.spin_angle = h(w.spin);
-        // The record's previous spin is moved by the turns the angle wrapped by (the loops): the tick's own turn.
+        // The record's previous spin is moved by the turns the angle wrapped by (0x1EAFC0's loops): the tick's own turn.
         o.spin_step = h(w.spin) - h(c.prev.spin[i]);
         o.angular_velocity = h(w.rim_speed) * h(c.p.inv_tire_radius[i >> 1]);
         o.suspension = -h(w.susp);
@@ -164,7 +165,7 @@ void exact_telemetry(const ex::Car& c, bool wear_on, float wall, sim::VehicleTel
         t.smoke_emit[i] = h(w.smoke_emit);
         t.skid_pitch[i] = h(w.skid_pitch);
         t.brake_heat[i] = h(w.brake_heat);
-        if (throttle > 0.05f && h(w.load) > 0 && ex::tcs_reads_axle(c.p.d.layout, int(i >> 1)))
+        if (throttle > 0.05f && h(w.load) > 0 && ex::tcs_reads_axle(c.p.d.layout, int(i >> 1), !sim::gt3_program(c.behaviour.rule(sim::Rule::Layout))))
             t.traction_level = std::max(t.traction_level, traction_at(c, i));
         // The ABS (ex::brakes' limit) on a braked wheel on the ground: nearing the tyre's best braking slip (its
         // target, before ASCC's own cut) up to 0.4, then the share of the pressure the ABS takes off past it.

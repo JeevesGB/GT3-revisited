@@ -6,6 +6,8 @@
 
 #include "game/gt_mode_menu/internal.h"
 
+#include "game/concept_menu.h"
+
 #include "game/gt_setting.h"
 #include "menu/menu_renderer.h"
 #include "sim/exact/params_build.h"
@@ -240,8 +242,8 @@ void widget_draws(const MenuController& ctl, const Element& w, std::vector<menu:
     }
     if (cls == "gear_chart") {
         // The settings menu's gear chart (gt_mode §14): each forward gear's line (sim::exact::gear_chart) from its low rpm at
-        // that speed to its high rpm at that speed, road speed to the right on a fixed 0 .. 97.22 m/s (350 km/h) scale,
-        // engine speed up to the highest line end, clipped to the box; light green, dark orange for one
+        // that speed to its high rpm at that speed, road speed to the right on a fixed 0 .. 97.22 m/s (350 km/h) scale
+        // (0x350078), engine speed up to the highest line end, clipped to the box; light green, dark orange for one
         // frame where the gear's ratio x final changed since the frame before.
         GarageCar* work = setting_work();
         if (!work) return;
@@ -270,7 +272,7 @@ void widget_draws(const MenuController& ctl, const Element& w, std::vector<menu:
             const size_t k = size_t(i);
             const float xa = w.x + g.speed_lo[k].host() * sx, ya = w.y + float(g.rpm_lo[k]) * sy;
             const float xb = w.x + g.speed_hi[k].host() * sx, yb = w.y + float(g.rpm_hi[k]) * sy;
-            // A strip 4 wide, its ends shifted across by 2 x (screen) dy / length and up / down by 0.5.
+            // 0x23BEF0: a strip 4 wide, its ends shifted across by 2 x (screen) dy / length and up / down by 0.5.
             const float dy = ya - yb, len = std::hypot(xb - xa, dy);
             if (!(len > 0)) continue;
             const float o = 2.0f * dy / len;
@@ -304,7 +306,7 @@ bool hide_art(const std::string& page, const Element& el) {
     if (!el.widget_class) return false;
     const std::string& c = *el.widget_class;
     // The prize screen's "render_model" marker: its place shows the 3D car instead.
-    if ((page == "car_get" || page == "license_get" || page == "trophy_get" || is_mini_prize(page)) &&
+    if ((page == "car_get" || page == "concept_car_get" || page == "license_get" || page == "trophy_get" || is_mini_prize(page)) &&
         c == "render_model")
         return true;
     // The car renders' own image is the showroom's reflection map (car_select_env), not
@@ -486,10 +488,10 @@ bool car_get_scene(CarGetScene& out) {
     const Show& sh = *ms.show;
     const CarGetRoulette& rl = sh.car_get.roulette;
     if (rl.n <= 0) return false;
-    // The cars item: the carousel until the others have dropped below the
-    // tallest car, then the car won alone. Each car: Translate(place) RotY(heading),
+    // CarsItem::vf3 (0x13D750): the carousel (0x13D938) until the others have dropped below the
+    // tallest car, then the car won alone (0x13DF30). Each car: Translate(place) RotY(heading),
     // the others then Translate(0, drop, 0); its floor light Translate(0, -0.005, 0)
-    // RotY(-heading) Scale(side / 2, 1, side / 2) over the unit square.
+    // RotY(-heading) Scale(side / 2, 1, side / 2) over the unit square (0x13D798, 0x13C2D8).
     for (int i = 0; i < rl.n && size_t(i) < sh.candidates.size(); ++i) {
         const bool lit = rl.current[size_t(i)];
         if (rl.alone() && !lit) continue;
@@ -507,7 +509,7 @@ bool car_get_scene(CarGetScene& out) {
     out.shade = rl.shade();
     out.light_half = rl.side.host() * 0.5f;
     out.light_y = CarGetRoulette::kSpotDrop;
-    // The car get menu camera: eye and look-at from the springs; the up vector
+    // CarGetMenuCamera::vf3 (0x13C668): eye and look-at from the springs; the up vector
     // (0, -dz, dy) / max(|(dy, dz)|, 0.01) of the view direction.
     for (int k = 0; k < 3; ++k) out.eye[k] = rl.eye[size_t(k)].x.host(), out.look[k] = rl.look[size_t(k)].x.host();
     const float dy = out.look[1] - out.eye[1], dz = out.look[2] - out.eye[2];
@@ -529,6 +531,7 @@ bool car_for_widget(const std::string& page, const std::string& cls, std::string
     if (!s) return false;
     if (wheel) wheel->clear();
     if (dirt) *dirt = 0;
+    if (concept_car_for_widget(page, cls, car, paint)) return true; // Concept's prize car page
     if (cls == "render_model" && page == "car_get" && ms.show && ms.show->page == "car_get") {
         // The candidate the roulette is on, in its own paint (the car won once it has stopped).
         const auto& c = ms.show->candidates;

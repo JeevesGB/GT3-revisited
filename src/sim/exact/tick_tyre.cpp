@@ -1,5 +1,6 @@
 // Phase 7's tyre forces: rolling resistance, the slip-ratio curves, the longitudinal and slip-angle forces; see tick.h.
 
+#include "sim/exact/build_math.h"
 #include "sim/exact/tick.h"
 
 namespace gt3r::sim::exact {
@@ -10,7 +11,7 @@ constexpr F kPi = F::raw(0x40490FDB);
 constexpr F kHalfPi = F::raw(0x3FC90FDB), kNegHalfPi = F::raw(0xBFC90FDB);
 constexpr F kOne = F::raw(0x3F800000), kNegOne = F::raw(0xBF800000);
 
-// Two tables on table c's axis at once (the same point k for both): c's y and y2's.
+// 0x1D9098: two tables on table c's axis at once (the same point k for both): c's y and y2's.
 void lookup2(const Table<12>& c, const std::array<F, 12>& y2, F v, F& out_c, F& out_2) {
     const u32 last = u32(s32(c.n) - 1);
     if (v <= c.x[0]) {
@@ -33,21 +34,23 @@ void lookup2(const Table<12>& c, const std::array<F, 12>& y2, F v, F& out_c, F& 
 
 } // namespace
 
-F slip_angle_fold(F b, F& sign) {
-    if (b < kNegHalfPi) {
+F slip_angle_fold(const Behaviour& h, F b, F& sign) {
+    // (2002 Tokyo-Geneva's pi / 2 and pi one unit lower: Europe 0x1DF048)
+    const F pi = folded(h, kPi.bits, 0x40490FDA);
+    if (b < folded(h, kNegHalfPi.bits, 0xBFC90FDA)) {
         sign = kOne;
-        return b + kPi;
+        return b + pi;
     }
     if (b < F()) {
         sign = kNegOne;
         return -b;
     }
-    if (b < kHalfPi) {
+    if (b < folded(h, kHalfPi.bits, 0x3FC90FDA)) {
         sign = kOne;
         return b;
     }
     sign = kNegOne;
-    return kPi - b;
+    return pi - b;
 }
 
 void rolling_resistance(Car& c, const Statics& s) {
@@ -98,11 +101,11 @@ void tyre_slip_force(Car& c) {
             continue;
         }
         F a = w.steer;
-        if (w.hub_vx < F()) a = a + kPi; // rolling backwards
+        if (w.hub_vx < F()) a = a + folded(c.behaviour, kPi.bits, 0x40490FDA); // rolling backwards (Europe 0x1DF1D8)
         const F beta = angle_diff(a, w.slip_dir, c.behaviour.rule(Rule::AngleWrap));
         t.slip_angle = beta;
         F sign;
-        const F v = slip_angle_fold(beta, sign);
+        const F v = slip_angle_fold(c.behaviour, beta, sign);
         F u1 = sign * lookup(r.curve_a, v);
         u1 = u1 * w.slip_fade;
         F u2 = lookup(r.curve_b, v) * w.slip_fade;

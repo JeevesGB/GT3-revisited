@@ -16,12 +16,13 @@
 
 namespace gt3r::net {
 
-constexpr u16 kProtocolVersion = 5; // 4: races on the exact core (exact car states, pad frames); 5: CPU cars
-constexpr int kMaxPlayers = 6; // as the original's i.LINK battle
+constexpr u16 kProtocolVersion = 6; // 4: races on the exact core (exact car states, pad frames); 5: CPU cars; 6: 32-car fields
+constexpr int kMaxPlayers = 16; // players in a lobby (the original's i.LINK battle: 6)
+constexpr int kMaxRaceCars = 32; // a race's cars, the players' and the CPU cars (sim::exact::kMaxCars)
 // The host's CPU cars on the grid's empty places (docs/dev/ONLINE.md "CPU cars"): ids of their own, never a player's. The
 // host runs them; their states, finishes and descriptors (CarInfo) come from it.
 constexpr u8 kCpuId = 0x80;  // CPU car k is kCpuId + k
-constexpr int kMaxCpuCars = 5;
+constexpr int kMaxCpuCars = kMaxRaceCars - 1; // (the host alone and a full field)
 constexpr bool is_cpu_id(u8 id) { return id >= kCpuId && id < kCpuId + kMaxCpuCars; }
 constexpr size_t kMaxDatagram = 1200;
 // What a game supports beyond its protocol (Hello's last byte; older games send none): races with tyre wear.
@@ -29,7 +30,8 @@ constexpr u8 kCapTireWear = 1;
 constexpr u8 kCaps = kCapTireWear;
 
 enum class Msg : u8 {
-    Hello = 1,    // C->H  u16 version, str name, str car, u8 paint, str build, u8 n, {str endpoint}, u8 caps
+    Hello = 1,    // C->H  u16 version, str name, str car, u8 paint, str build, u8 n, {str endpoint}, u8 caps,
+                  //       str disc id, str disc name
     Welcome = 2,  // H->C  u8 your id
     Reject = 3,   // H->C  str reason
     Roster = 4,   // H->*  u8 n, {u8 id, str name, str car, u8 paint, u8 flags (1 ready, 2 loaded), u16 ping ms}
@@ -57,6 +59,14 @@ enum class Msg : u8 {
     Flag = 22,       // C->H u8 suspect, u8 FlagKind, f32 value (reliable); H->C u8 suspect, u8 kind, f32 value, u8 reporter
     Kick = 23,       // H->C str reason (the host removed us)
     Voice = 24,      // *  u8 player, u8 seq, u8 nbytes, bytes μ-law (unreliable; host relays like State)
+};
+
+// The disc a player races on (docs/dev/ONLINE.md "Discs"): the host lets in only players whose disc matches its own.
+struct OnlineDisc {
+    // "gt3": a Gran Turismo 3 release as it shipped, any region (their cars are matched one by one); any other disc
+    // (a Gran Turismo Concept release, a modified copy, a disc the game does not know) matches only the same files.
+    std::string id = "gt3";
+    std::string name = "a Gran Turismo 3 release"; // what the messages call it
 };
 
 class Writer {

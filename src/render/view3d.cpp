@@ -90,6 +90,7 @@ struct FragmentUniforms {
                      // w = 1: a car reflection drawn only below full reflectivity (kDestAlphaTest)
     float wheel_blur[4];  // DrawItem::wheel_blur: x mode, y the rim's mip level; z DrawItem::fade (0 = none); w spin copies' cells
     float wheel_steps[4]; // DrawItem::wheel_steps
+    float uv_region[4];   // scene::Primitive::uv_region (the model's textures; zero: none)
 };
 
 // Frustum planes of `vp` (clip depth 0..w, far..near): w+x, w-x, w+y, w-y, z, w-z, normalised.
@@ -338,8 +339,8 @@ std::array<u8, 3> sheen_vertex_bytes(const scene::Material& m, const Vec3& light
     return out;
 }
 
-// presentation §G17. GT3's lens (its race +0x97CC object): a film 1.333 times as wide
-// as high whose diagonal is the focal length, 0.001 m per mm; the focal length f at
+// presentation §G17. GT3's lens (its race +0x97CC object): a film 1.333 (0x34FCF0) times as wide
+// as high whose diagonal is the focal length, 0.001 m per mm (0x34FF90); the focal length f at
 // the view's zoom from the projection's vertical scale; the focus s; one line of its 448-line frame
 // on the film as the unit of blur. The near side: blurs 2^k lines, k from trunc(log2(4 + 1)) (the
 // largest, 4) down to 0, each at d = f^2 s / (f^2 + N r c (s - f)) and drawn from the last one's
@@ -347,7 +348,7 @@ std::array<u8, 3> sheen_vertex_bytes(const scene::Material& m, const Vec3& light
 // sharp picture from the last. The far side: 2^(k/2) lines, k = 0, 1, ... up to 8 lines, level
 // k / 2, at weight 1/2 for even k (a mix of two levels) and 1 for odd k, each from
 // d = f^2 s / (f^2 - N r c (s - f)) on, until a distance passes the far plane or turns negative
-// (past the hyperfocal distance: everything beyond is in focus). With ln 2.
+// (past the hyperfocal distance: everything beyond is in focus). With ln 2 (0x34FF9C, 0x34FFA0).
 std::vector<DofLayer> dof_layers(const DrawOptions::DepthOfField& d, float proj_y, float near) {
     constexpr float kLn2 = 0.6931472f;
     constexpr int kNearSteps = 1, kFarSteps = 2;     // steps per doubling (+0x28, +0x24)
@@ -380,7 +381,7 @@ std::vector<DofLayer> dof_layers(const DrawOptions::DepthOfField& d, float proj_
     return out;
 }
 
-// GT3's pyramid (table, in one 640 x 224 buffer) at its sizes; wider pictures widen it.
+// GT3's pyramid (table 0x330BD0, in one 640 x 224 buffer) at its sizes; wider pictures widen it.
 std::array<int, 2> dof_level_size(int level, float aspect) {
     static constexpr int kSize[5][2] = {{320, 224}, {320, 112}, {160, 112}, {160, 56}, {160, 56}};
     const int k = std::clamp(level, 0, 4);
@@ -430,7 +431,7 @@ void View3D::release_target() {
         *w = nullptr;
     }
     SDL_GPUDevice* dev = ctx_.device();
-    for (SDL_GPUTexture** t : {&color_, &msaa_, &depth_, &scene_, &last_, &snap_, &half_, &haze_src_, &dof_}) {
+    for (SDL_GPUTexture** t : {&color_, &msaa_, &depth_, &scene_, &last_, &snap_, &half_, &haze_src_, &dof_, &spin_mask_}) {
         if (*t) SDL_ReleaseGPUTexture(dev, *t);
         *t = nullptr;
     }
@@ -589,6 +590,8 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
     haze_low_valid_ = lenses && ph > 448 && ensure_quad() &&
                       ensure_dof_texture(haze_low_, std::max(1, int(std::lround(480.0f * aspect))), 224);
     const bool after_pass = lenses || dof;
+    // The spinning rims' mask is drawn over the finished scene's depth (spin_resolve).
+    const bool spin_mask = spin_mask_wanted(items);
 
     SDL_GPUColorTargetInfo ct{};
     ct.clear_color = {opt.clear[0], opt.clear[1], opt.clear[2], opt.clear[3]};
@@ -608,7 +611,7 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
     dt.texture = depth_;
     dt.clear_depth = kFarDepth;
     dt.load_op = SDL_GPU_LOADOP_CLEAR;
-    dt.store_op = after_pass ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
+    dt.store_op = after_pass || spin_mask ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
     dt.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     dt.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     dt.cycle = cycle && !opt.repeated;
@@ -659,7 +662,7 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
         }
         SDL_GPUDepthStencilTargetInfo hd = dt;
         hd.load_op = SDL_GPU_LOADOP_LOAD;
-        hd.store_op = SDL_GPU_STOREOP_DONT_CARE;
+        hd.store_op = spin_mask ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
         hd.cycle = false;
         pass = SDL_BeginGPURenderPass(cmd, &ht, 1, &hd);
         if (lenses) encode_screen(cmd, pass, *opt.haze, screen.haze, true);
@@ -667,7 +670,11 @@ void View3D::draw(SDL_Renderer* renderer, const SDL_FRect& rect, const Mat4& vie
         SDL_EndGPURenderPass(pass);
     }
     guard_on_ = false; // (the other entry points draw every triangle themselves)
-    if (!spin_rects_.empty()) spin_resolve(cmd, staged, pw, ph, cycle);
+    if (spin_filter_wanted()) { // (a copy a sample: nothing to even out)
+        spin_px_ = 0.5f * float(pw); // (the copies as the scene pass drew them)
+        spin_resolve(cmd, staged, pw, ph, cycle, spin_mask && encode_spin_mask(cmd, view, proj, eye, items, opt, pw, ph));
+        spin_px_ = 0;
+    }
     if (post) {
         // The finished picture (graded), then the frozen one and the last one over it.
         SDL_GPUColorTargetInfo pt{};
@@ -1135,9 +1142,9 @@ bool View3D::ensure_dof_levels(float aspect, int pw, int ph, bool pyramid) {
 }
 
 void View3D::encode_resample(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, SDL_GPUTexture* src,
-                             const Resample& r, float alpha, float depth, bool single) {
+                             const Resample& r, float alpha, float depth, bool single, SDL_GPUTexture* mask) {
     PipelineKey key;
-    key.blend = alpha >= 1.0f ? BlendMode::Opaque : BlendMode::Alpha;
+    key.blend = alpha >= 1.0f && !mask ? BlendMode::Opaque : BlendMode::Alpha;
     key.cull = CullMode::None;
     key.depth_write = false;
     key.single = single;
@@ -1158,10 +1165,11 @@ void View3D::encode_resample(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass,
     SDL_PushGPUVertexUniformData(cmd, 1, &off, sizeof(off));
     SDL_GPUTextureSamplerBinding sbs[3] = {{src, ctx_.sampler(true, true, true)},
                                            {placeholder_cube(), ctx_.sampler(true, true)},
-                                           {ctx_.white_texture(), ctx_.sampler(true, true)}};
+                                           {mask ? mask : ctx_.white_texture(), ctx_.sampler(true, true, true)}};
     SDL_BindGPUFragmentSamplers(pass, 0, sbs, 3);
     FragmentUniforms fu{};
     fu.params[0] = -1, fu.params[1] = 1, fu.params[3] = 6;
+    fu.flat_color[2] = mask ? 1.0f : 0.0f;
     fu.tint[0] = fu.tint[1] = fu.tint[2] = 1, fu.tint[3] = alpha;
     fu.light_dir[1] = 1;
     fu.view_row0[0] = r.scale[0], fu.view_row0[1] = r.scale[1];
@@ -1180,11 +1188,12 @@ void View3D::encode_resample(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass,
 // (spin_copy_period's taps, from a copy of the picture): the mean of all the copies, at the weight
 // of how far apart a pixel's own copies lie at the rim's edge (1 from a pixel on), so a rim hardly
 // turning keeps its sharpness. The heat haze's copy of the picture is free by then and is reused.
-void View3D::spin_resolve(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* picture, int pw, int ph, bool cycle) {
+// With the copies' mask (`masked`, encode_spin_mask) the filter reads and changes only the pixels
+// the turn sweeps (any copy), at their coverage; without it, the whole rectangle (the body too).
+void View3D::spin_resolve(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* picture, int pw, int ph, bool cycle,
+                          bool masked) {
     const int samples = ctx_.gles() ? 1 : ctx_.msaa(); // (the OpenGL ES variant has no sample masks)
     auto weight_of = [&](const SpinRect& s) { return s.period < 2 ? 0.0f : std::min(s.spread_px / float(samples), 1.0f); };
-    if (std::none_of(spin_rects_.begin(), spin_rects_.end(), [&](const SpinRect& s) { return weight_of(s) >= 0.02f; }))
-        return; // (a copy a sample: nothing to even out)
     if (!ensure_post(&haze_src_) || !ensure_quad()) return;
     copy_picture(cmd, picture, haze_src_, pw, ph, cycle);
     SDL_GPUColorTargetInfo t{};
@@ -1211,9 +1220,54 @@ void View3D::spin_resolve(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* picture, in
         if (weight < 0.02f || x1 <= x0 || y1 <= y0) continue;
         const SDL_Rect sc{x0, y0, x1 - x0, y1 - y0};
         SDL_SetGPUScissor(pass, &sc);
-        encode_resample(cmd, pass, haze_src_, r, weight, 0.0f, true);
+        encode_resample(cmd, pass, haze_src_, r, weight, 0.0f, true, masked ? spin_mask_ : nullptr);
     }
     SDL_EndGPURenderPass(pass);
+}
+
+bool View3D::spin_mask_wanted(const std::vector<DrawItem>& items) const {
+    return ctx_.spin_copies() &&
+           std::any_of(items.begin(), items.end(), [](const DrawItem& i) { return i.spin_turn != 0 && !i.late; });
+}
+
+bool View3D::spin_filter_wanted() const {
+    const int samples = ctx_.gles() ? 1 : ctx_.msaa();
+    return std::any_of(spin_rects_.begin(), spin_rects_.end(), [&](const SpinRect& s) {
+        return s.period >= 2 && std::min(s.spread_px / float(samples), 1.0f) >= 0.02f;
+    });
+}
+
+bool View3D::encode_spin_mask(SDL_GPUCommandBuffer* cmd, const Mat4& view, const Mat4& proj, const Vec3& eye,
+                              const std::vector<DrawItem>& items, const DrawOptions& o, int pw, int ph) {
+    if (!ensure_post(&spin_mask_)) return false;
+    SDL_GPUColorTargetInfo ct{};
+    ct.clear_color = {1, 1, 1, 1};
+    ct.load_op = SDL_GPU_LOADOP_CLEAR;
+    if (msaa_) { // (free again: the scene's samples were resolved)
+        ct.texture = msaa_;
+        ct.store_op = SDL_GPU_STOREOP_RESOLVE;
+        ct.resolve_texture = spin_mask_;
+    } else {
+        ct.texture = spin_mask_;
+        ct.store_op = SDL_GPU_STOREOP_STORE;
+    }
+    SDL_GPUDepthStencilTargetInfo dt{};
+    dt.texture = depth_;
+    dt.load_op = SDL_GPU_LOADOP_LOAD;
+    dt.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    dt.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    dt.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &ct, 1, &dt);
+    if (!pass) return false;
+    const SDL_GPUViewport vp{0, 0, float(pw), float(ph), 0, 1};
+    const SDL_Rect sc{0, 0, pw, ph};
+    SDL_SetGPUViewport(pass, &vp);
+    SDL_SetGPUScissor(pass, &sc);
+    const DrawStats kept = stats_; // (the frame's counters stay the scene's)
+    encode(cmd, pass, view, proj, eye, items, o, Items::SpinMask);
+    stats_ = kept;
+    SDL_EndGPURenderPass(pass);
+    return true;
 }
 
 // presentation §G17. The GS samples a pixel at its corner, the bilinear filter at the
@@ -1485,6 +1539,7 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
         const GpuModel* model = item.model;
         if (!model || !model->valid()) continue;
         if ((which == Items::Early && item.late) || (which == Items::Late && !item.late)) continue;
+        if (which == Items::SpinMask && (item.late || item.spin_turn == 0 || !ctx_.spin_copies())) continue;
         if (reaches_past_far(item, opt, view, eye)) {
             stats_.meshes_culled += int(model->meshes().size());
             continue;
@@ -1518,7 +1573,7 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
             const int n = spin_px_ > 0 ? spin_copy_count(spread_px, radius_px, samples) : samples;
             const int cells = std::max(n / samples, 1);
             vis.push_back({&item, &mesh, m.world, m.dist, n, cells});
-            if (spin_px_ > 0 && in_front) {
+            if (spin_px_ > 0 && in_front && which != Items::SpinMask) {
                 const Vec3 cc = view_proj.transform_point(c);
                 const float rx = 1.1f * r * sx / (cw - r), ry = 1.1f * r * sy / (cw - r);
                 SpinRect s{&item, cc.x / cw - rx, cc.y / cw - ry, cc.x / cw + rx, cc.y / cw + ry, spread_px,
@@ -1625,12 +1680,17 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
     };
     // half: kAlphaFailBlend primitives are drawn in two halves: 1 = fragments passing the
     // alpha test (with depth write, in the opaque phase), 2 = the failing ones (blended,
-    // no depth write, in the blended phase). 0 = whole primitive.
+    // no depth write, in the blended phase). 0 = whole primitive. Car reflections over a
+    // cut-out (hole_split) too: 3 = the cut-out's hole, in the opaque phase, 4 = the rest.
     // Per-vertex lighting off until a primitive needs it (slot 1 of the vertex uniforms).
     push_lighting(VertexLighting{});
     bool vl_on = false;
+    const bool spin_mask = which == Items::SpinMask;
     auto draw_prim = [&](const Visible& v, const scene::Primitive& p, int half = 0) {
         if (v.item->hide_glass && (p.flags & scene::kGlass)) return;
+        // The mask: what covers the picture (not the depth-only, alpha-only or added passes).
+        if (spin_mask && (p.flags & (scene::kDepthOnly | scene::kAlphaOnly | scene::kAdditive | scene::kMultiplyDest)))
+            return;
         bool background = v.item->background;
         PipelineKey key;
         key.blend = (p.flags & scene::kMultiplyDest) ? BlendMode::MultiplyDest
@@ -1643,6 +1703,7 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
         if (opt.mirrored && key.cull != CullMode::None)
             key.cull = key.cull == CullMode::Back ? CullMode::Front : CullMode::Back;
         key.depth_write = !(p.flags & scene::kNoDepthWrite) && !background && half != 2;
+        key.depth_bias = (p.flags & scene::kCoplanarOverlay) != 0;
         key.coverage = opt.clear[3] < 1.0f || opt.transmission;
         key.spin_copy = v.copies > 0;
         key.plain = !v.item->wheel_blur && !key.spin_copy && plain_pass(*v.item, p, opt);
@@ -1664,6 +1725,11 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
             frame_alpha_written_ = frame_alpha_written_ || key.alpha != AlphaWrite::Keep;
         }
         key.transmission = opt.transmission && !key.depth_only;
+        if (spin_mask) {
+            const CullMode cull = key.cull;
+            key = PipelineKey{};
+            key.cull = cull, key.depth_write = false, key.spin_copy = key.spin_mask = true;
+        }
         if (!bind(key)) return;
         use_mesh(v, false);
         const GpuModel* model = v.item->model;
@@ -1674,7 +1740,9 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
             textured = true;
         } else if (p.texture >= 0) {
             const GpuModel::TextureInfo& t = model->textures()[size_t(p.texture)];
-            if (t.texture) sb = {t.texture, ctx_.sampler(t.clamp_u, t.clamp_v, t.no_mips)};
+            if (t.texture)
+                sb = {t.texture, ctx_.sampler(t.clamp_u || (p.flags & scene::kClampU), t.clamp_v || (p.flags & scene::kClampV),
+                                              t.no_mips)};
             textured = t.texture != nullptr;
         }
         SDL_GPUTextureSamplerBinding sbs[3] = {sb, {env_tex, ctx_.sampler(true, true)}, sphere_sb};
@@ -1757,7 +1825,11 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
         for (int i = 0; i < 3; ++i) fu.env_c0[i] = p.env_c0[i], fu.env_c1[i] = p.env_c1[i];
         // Car reflections over an alpha-tested pass: its failing texels keep the alpha under it.
         fu.env_c1[3] = 0;
-        if (reflection) fu.params[0] = p.under_ref, fu.env_c1[3] = p.under_alpha;
+        if (reflection) {
+            fu.params[0] = p.under_ref, fu.env_c1[3] = p.under_alpha;
+            if (half == 3) fu.params[0] += 2.0f; // the failing texels only
+            if (half == 4) fu.env_c1[3] = 0;     // the passing ones only (the failing ones add nothing)
+        }
         const scene::Material& mt = p.material;
         fu.mat_ambient[3] = mt.valid ? 1.0f : 0.0f;
         if (mt.valid) {
@@ -1780,7 +1852,7 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
         fu.wheel_blur[0] = textured ? float(v.item->wheel_blur) : 0.0f;
         fu.wheel_blur[1] = v.item->wheel_blur_lod;
         for (int i = 0; i < 4; ++i) fu.wheel_steps[i] = v.item->wheel_steps[size_t(i)];
-        fu.wheel_blur[3] = key.spin_copy ? float(v.cells) : 0.0f;
+        fu.wheel_blur[3] = key.spin_copy && !spin_mask ? float(v.cells) : 0.0f; // (the mask: every copy everywhere)
         fu.wheel_blur[2] = v.item->fade < 1.0f ? std::max(v.item->fade, 1e-3f) : 0.0f; // (DrawItem::fade)
         fu.tint[3] = std::max(v.item->alpha, 0.0f); // > 1 (blended items): the blend clamps
         fu.tint[0] = fu.tint[1] = fu.tint[2] = v.item->tint;
@@ -1788,6 +1860,8 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
         fu.output[1] = guard ? 1.0f : 0.0f; // model.vert sends the colour times w
         fu.output[2] = v.item->texture && v.item->gs_bilinear ? 1.0f : 0.0f;
         fu.output[3] = (p.flags & scene::kDestAlphaTest) ? 1.0f : 0.0f;
+        const bool region = textured && !v.item->texture && !v.item->wheel_blur; // (the spin blurs sample around the wheel)
+        for (int i = 0; i < 4; ++i) fu.uv_region[i] = region ? p.uv_region[i] : 0.0f;
         // GT3's lighting runs per vertex (the VU), with the infinite viewer: the lights and
         // material go to the vertex shader. The sheen's program has a local viewer instead:
         // GT3's light model viewer (0, 2, 0) in eye space, 2 m along the camera's up axis.
@@ -1888,6 +1962,14 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
     auto split = [](const scene::Primitive& p) {
         return (p.flags & (scene::kAlphaFailBlend | scene::kAlphaTest)) == (scene::kAlphaFailBlend | scene::kAlphaTest);
     };
+    // A car reflection over an alpha-tested pass, weighted where that pass's texels failed (a
+    // wheel arch cut out of a side panel). GT3 draws the body's passes before the wheels: the
+    // hole wrote no depth, so the wheels behind it cover what the reflection put there (public
+    // issue 364). The hole is drawn with the item's opaque passes, before the items after it.
+    auto hole_split = [](const scene::Primitive& p) {
+        constexpr u32 kReflection = scene::kAdditive | scene::kEnvironmentMap | scene::kUnlit;
+        return (p.flags & kReflection) == kReflection && p.under_ref >= 0 && p.under_alpha > 0;
+    };
     bool solid = opt.wire != WireMode::Only;
 
     // Background (sky, backdrop): everything in model order, no depth writes.
@@ -1896,7 +1978,8 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
             for (const scene::Primitive& p : v.mesh->primitives) draw_prim(v, p);
     auto draw_blended = [&](const Visible& v) {
         for (const scene::Primitive& p : v.mesh->primitives)
-            if (prim_blended(p) || v.item->alpha < 1.0f) draw_prim(v, p, split(p) && v.item->alpha >= 1.0f ? 2 : 0);
+            if (prim_blended(p) || v.item->alpha < 1.0f)
+                draw_prim(v, p, v.item->alpha < 1.0f ? 0 : split(p) ? 2 : hole_split(p) ? 4 : 0);
     };
     // Opaque and alpha-tested, item by item; an in-order item's blended primitives follow its
     // opaque ones, in model order, before the next item's opaque ones (DrawItem::in_order_join
@@ -1939,6 +2022,7 @@ void View3D::encode(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Ma
             if (v.item->alpha < 1.0f) continue;
             if (!prim_blended(p)) draw_prim(v, p);
             else if (split(p)) draw_prim(v, p, 1);
+            else if (hole_split(p)) draw_prim(v, p, 3);
         }
         if (v.item->in_order && (i + 1 == vis.size() || !same_run(i + 1))) {
             for (size_t k = run; k <= i; ++k) draw_blended(vis[k]);

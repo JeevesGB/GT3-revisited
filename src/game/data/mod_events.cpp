@@ -188,6 +188,7 @@ std::optional<ModEventDef> parse_mod_event(std::string_view text, const std::str
     d.title = get("event", "title");
     d.description = get("event", "description");
     d.picture = get("event", "picture");
+    d.icon = get("event", "icon");
     d.league = get("event", "league");
     d.base = get("event", "base");
     d.championship = yes(get("event", "championship"));
@@ -251,6 +252,7 @@ std::string format_mod_event(const ModEventDef& d) {
     ini.set("event", "title", d.title);
     if (!d.description.empty()) ini.set("event", "description", d.description);
     if (!d.picture.empty()) ini.set("event", "picture", d.picture);
+    if (!d.icon.empty()) ini.set("event", "icon", d.icon);
     if (!d.league.empty()) ini.set("event", "league", d.league);
     if (!d.base.empty()) ini.set("event", "base", d.base);
     ini.set("event", "championship", d.championship ? "yes" : "no");
@@ -421,9 +423,11 @@ bool add_mod_event(CarDatabase& db, const ModEventDef& def, std::string* error) 
         put64(b, kRegulation, regulation.empty() ? none : db::id_hash(regulation));
         put8(b, kLaps, u8(std::clamp(r.laps, 1, 99)));
         put8(b, kLicense, u8(std::clamp(ev.def.license, 0, 6)));
-        // The cars it draws: the player and as many opponents as it asks for, at most the pool's and five.
-        const int most = std::min<int>(int(lineup.size()), ModEventDef::kMaxOpponents);
-        put8(b, kCars, u8(std::clamp(r.cars > 0 ? r.cars : most, 1, most) + 1));
+        // The cars it draws: the player and as many opponents as it asks for (cars =, up to 31), more than the pool
+        // holds too (GT3's draw repeats cars once every entry is taken: a one-make race from a pool of one); when it
+        // does not say, as many as the pool has, at most five (as GT3's races).
+        const int n = r.cars > 0 ? r.cars : std::min<int>(int(lineup.size()), ModEventDef::kDefaultOpponents);
+        put8(b, kCars, u8(std::clamp(n, 1, ModEventDef::kMaxOpponents) + 1));
         put8(b, kSpecial, course->surface == kSurfaceDirt ? kDirtTires : 0);
         for (size_t p = 0; p < 6; ++p) put16(b, kPrize + 2 * p, hundreds(ev.def.prizes[p]));
         put16(b, kBonus, ev.def.championship ? hundreds(ev.def.bonus) : 0);
@@ -464,6 +468,7 @@ void load_mod_event_files(CarDatabase& db, const std::vector<std::string>& files
             def->mod = mod;
             def->file = f;
             def->picture = mod_path(f, def->picture);
+            def->icon = mod_path(f, def->icon);
         }
         if (!def || !add_mod_event(db, *def, &err)) {
             LOG_WARN("Mod event %s: %s", f.c_str(), err.c_str());

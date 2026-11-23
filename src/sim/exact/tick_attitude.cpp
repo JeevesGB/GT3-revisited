@@ -2,6 +2,7 @@
 // frame; see tick.h.
 
 #include "base/ee_math.h"
+#include "sim/exact/build_math.h"
 #include "sim/exact/tick.h"
 
 namespace gt3r::sim::exact {
@@ -10,17 +11,24 @@ namespace {
 
 const F kZero = F::raw(0), kHalf = F::raw(0x3F000000), kThirty = F::raw(0x41F00000);
 const F kPi = F::raw(0x40490FDB), kMinusPi = F::raw(0xC0490FDB), kTwoPi = F::raw(0x40C90FDB), kMinusTwoPi = F::raw(0xC0C90FDB);
-const F kThreePi = F::raw(0x4116CBE4), kMinusThreePi = F::raw(0xC116CBE4);
-const F kMaxRate = F::raw(0x3FC90FDB), kMinRate = F::raw(0xBFC90FDB);                // +-pi/2 rad/s
-const F kMaxAngle = F::raw(0x3F490FDB), kMinAngle = F::raw(0xBF490FDB);              // +-pi/4
-const F kGravity = F::raw(0x411CCCCD);                                                // 9.8
-const F kHoldTurn = F::raw(0x3F060A92);                                               // 30 deg/s
-const F kHoldHeight = F::raw(0x3E999999);                                             // 0.3 m
+const F kThreePi = F::raw(0x4116CBE4), kMinusThreePi = F::raw(0xC116CBE4);           // 0x3500F0 / 0x3500E4
+const F kMaxRate = F::raw(0x3FC90FDB), kMinRate = F::raw(0xBFC90FDB);                // 0x350520..: +-pi/2 rad/s
+const F kMaxAngle = F::raw(0x3F490FDB), kMinAngle = F::raw(0xBF490FDB);              // 0x350528..: +-pi/4
+const F kGravity = F::raw(0x411CCCCD);                                                // 0x350540 / 0x350544: 9.8
+const F kHoldTurn = F::raw(0x3F060A92);                                               // 0x35051C: 30 deg/s
+const F kHoldHeight = F::raw(0x3E999999);                                             // 0x350514 / 0x350518: 0.3 m
 
-// A far-out angle back by whole turns.
-F angle_wrap_turns(F a) {
-    const F n = ee::int_to_f(ee::to_int((ee::abs(a) + kPi) / kTwoPi));
-    return a < kZero ? a + n * kTwoPi : a + n * kMinusTwoPi;
+// The angle wrap's constants: pi, 2 pi, 3 pi; 2002 Tokyo-Geneva's (Europe 0x1EAE20, its own routine) a unit or two lower.
+struct Turns {
+    F pi, minus_pi, two_pi, minus_two_pi, three_pi, minus_three_pi;
+};
+const Turns kTurns{kPi, kMinusPi, kTwoPi, kMinusTwoPi, kThreePi, kMinusThreePi};
+const Turns kTurnsGeneva{F::raw(0x40490FDA), F::raw(0xC0490FDA), F::raw(0x40C90FDA), F::raw(0xC0C90FDA), F::raw(0x4116CBE3), F::raw(0xC116CBE3)};
+
+// 0x1D8BA8: a far-out angle back by whole turns.
+F angle_wrap_turns(F a, const Turns& t) {
+    const F n = ee::int_to_f(ee::to_int((ee::abs(a) + t.pi) / t.two_pi));
+    return a < kZero ? a + n * t.two_pi : a + n * t.minus_two_pi;
 }
 
 } // namespace
@@ -40,7 +48,7 @@ void euler_axes(F pitch, F roll, F heading, Vec3& fwd, Vec3& lat, Vec3& up) {
 void body_axes(Car& c) { euler_axes(c.pitch, c.roll, c.heading, c.fwd, c.lat, c.up); }
 
 F angle_wrap(F a, Program p) {
-    if (p == Program::NtscJ) { // a turn at a time
+    if (p == Program::NtscJ) { // 0x1D6650: a turn at a time
         if (a < kMinusPi) {
             do a = a + kTwoPi;
             while (a < kMinusPi);
@@ -49,15 +57,17 @@ F angle_wrap(F a, Program p) {
         while (kPi <= a) a = a - kTwoPi;
         return a;
     }
-    if (a < kMinusPi) return a < kMinusThreePi ? angle_wrap_turns(a) : a + kTwoPi;
-    if (!(kPi <= a)) return a;
-    return kThreePi < a ? angle_wrap_turns(a) : a - kTwoPi;
+    const Turns& t = p >= Program::ConceptGenevaEu ? kTurnsGeneva : kTurns;
+    if (a < t.minus_pi) return a < t.minus_three_pi ? angle_wrap_turns(a, t) : a + t.two_pi;
+    if (!(t.pi <= a)) return a;
+    return t.three_pi < a ? angle_wrap_turns(a, t) : a - t.two_pi;
 }
 
 F angle_diff(F a, F b, Program p) {
+    const Turns& t = p >= Program::ConceptGenevaEu ? kTurnsGeneva : kTurns;
     const F d = angle_wrap(a, p) - angle_wrap(b, p);
-    if (kPi <= d) return d - kTwoPi;
-    if (d < kMinusPi) return d + kTwoPi;
+    if (t.pi <= d) return d - t.two_pi;
+    if (d < t.minus_pi) return d + t.two_pi;
     return d;
 }
 
@@ -109,7 +119,7 @@ bool spawn_hold(Car& c, F box_heading) {
     if (mode == 2) {
         const F d = angle_diff(box_heading, c.heading, c.behaviour.rule(Rule::AngleWrap));
         if (!(d == kZero)) {
-            const F step = dt * kHoldTurn;
+            const F step = dt * folded(c.behaviour, kHoldTurn.bits, 0x3F060A90); // (2002 Tokyo-Geneva's: Europe 0x1E09A8)
             if (step < d) c.heading = c.heading + step;
             else if (d < -step) c.heading = c.heading - step;
             else c.heading = box_heading;
@@ -121,6 +131,11 @@ bool spawn_hold(Car& c, F box_heading) {
 
 void attitude(Car& c, F box_heading) {
     const F dt = c.dt;
+    // (2002 Tokyo-Geneva's pi / 2, pi / 4 and 9.8 a unit or two lower: Europe 0x1E0B68)
+    const bool z = toward_zero(c.behaviour);
+    const F kMaxRate = z ? F::raw(0x3FC90FDA) : sim::exact::kMaxRate, kMinRate = z ? F::raw(0xBFC90FDA) : sim::exact::kMinRate;
+    const F kMaxAngle = z ? F::raw(0x3F490FD9) : sim::exact::kMaxAngle, kMinAngle = z ? F::raw(0xBF490FD9) : sim::exact::kMinAngle;
+    const F kGravity = z ? F::raw(0x411CCCCC) : sim::exact::kGravity;
     F a{}, b{};
     pitch_terms(c, a, b);
     if (spawn_hold(c, box_heading)) return;
@@ -178,19 +193,19 @@ void bump_nudge(Car& c) {
         if (!(left == kZero && right == kZero)) {
             if (right < left) {
                 lift = right * kHalf;
-                c.roll = c.roll + ee::atan2(left - right, c.p.track);
+                c.roll = c.roll + atan2(c.behaviour, left - right, c.p.track);
             } else {
                 lift = left * kHalf;
-                if (left < right) c.roll = c.roll + ee::atan2(left - right, c.p.track);
+                if (left < right) c.roll = c.roll + atan2(c.behaviour, left - right, c.p.track);
             }
         }
         if (!(front == kZero && rear == kZero)) {
             F half;
             if (rear < front) {
-                c.pitch = c.pitch + ee::atan2(front - rear, c.p.wheelbase);
+                c.pitch = c.pitch + atan2(c.behaviour, front - rear, c.p.wheelbase);
                 half = rear * kHalf;
             } else if (front < rear) {
-                c.pitch = c.pitch + ee::atan2(front - rear, c.p.wheelbase);
+                c.pitch = c.pitch + atan2(c.behaviour, front - rear, c.p.wheelbase);
                 half = front * kHalf;
             } else {
                 half = front * kHalf;
@@ -218,8 +233,8 @@ void ground_frame(Car& c) {
     const F pitch_rise = ((g0 + g1) - (g2 + g3)) * kHalf;
     const F u = g0 + (g2 - g0) * w, v = g1 + (g3 - g1) * w;
     c.ground_pos.z = (u + v) * kHalf;
-    c.ground_pitch = ee::atan2(pitch_rise, c.p.wheelbase);
-    c.ground_roll = ee::atan2(u - v, c.p.track);
+    c.ground_pitch = atan2(c.behaviour, pitch_rise, c.p.wheelbase);
+    c.ground_roll = atan2(c.behaviour, u - v, c.p.track);
     euler_axes(c.ground_pitch, c.ground_roll, c.heading, c.ground_fwd, c.ground_lat, c.ground_up);
 }
 

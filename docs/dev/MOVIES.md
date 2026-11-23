@@ -128,16 +128,31 @@ first 16 non-flat frames: the luma rows on either side of the middle seam
 are discontinuous in field-split frames (ratio of seam difference to
 neighbouring row differences > 3). Survey: the 48 field-split movies have
 ≥ 94% of frames above the threshold, the 3 progressive ones (`ending_long_full`,
-`ending_short_full`, `menu_bg2`) ≤ 1.6% (PAL: ≥ 97% and ≤ 0.4%). The player
-then draws the top half for the first half of each frame period and the bottom
-half for the second ("bob", 60 pictures/s, 50 on PAL, each field stretched to
-the full height).
-`MoviePlayer::picture_rects()`/`draw()` place each field with its half-line
-offset (first field on even frame lines, second on odd: source rows mapped
-with +1/4 resp. −1/4 field line, drawn over frame rows [0, H−1) resp.
-[1, H)), so static detail does not bob up and down; the rectangles stay
-inside each field's half of the texture, so the halves never bleed into
-each other. CORE.GT3's own movie table carries the same distinction as a
+`ending_short_full`, `menu_bg2`) ≤ 1.6% (PAL: ≥ 97% and ≤ 0.4%). The seam
+difference is the smallest of three row pairs across it (h/2-1 to h/2,
+h/2-1 to h/2+1, h/2-2 to h/2), so a one-line stripe lying on the seam row is
+not taken for a seam: the Concept openings (`opening.pss`,
+`opening_GTCJP.pss`) are progressive pictures that open on a grid with a
+line there, which once made the whole opening play as fields (issue 404).
+On Concept discs the openings, `car_gtc` and `status_gtc` are progressive,
+the other movies field-split. The player
+shows a full picture per field, 60 pictures/s (50 on PAL): the decoder thread
+rebuilds each field with `deinterlace_fields()` (motion-adaptive, the "yadif"
+rule without its edge search), one frame behind the decoder since a field's
+picture needs the next frame's fields. Where the picture is still, the missing
+lines come from the neighbouring fields, so detail is as sharp as the woven
+frame; where it moves, from the field's own lines. Showing each field
+line-doubled instead ("bob") made fine horizontal detail flicker between the
+fields (issue 367, the Arcade menu's credits: three times the change from
+field to field that the movie's own motion makes; adaptive brings it down to
+the motion). The texture then stacks the two pictures and
+`MoviePlayer::picture_rects()` picks the one for the field that is due. A
+frame that cannot be deinterlaced (`can_deinterlace()`: height not a multiple
+of 4) is still drawn bob-style, each field at its half-line offset (first
+field on even frame lines, second on odd: source rows mapped with +1/4 resp.
+−1/4 field line, drawn over frame rows [0, H−1) resp. [1, H)), inside its own
+half of the texture. `gt3tool video-fields` writes the rebuilt pictures.
+CORE.GT3's own movie table carries the same distinction as a
 per-movie flag (pss.md).
 
 ## Game-flow API

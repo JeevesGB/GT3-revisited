@@ -1,5 +1,6 @@
 // Phase 11, car-car proximity: the AI's zone cells and contact intensity, relative-position codes and slipstream; see tick.h.
 
+#include "sim/exact/build_math.h"
 #include "sim/exact/tick.h"
 
 namespace gt3r::sim::exact {
@@ -13,9 +14,9 @@ const F kHeightMargin = F::raw(0x40A00000); // 5 m
 const F kViewRange = F::raw(0x42C80000);    // 100 m
 const F kCodeRange = F::raw(0x42480000);    // 50 m
 const F kContactRange = F::raw(0x41A00000); // 20 m
-const F kSlipSpeed = F::raw(0x41DE38E4);    // 100 km/h
+const F kSlipSpeed = F::raw(0x41DE38E4);    // 0x350580: 100 km/h
 const F kFastClosing = F::raw(0x41200000);  // 10 m/s
-const F kSlowClosing = F::raw(0x3E8E38E4);  // 1 km/h
+const F kSlowClosing = F::raw(0x3E8E38E4);  // 0x3505D8: 1 km/h
 const F kCloseTime = F::raw(0x40400000);    // 3 s
 const F kCloseGap = F::raw(0x40000000);     // 2 m
 const F kQuarter = F::raw(0x3E800000);
@@ -106,7 +107,7 @@ bool gap_closing(const Car& a, const Car& b, F u, F v, F& gap, F& closing) {
         const F rel = b.time_scale * at(b.vel, k) - a.time_scale * at(a.vel, k);
         q = q + at(a.fwd, k) * rel;
     }
-    if (F() <= q) return false;
+    if (gt3_program(a.behaviour.rule(Rule::GapClosing)) && F() <= q) return false; // (the later builds: also drawing apart)
     gap = p;
     closing = -q;
     return true;
@@ -114,15 +115,21 @@ bool gap_closing(const Car& a, const Car& b, F u, F v, F& gap, F& closing) {
 
 void contact_intensity(Car& c, F gap, F closing) {
     F x;
-    if (kFastClosing < closing) x = kOne;
-    else if (kSlowClosing < closing && gap / closing < kCloseTime) x = kHalf;
-    if (x == F() && gap < kCloseGap) x = kQuarter;
+    // (Rule::ContactIntensity, the later builds: 5 km/h, 0.1 km/h, 5 s and 4 m; 2002 Tokyo-Geneva's constants its own)
+    const Program rule = c.behaviour.rule(Rule::ContactIntensity);
+    const bool later = !gt3_program(rule), geneva = rule >= Program::ConceptGenevaEu;
+    const F fast = later ? F::raw(geneva ? 0x3FB1C71B : 0x3FB1C71D) : kFastClosing;
+    const F slow = later ? F::raw(geneva ? 0x3CE38E37 : 0x3CE38E3A) : kSlowClosing;
+    if (fast < closing) x = kOne;
+    else if (slow < closing && gap / closing < (later ? F::raw(0x40A00000) : kCloseTime)) x = kHalf;
+    if (x == F() && gap < (later ? F::raw(0x40800000) : kCloseGap)) x = kQuarter;
     if (c.ai.contact < x) c.ai.contact = x;
 }
 
 F slipstream_factor(const Car& leader, F x, F y) {
     const F v = leader.speed, h = leader.p.body_width;
-    if (kSlipSpeed < v && x < F() && -v < x && -h < y && y < h) return (v + x) / v;
+    // (2002 Tokyo-Geneva's 100 km/h two units lower: Europe 0x1F2C50)
+    if (folded(leader.behaviour, kSlipSpeed.bits, 0x41DE38E2) < v && x < F() && -v < x && -h < y && y < h) return (v + x) / v;
     return F();
 }
 

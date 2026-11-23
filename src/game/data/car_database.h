@@ -8,7 +8,13 @@
 // u64 id code (db::id_hash of its label). Purchasable part records share a
 // common prefix: u64 id, u64 car (label of the car the part fits),
 // u8 stage at +0x10 (0 = stock), and a u32 price in credits in the last
-// four bytes of the record.
+// four bytes of the record (GT3's; Gran Turismo Concept's gear records append
+// 8 bytes after it).
+//
+// Gran Turismo Concept's databases are the same container with the last six
+// tables in another order (table_layout below) and three longer part records
+// (chassis, engine, gear: GT3's record with bytes appended), which the readers
+// here take as they are.
 
 #include "disc/region.h"
 #include "formats/db/gt_db.h"
@@ -19,6 +25,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -73,6 +80,25 @@ enum class TableId : int {
 
 const char* table_name(TableId t);
 
+// Which table each of a paramdb's 36 holds, by its place in the archive: layout[place] = TableId.
+//
+// The 30 part tables keep their places in every database seen. The last six do not: GT3's are
+// car, variant, event, regulation, course, arcade car (TableId's order); Gran Turismo
+// Concept's (table version 0x082D / 0x082E against GT3's 0x0827) are variant, event,
+// regulation, course, arcade car, car. A program reads each by a built-in number, which is not
+// in the file (a table's header index is only its place), so the six are told apart from their
+// records, whatever the disc:
+//   - by record size: the events are the table of 504-byte records, the courses the one of 16;
+//   - the cars and the regulations both have 264-byte records: the cars are the table the two
+//     272-byte tables' base car ids (+8) are found in;
+//   - the variants and the arcade cars both have 272-byte records: the variants are the table
+//     more of the events' 32 entry slots are found in (events enter variants; a few enter
+//     arcade cars).
+// Where the records decide nothing (empty tables), or the six sizes are not those, the places
+// are GT3's.
+constexpr u16 kCarRecordSize = 264, kVariantRecordSize = 272, kEventRecordSize = 504, kCourseRecordSize = 16;
+std::array<TableId, size_t(TableId::Count)> table_layout(std::span<const db::Table> tables);
+
 // Whether a car is offered in the game's language, by its region byte (car +0xF7): 0 in every
 // language; 1 / 2 only / not in British English; 3 / 4 only / not in US English; 5 / 6 only /
 // not in the European languages (BR, FR, GR, IT, SP); 7 / 8 only / not in Japanese; larger
@@ -98,6 +124,11 @@ CarNameFields car_name_fields(Language lang);
 // the MX-5 the US release calls a Miata is one model on every disc.) A maker with no dealer on
 // the map (the cars with no maker, a few prize cars) has no country: Unknown.
 enum class DriverSide : u8 { Left, Right, Unknown };
+// Which of a car's models a scene draws, as GT3 keeps them: the menus' (menu/cars: an empty
+// cockpit) or a race's, for the course's time of day (cars/day, cars/eve, cars/night: with the
+// driver in).
+enum class CarScene : u8 { Menu, Day, Eve, Night };
+inline constexpr size_t kCarScenes = 4;
 // A dealer map country whose traffic keeps left: "jp", "uk", "aus".
 bool country_drives_on_left(std::string_view country);
 // The side for a maker's country; Unknown for none.
@@ -267,7 +298,9 @@ struct ModCar {
     std::string label;  // table 30 label
     std::string mod;    // providing mod id (empty when loaded directly)
     std::string file;   // host path of the definition file
-    std::string donor;  // disc car whose records fill everything not defined
+    std::string donor;  // disc car whose records fill everything not defined (empty: an exported car)
+    bool exported = false; // exported from a disc (game/data/car_export.h): its own records, model files and sounds
+    std::string sound_dir; // host folder of its own engine sound banks (engine/<id>, normal0/<id>...); empty = the disc's
     bool electric = false;
     float regen_torque_nm = 0; // electric: lift-off regenerative torque at the motor shaft
     float regen_kw = 0;        // electric: regenerative power limit
@@ -276,9 +309,11 @@ struct ModCar {
     // hiss under load.
     float whine_order = 0;
     float whine_level = 1, inverter_level = 1;
-    // A body of its own: host path of a binary glTF (empty = the donor's
-    // shell), and its paint colours (name, RGB 0..1) in menu order.
-    std::string model_file;
+    // A body of its own: host paths of binary glTFs by CarScene, every scene filled when the
+    // car has one (empty = the donor's shell; resolve_model_files), and its paint colours
+    // (name, RGB 0..1) in menu order.
+    std::array<std::string, kCarScenes> model_files;
+    const std::string& model_file(CarScene s) const { return model_files[size_t(s)]; }
     std::string wheel; // rim (wheel/<label> on the disc); empty = the donor's
     std::optional<DriverSide> driver_side; // the side its file gives (CarDatabase::driver_side)
     float model_lower = 0; // metres to move a glTF body down from its own ground line
@@ -333,8 +368,10 @@ public:
     // set's own (JP for "", US for "_us", BR for "_eu"): the region byte filters compare its index.
     Language language() const { return language_; }
 
-    // Generic access.
+    // Generic access. Tables are held by what they are, wherever the file keeps them
+    // (table_layout; place_of: a table's place in the file).
     const db::Table& table(TableId t) const { return tables_[size_t(t)]; }
+    size_t place_of(TableId t) const;
     std::string label(u64 code) const { return names_.name(code); }
     const ByteSpan* record(TableId t, u64 id) const;
     const ByteSpan* record(TableId t, const std::string& label) const { return record(t, db::id_hash(label)); }
@@ -398,6 +435,7 @@ public:
     struct EngineSound {
         u16 id = 0;
         u8 variant = 0;
+        std::string dir; // a mod car's own banks (ModCar::sound_dir); empty = the disc's sound/ folders
     };
     EngineSound engine_sound(u64 engine, u64 muffler, u64 turbo) const;
     EngineSound engine_sound(const Car& c) const { return engine_sound(c.parts[6], c.parts[21], c.parts[12]); }
@@ -424,19 +462,24 @@ public:
     // Problems found while loading mod cars (one line each, naming the file).
     const std::vector<std::string>& mod_car_errors() const { return mod_car_errors_; }
     void add_mod_car_error(std::string e) { mod_car_errors_.push_back(std::move(e)); }
+    // Things a loaded mod car shows differently than its author may expect (one line each, naming the file): textures
+    // of its body the game draws white (gltf.h glb_image_warnings).
+    const std::vector<std::string>& mod_car_warnings() const { return mod_car_warnings_; }
+    void add_mod_car_warning(std::string w) { mod_car_warnings_.push_back(std::move(w)); }
 
 private:
     Language language_ = Language::US;
     std::map<u16, std::string> maker_countries_;
     void decode();
     void us_medal_times(const Reader& read); // a PAL disc: the US database's medal times
-    PartInfo part_info(ByteSpan r, bool tire = false) const;
+    PartInfo part_info(ByteSpan r, bool tire = false, size_t price_at = 0) const;
     std::string pu(ByteSpan r, size_t off) const { return unistr_.at(rd16(r, off)); }
     std::string ps(ByteSpan r, size_t off) const { return paramstr_.at(rd16(r, off)); }
     std::string id_label(ByteSpan r, size_t off) const { return label(rd64(r, off)); }
 
     Bytes paramdb_;
     std::array<db::Table, size_t(TableId::Count)> tables_;
+    std::array<TableId, size_t(TableId::Count)> layout_{}; // file place -> TableId
     std::array<std::map<u64, size_t>, size_t(TableId::Count)> by_id_;
     db::StringTable paramstr_, unistr_;
     db::IdNames names_;
@@ -451,6 +494,7 @@ private:
     std::vector<ModMaker> mod_makers_;
     std::vector<ModEvent> mod_events_;
     std::vector<std::string> mod_car_errors_;
+    std::vector<std::string> mod_car_warnings_;
     std::string error_;
     bool unsupported_ = false;
 };

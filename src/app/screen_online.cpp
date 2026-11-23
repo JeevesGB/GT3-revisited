@@ -25,7 +25,7 @@
 // `aspiration=na|turbo`, `maxps=300`, `stock=1`, `mods=0`, `allowtires=0+1+7` (the tire types
 // allowed, game::kTireTypes), `stocksettings=1`, `wear=1` (tire wear). `car=` also takes an arcade car label
 // ("arm_tt_00"); `tires=7` puts it on that tire type. The host's CPU cars: `cpu=3` (how many),
-// `skill=easy|normal|hard|pro` (all of them), `cpuplace=0` (how many start ahead of the players);
+// `skill=easy|normal|hard|pro` (all of them; a Gran Turismo Concept disc's levels normal|pro|ace), `cpuplace=0` (how many start ahead of the players);
 // `page=cpu` opens their page.
 
 #include "app/screen_online.h"
@@ -41,10 +41,14 @@
 #include "base/log.h"
 #include "game/data/car_database.h"
 #include "game/gt_mode.h"
+#include "game/concept_game.h"
 #include "game/gt_mode_menu.h"
+#include "disc/disc.h"
 #include "game/gt_setting.h"
 #include "game/gt_state.h"
+#include "game/livery_package.h"
 #include "game/net_car.h"
+#include "race/custom_paints.h"
 #include "game/mod_package.h"
 #include "menu/flow/options.h"
 #include "base/sha256.h"
@@ -139,7 +143,7 @@ Script read_script() {
         else if (k == "stock") s.stock = v != "0";
         else if (k == "mods") s.mods = v != "0";
         else if (k == "cpu") s.cpu = std::clamp(std::atoi(v.c_str()), 0, net::kMaxCpuCars);
-        else if (k == "skill") s.cpu_skill = index_of(v, {"easy", "normal", "hard", "pro"});
+        else if (k == "skill") s.cpu_skill = index_of(v, {"easy", "normal", "hard", "pro", "ace"});
         else if (k == "cpuplace") s.cpu_place = std::max(0, std::atoi(v.c_str()));
         else if (k == "wear") s.wear = v != "0";
         else if (k == "stocksettings") s.stock_settings = v != "0";
@@ -384,6 +388,11 @@ private:
         program_ = app.vfs() ? race::exact_program_data(*app.vfs(), &err) : nullptr;
         if (!program_)
             core_problem_ = "This disc cannot race online yet (GT3's own physics: " + (err.empty() ? std::string("no program") : err) + ")";
+        // Players race together only on matching discs: the host turns the others away.
+        const net::OnlineDisc disc = game::online_disc(app.disc() ? &app.disc()->info() : nullptr,
+                                                       app.vfs() ? app.vfs()->region().game : GameKind::Gt3);
+        LOG_INFO("Online: this disc races as %s (%s)", disc.name.c_str(), disc.id.c_str());
+        net::online().set_disc(disc);
         // Too old for the relay: say so at once (every time Online battle opens).
         if (updates().required() && !script_.have) updates().open_dialog(net::UpdatePrompt::Required);
         app_ = &app;
@@ -449,6 +458,8 @@ private:
             g->set_texts("CPU cars", "Players start", "The players");
         }
         cpu_view_.set_read_only(true);
+        // A Gran Turismo Concept disc: the CPU cars' skills are its single-race levels (game::concept_cpu_driver).
+        for (OpponentGrid* g : {&cpu_grid_, &cpu_view_}) g->set_concept_levels(concept_disc());
         cpu_grid_.read(cfg, "online_cpu");
         if (!cars_.empty()) {
             const int saved = cpu_grid_.count();
@@ -484,7 +495,9 @@ private:
             if (script_.cpu_skill >= 0)
                 for (int k = 0; k < OpponentGrid::kMaxCars; ++k) {
                     OpponentGrid::Car c = cpu_grid_.car(k);
-                    c.skill = script_.cpu_skill;
+                    // (a Concept disc's levels: easy and normal Normal, hard and pro Professional, ace Ace)
+                    static constexpr int kConceptLevel[] = {0, 0, 1, 1, 2};
+                    c.skill = concept_disc() ? kConceptLevel[script_.cpu_skill] : std::min(script_.cpu_skill, OpponentGrid::kSkills - 1);
                     cpu_grid_.set_place(k, c);
                 }
             if (script_.allow_tires >= 0) rules_.tires = u16(script_.allow_tires);
@@ -571,8 +584,10 @@ private:
             if (game::GtModeSession* gs = game::gt_mode_session())
                 if (size_t(e.garage) < gs->gt().state().garage.size())
                     return game::online_car_from_garage(db_, gs->gt().state().garage[size_t(e.garage)]);
-        if (!e.arcade.empty()) return game::online_car_from_arcade(db_, e.arcade, u8(paint));
-        return game::online_car_from_db(db_, e.label, u8(paint));
+        game::OnlineCar oc = !e.arcade.empty() ? game::online_car_from_arcade(db_, e.arcade, u8(paint))
+                                               : game::online_car_from_db(db_, e.label, u8(paint));
+        game::set_online_car_paint(db_, oc, paint); // (a custom colour: its colour and finish)
+        return oc;
     }
     bool garage_selected() const { return !cars_.empty() && cars_[size_t(car_sel_)].garage >= 0; }
 
@@ -582,6 +597,7 @@ private:
         game::OnlineCar oc = current_car();
         const bool mod = oc.kind == game::OnlineCar::Kind::Mod || (oc.kind == game::OnlineCar::Kind::Garage && db_.mod_car(oc.car));
         if (mod && app_ && app_->vfs()) offer_own_package(oc); // (a garage mod car's package travels after the digest)
+        if (!mod && app_ && app_->vfs() && !cars_.empty()) offer_own_livery(oc, cars_[size_t(car_sel_)].model, paint_);
         ns.set_car(oc.car, oc.paint);
         ns.set_car_info(game::encode_online_car(oc));
     }
@@ -612,18 +628,78 @@ private:
         if (oc.package.empty() && oc.kind == game::OnlineCar::Kind::Mod) oc.kind = game::OnlineCar::Kind::Disc;
     }
 
+    // Our car's livery (race/custom_paints.h): its package, built once per livery (only what was painted,
+    // game/livery_package.h), offered to the session, its hash in our descriptor. One that cannot be shared: others see
+    // its paint.
+    void offer_own_livery(game::OnlineCar& oc, const std::string& model, int paint) {
+        const race::CustomPaint* lp = race::custom_paints()->at(model, paint);
+        if (!lp || !lp->pictures) return;
+        auto it = own_packages_.find("livery:" + lp->id);
+        if (it == own_packages_.end()) {
+            std::string err;
+            std::optional<Bytes> blob = game::build_livery_package(*lp, *app_->vfs(), &err);
+            std::optional<game::LiveryPackage> pkg = blob ? game::parse_livery_package(*blob, &err) : std::nullopt;
+            if (!pkg || !game::validate_livery_package(*pkg, *app_->vfs(), model, &err)) { // others would refuse it too
+                LOG_WARN("Online: livery %s cannot be shared: %s", lp->id.c_str(), err.c_str());
+                status(lp->name + " cannot be shared (" + err + "); others see its paint", true);
+                own_packages_["livery:" + lp->id] = {};
+                return;
+            }
+            OwnPackage op{sha256_hex(*blob), u32(blob->size())};
+            race::note_livery_hash(op.hash, lp->id);
+            LOG_INFO("Online: livery %s shared (%u bytes)", lp->id.c_str(), op.size);
+            net::online().offer_package(op.hash, std::move(*blob));
+            it = own_packages_.emplace("livery:" + lp->id, op).first;
+        }
+        oc.livery = it->second.hash;
+        oc.livery_size = it->second.size;
+    }
+
+    // Other players' liveries we lack: Settings -> Online -> Other players' liveries ([online] liveries = show | ask |
+    // off; ask by default) downloads them, asks once per livery, or leaves their cars in the livery's paint.
+    static std::string livery_setting(App& app) {
+        const std::string v = to_lower(app.config().get("online", "liveries").value_or("ask"));
+        return v == "show" || v == "off" ? v : "ask";
+    }
+    bool livery_installed(const game::OnlineCar& oc) const {
+        const std::string base = game::online_car_base(db_, oc);
+        const data::Car* c = db_.car(base);
+        if (!c) return true; // (no car here to wear it)
+        std::string id = race::livery_id_for_hash(oc.livery);
+        if (id.empty()) id = game::downloaded_livery_id(oc.livery);
+        return race::custom_paints()->index_of_livery(db_.model_of(*c), id) >= 0;
+    }
+
     // Other players' mod cars we lack (from their car list or garage) whose donor car is on this disc: ask once per
-    // package (when the lobby allows mods).
+    // package (when the lobby allows mods). Their liveries as the setting says.
     void offer_downloads(const net::Session& ns) {
-        if (!ns.settings().allow_mods) return;
+        const std::string liveries = app_ ? livery_setting(*app_) : "off";
         for (const net::Player& p : ns.players()) {
             if (int(p.id) == ns.my_id()) continue;
             const Bytes* info = ns.car_info(p.id);
             std::optional<game::OnlineCar> oc = info ? game::decode_online_car(*info) : std::nullopt;
-            if (!oc || !game::mod_download_offered(db_, *oc)) continue;
+            if (!oc) continue;
+            if (!oc->livery.empty() && liveries != "off" && !downloading_.count(oc->livery) && !livery_installed(*oc) &&
+                asked_.insert(oc->livery).second) {
+                if (liveries == "show") start_download(p.id, p.name, *oc, true);
+                else prompts_.push_back({p.id, p.name, *oc, true});
+            }
+            if (!ns.settings().allow_mods || !game::mod_download_offered(db_, *oc)) continue;
             if (!asked_.insert(oc->package).second) continue;
             prompts_.push_back({p.id, p.name, *oc});
         }
+    }
+
+    void start_download(u8 player, const std::string& from, const game::OnlineCar& car, bool livery) {
+        const std::string& hash = livery ? car.livery : car.package;
+        const std::string name = car.name.empty() ? car.car : car.name;
+        downloading_[hash] = {livery ? from + "'s livery" : name, car.car, from, livery, livery ? car_model_of(car) : ""};
+        net::online().request_package(hash, player);
+        status("Downloading " + downloading_[hash].name + (livery ? "" : " from " + from) + "...", false);
+    }
+    std::string car_model_of(const game::OnlineCar& car) const {
+        const data::Car* c = db_.car(game::online_car_base(db_, car));
+        return c ? db_.model_of(*c) : std::string();
     }
 
     void update_prompt(App& app) {
@@ -640,12 +716,10 @@ private:
         Prompt p = prompts_.front();
         if (yes) {
             prompts_.pop_front();
-            downloading_[p.car.package] = {p.car.name.empty() ? p.car.car : p.car.name, p.car.car, p.name};
-            net::online().request_package(p.car.package, p.player);
-            status("Downloading " + downloading_[p.car.package].name + " from " + p.name + "...", false);
+            start_download(p.player, p.name, p.car, p.livery);
         } else if (no) {
             prompts_.pop_front();
-            status(p.name + "'s car will show as a stand-in", false);
+            status(p.livery ? p.name + "'s car will show in the livery's paint" : p.name + "'s car will show as a stand-in", false);
         }
     }
 
@@ -657,13 +731,17 @@ private:
         ui.frame_round(x, y, w, h, 8, 1, colors::kOutline);
         std::string car = p.car.name.empty() ? p.car.car : p.car.name;
         char size[32];
-        std::snprintf(size, sizeof size, "%.1f MB", double(p.car.package_size) / (1024.0 * 1024.0));
-        ui.text_center_in(x, w, y + 14, p.name + " is racing a mod car you don't have:", colors::kText);
+        const double bytes = double(p.livery ? p.car.livery_size : p.car.package_size);
+        if (bytes < 1024.0 * 1024.0) std::snprintf(size, sizeof size, "%.0f KB", std::max(1.0, bytes / 1024.0));
+        else std::snprintf(size, sizeof size, "%.1f MB", bytes / (1024.0 * 1024.0));
+        ui.text_center_in(x, w, y + 14, p.livery ? p.name + "'s car wears a livery you don't have:"
+                                                 : p.name + " is racing a mod car you don't have:", colors::kText);
         ui.text_center_in(x, w, y + 32, Ui::clip(car, w - 40) + "  (" + size + ")", colors::kAccent);
-        ui.text_center_in(x, w, y + 50, "Download it? It is checked, then added to your mods.", colors::kDim);
+        ui.text_center_in(x, w, y + 50, p.livery ? "Download it? It is checked, then kept with your liveries."
+                                                 : "Download it? It is checked, then added to your mods.", colors::kDim);
         const UiRect yes{x + w / 2 - 170, y + 74, 160, 24}, no{x + w / 2 + 10, y + 74, 160, 24};
-        ui.button(yes, "Cross: download", hovering(pointer_, yes), false, true);
-        ui.button(no, "Circle: no (a stand-in)", hovering(pointer_, no), false);
+        ui.button(yes, "{Cross}: download", hovering(pointer_, yes), false, true);
+        ui.button(no, p.livery ? "{Circle}: skip" : "{Circle}: no (a stand-in)", hovering(pointer_, no), false);
         hits_.add({0, 0, Ui::kWidth, Ui::kHeight}, -1); // nothing behind the prompt
         hits_.add(yes, kHitPromptYes);
         hits_.add(no, kHitPromptNo);
@@ -676,6 +754,23 @@ private:
         Download d = it->second;
         downloading_.erase(it);
         std::string err;
+        if (d.livery) {
+            std::optional<game::LiveryPackage> lp = game::parse_livery_package(*blob, &err);
+            if (!lp || !game::validate_livery_package(*lp, *app.vfs(), d.model, &err)) {
+                LOG_WARN("Online: refused %s: %s", d.name.c_str(), err.c_str());
+                status("Refused " + d.name + ": " + err, true);
+                return;
+            }
+            std::optional<std::string> dir = game::install_livery_package(*lp, hash, app.mods_dir(), d.from, &err);
+            if (!dir) {
+                status("Could not install " + d.name + ": " + err, true);
+                return;
+            }
+            LOG_INFO("Online: installed %s in %s", d.name.c_str(), dir->c_str());
+            app.rescan_mods(); // (the race picks it up by its hash)
+            status("Installed " + d.name, false);
+            return;
+        }
         std::optional<game::ModPackage> pkg = game::parse_mod_package(*blob, &err);
         if (!pkg || !game::validate_mod_package(*pkg, db_, d.label, &err)) {
             LOG_WARN("Online: refused %s's package for %s: %s", d.from.c_str(), d.label.c_str(), err.c_str());
@@ -794,10 +889,18 @@ private:
     // finger's first tap only focuses). `act(row, h, cross)` does it; false = the page changed
     // (the remaining actions are for a page no longer on screen).
     template <class Act>
-    void row_pointer(int& sel, Act&& act, int rows, bool* back = nullptr) {
+    void row_pointer(int& sel, Act&& act, int rows, bool* back = nullptr, float* scroll = nullptr) {
         using K = PointerInput::Action::Kind;
         for (const PointerInput::Action& a : pointer_.take()) {
             if (a.kind == K::Back && back) *back = true;
+            if (scroll) { // (a page whose rows scroll: a drag or the wheel moves them)
+                if (a.kind == K::DragEnd) drag_scroll_ = -1;
+                else if (a.kind == K::Drag) {
+                    if (drag_scroll_ < 0) drag_scroll_ = *scroll;
+                    *scroll = std::max(0.0f, drag_scroll_ - (a.y - a.sy));
+                } else if (a.kind == K::Wheel)
+                    *scroll = std::max(0.0f, *scroll - a.wheel * 3 * OpponentGrid::kCarH);
+            }
             if (a.kind != K::Hover && a.kind != K::Click) continue;
             const HitArea* h = hits_.at(a.x, a.y);
             if (!h || h->id < 0) continue;
@@ -1011,7 +1114,7 @@ private:
             ui.footer(joins ? "Type, Enter to join, Esc to cancel (pad: up/down letter, right add, left delete, A join)"
                             : "Type, Enter to finish, Esc to cancel (pad: up/down letter, right add, left delete, A done)");
         else if (!editing_)
-            footer_actions(ui, "Up/Down: choose", {{"Cross: choose", kFootChoose}, {"Triangle: back", kFootBack}}, hits_,
+            footer_actions(ui, "{Up/Down}: choose", {{"{Cross}: choose", kFootChoose}, {"{Triangle}: back", kFootBack}}, hits_,
                            kHitFooter, pointer_);
         ui.text_center(Ui::kHeight - 62, "With a code nobody forwards ports: players connect directly when they can,",
                        colors::kDim);
@@ -1430,7 +1533,7 @@ private:
                 const net::Player* p = k[size_t(kick_sel_)];
                 if (!kick_armed_) {
                     kick_armed_ = true;
-                    status("Press Cross again to remove " + p->name, true);
+                    status("Press {Cross} again to remove " + p->name, true);
                 } else {
                     std::string name = p->name;
                     ns.kick(p->id);
@@ -1512,7 +1615,10 @@ private:
                         if (int k = gd ? game::arcade_class_of(*gd, oc->arcade) : 0)
                             car = std::string(game::arcade_class_name(k)) + ": " + car;
                 }
-            if (std::optional<u32> rgb = paint_rgb(app, p.car, p.paint)) draw_paint_chip(ui, 140, y, 8, 8, *rgb, false);
+            std::optional<u32> rgb = paint_rgb(app, p.car, p.paint);
+            if (const Bytes* info = ns.car_info(p.id))
+                if (std::optional<game::OnlineCar> oc = game::decode_online_car(*info); oc && oc->color) rgb = oc->color;
+            if (rgb) draw_paint_chip(ui, 140, y, 8, 8, *rgb, false);
             ui.text(152, y, Ui::clip(car, 130), car_blocked(ns, p) ? colors::kBad : colors::kDim); // cannot race here
             if (ns.is_host())
                 for (const net::Session::FlagRecord& f : ns.flags())
@@ -1550,7 +1656,7 @@ private:
             ui.text(24, y, "CPU " + std::to_string(c.k + 1), colors::kDim);
             if (c.rgb) draw_paint_chip(ui, 140, y, 8, 8, *c.rgb, false);
             ui.text(152, y, Ui::clip(c.car, 130), c.blocked ? colors::kBad : colors::kDim);
-            ui.text(290, y, OpponentGrid::skill_name(c.skill), colors::kDim);
+            ui.text(290, y, OpponentGrid::skill_name(c.skill, concept_disc()), colors::kDim);
             y += 14;
         }
         if (!ns.joined()) ui.text(24, y, "Connecting...", colors::kDim);
@@ -1582,7 +1688,7 @@ private:
             }
             if (host) hits_.add({thumb.x, thumb.y, thumb.w, thumb.h}, kHitRow, kCourse); // the course page
         }
-        row(kCourse, "Course", course, host, host, 0, host ? "(Cross: course page)" : "");
+        row(kCourse, "Course", course, host, host, 0, host ? "({Cross}: course page)" : "");
         row(kLaps, "Laps", std::to_string(host ? laps_ : ns.laps()), host, host);
         u16 gms = host ? ghost_ms_ : ns.settings().ghost_ping_ms;
         row(kGhost, "Ghost cars", ghost_text(gms), host, host);
@@ -1591,9 +1697,9 @@ private:
         row(kWear, "Tire wear", wear ? "On" : "Off", host, host, 0,
             wear && lobby_rules.dirt_course ? "(none on dirt courses)" : wear ? "(pit for fresh tires)" : "");
         row(kRules, "Car rules", game::car_rules_summary(rules_of(ns)), true, false, 0,
-            host ? "(Cross: set the rules)" : "(Cross: see the rules)");
+            host ? "({Cross}: set the rules)" : "({Cross}: see the rules)");
         row(kCpu, "CPU cars", cpu_summary(ns), true, host && cpu_limit(ns) > 0, 0,
-            host ? (cpu_limit(ns) > 0 ? "(Cross: choose the cars)" : "") : "(Cross: see the cars)");
+            host ? (cpu_limit(ns) > 0 ? "({Cross}: choose the cars)" : "") : "({Cross}: see the cars)");
         std::string problem = ns.joined() ? rule_problem(ns) : "";
         if (cars_.empty()) row(kCar, "Car", "-", !ready, false);
         else {
@@ -1603,7 +1709,7 @@ private:
             const std::string icon = art_.has_car_icon(app, car_icon_name(e)) ? car_icon_name(e)
                                      : art_.has_car_icon(app, e.label)       ? e.label
                                                                               : std::string();
-            std::string hint = !problem.empty() ? problem : ready ? "" : "(Cross: car page)";
+            std::string hint = !problem.empty() ? problem : ready ? "" : "({Cross}: car page)";
             row(kCar, "Car", entry_name(e), !ready, !ready, icon.empty() ? 0.0f : 30.0f, hint,
                 problem.empty() ? colors::kDim : colors::kBad);
             if (!icon.empty()) art_.car_icon(app, icon, SDL_FRect{ready ? 200.0f : 212.0f, ry - 3, 26, 14});
@@ -1642,7 +1748,7 @@ private:
             row(kTuning, "Settings", tunable ? tuning_text(c) : "the arcade's", tunable, false, 0,
                 !tunable                         ? ""
                 : lobby_rules.stock_settings && f.settings_changed ? "the host allows stock settings only"
-                                                                   : "(Cross: set up the car)",
+                                                                   : "({Cross}: set up the car)",
                 lobby_rules.stock_settings && f.settings_changed ? colors::kBad : colors::kDim);
         }
         row(kGearbox, "Transmission", manual_ ? "Manual" : "Automatic", true, true);
@@ -1664,13 +1770,13 @@ private:
             if (k.empty()) row(kKick, "Remove a player", "(nobody else here)", false, false);
             else {
                 const net::Player* p = k[size_t(std::clamp(kick_sel_, 0, int(k.size()) - 1))];
-                row(kKick, kick_armed_ ? "Remove? Cross again" : "Remove a player", p->name, true, true, 0, warnings_of(ns, p->id));
+                row(kKick, kick_armed_ ? "Remove? {Cross} again" : "Remove a player", p->name, true, true, 0, warnings_of(ns, p->id));
             }
         } else {
             row(kKick, "Remove a player", "(the host's choice)", false, false);
         }
         row(kLeave, "Leave", "", true, false);
-        footer_actions(ui, "Up/Down: choose   Left/Right: change   Cross: confirm", {{"Triangle: leave", kFootLeave}}, hits_,
+        footer_actions(ui, "{Up/Down}: choose   {Left/Right}: change   {Cross}: confirm", {{"{Triangle}: leave", kFootLeave}}, hits_,
                        kHitFooter, pointer_);
     }
 
@@ -1765,14 +1871,14 @@ private:
                 int n = 0;
                 for (int t = 0; t < game::kTireTypes; ++t) n += (r.tires >> t) & 1;
                 return (n == game::kTireTypes ? std::string("all") : std::to_string(n) + " of " + std::to_string(game::kTireTypes)) +
-                       (host ? "  (Cross: choose)" : "  (Cross: see them)");
+                       (host ? "  ({Cross}: choose)" : "  ({Cross}: see them)");
             }
             case kRClass: return r.car_class ? game::arcade_class_name(r.car_class) + std::string(" only") : "any";
             case kRCategory: return game::category_rule_name(r.category) + std::string(r.category ? " only" : "");
             case kRDrive: return game::drive_rule_name(r.drive) + std::string(r.drive ? " only" : "");
             case kRAspiration: return game::aspiration_rule_name(r.aspiration) + std::string(r.aspiration ? " only" : "");
             case kRPower: return r.max_ps ? "at most " + std::to_string(r.max_ps) + " PS" : "no limit";
-            case kRReset: return host ? "(Cross: clear every rule)" : "";
+            case kRReset: return host ? "({Cross}: clear every rule)" : "";
             default: return "";
             }
         };
@@ -1808,8 +1914,8 @@ private:
                                     (why.empty() ? std::string(" - allowed") : " - " + why),
                     why.empty() ? colors::kGood : colors::kBad);
         }
-        footer_actions(ui, host ? "Up/Down: choose   Left/Right: change" : "Up/Down: choose",
-                       {{"Triangle: back to the lobby", kFootRulesBack}}, hits_, kHitFooter, pointer_);
+        footer_actions(ui, host ? "{Up/Down}: choose   {Left/Right}: change" : "{Up/Down}: choose",
+                       {{"{Triangle}: back to the lobby", kFootRulesBack}}, hits_, kHitFooter, pointer_);
     }
 
     // --- tire types page (the rules' allowed tires) ---
@@ -1876,13 +1982,13 @@ private:
                 if (i == cur) hint = "your car's";
                 else if (std::find(mine.begin(), mine.end(), i) != mine.end()) hint = "your car has them";
             } else if (i == kTAll) {
-                value = host ? "(Cross: allow every tire type)" : "";
+                value = host ? "({Cross}: allow every tire type)" : "";
             }
             const char* label = i < game::kTireTypes ? game::tire_type_name(i) : i == kTAll ? "All tires" : "Back to the rules";
             draw_row(ui, i, y, i == tires_sel_, label, value, host || i == kTBack, host && i < game::kTireTypes, 250, 620, 0, hint);
         }
-        footer_actions(ui, host ? "Up/Down: choose   Left/Right or Cross: allow or not" : "Up/Down: choose",
-                       {{"Triangle: back to the rules", 0}}, hits_, kHitFooter, pointer_);
+        footer_actions(ui, host ? "{Up/Down}: choose   {Left/Right} or {Cross}: allow or not" : "{Up/Down}: choose",
+                       {{"{Triangle}: back to the rules", 0}}, hits_, kHitFooter, pointer_);
     }
 
     // --- the car's settings page (docs/dev/ONLINE.md "Tires and settings") ---
@@ -2069,10 +2175,10 @@ private:
             const int row = rows[size_t(i)];
             if (row == kTuneStock) {
                 const bool is = game::settings_text(work.settings) == game::settings_text(stock);
-                draw_row(ui, i, y, i == tune_sel_, "Stock settings", is ? "(these are)" : "(Cross: back to them)", !ready, false, 250, 620);
+                draw_row(ui, i, y, i == tune_sel_, "Stock settings", is ? "(these are)" : "({Cross}: back to them)", !ready, false, 250, 620);
             } else if (row == kTuneGarage) {
                 const bool is = !lobby_tune_;
-                draw_row(ui, i, y, i == tune_sel_, "The garage car's settings", is ? "(these are)" : "(Cross: back to them)", !ready,
+                draw_row(ui, i, y, i == tune_sel_, "The garage car's settings", is ? "(these are)" : "({Cross}: back to them)", !ready,
                          false, 250, 620);
             } else if (row == kTuneBack) {
                 draw_row(ui, i, y, i == tune_sel_, "Back to the lobby", "", true, false, 250, 620);
@@ -2093,7 +2199,7 @@ private:
             ui.text(36, kTuneY + float(n) * kTuneH + 14, "This car's parts have no adjustable settings.", colors::kDim);
         if (rules_of(ns).stock_settings && game::settings_text(work.settings) != game::settings_text(stock))
             ui.text(36, kTuneY + float(std::min(n, kTuneVisible)) * kTuneH + 24, "The host allows stock settings only.", colors::kBad);
-        footer_actions(ui, "Up/Down: choose   Left/Right: change   L1/R1: by ten", {{"Triangle: back to the lobby", 0}}, hits_,
+        footer_actions(ui, "{Up/Down}: choose   {Left/Right}: change   {L1}/{R1}: by ten", {{"{Triangle}: back to the lobby", 0}}, hits_,
                        kHitFooter, pointer_);
     }
 
@@ -2171,15 +2277,20 @@ private:
     // How many cars a course's grid holds (0: unknown).
     int grid_size(const std::string& course) {
         auto [it, fresh] = grid_sizes_.try_emplace(course, 0);
-        if (fresh && app_ && app_->vfs()) it->second = course_grid_size(*app_->vfs(), course);
+        if (fresh && app_ && app_->vfs()) it->second = course_field_size(*app_->vfs(), course);
         return it->second;
     }
     int grid_size(const std::string& course) const { return const_cast<OnlineScreen*>(this)->grid_size(course); }
-    // Room for CPU cars: the course's grid (six cars at most, as GT3's races) less the players.
+    // Room for CPU cars: the course's field (course_field_size: up to 32 cars) less the players.
     int cpu_limit(const net::Session& ns) const {
         const int slots = grid_size(ns.is_host() ? course_label() : ns.course());
-        const int cars = std::min(net::kMaxPlayers, slots > 0 ? slots : net::kMaxPlayers);
+        const int cars = std::min(net::kMaxRaceCars, slots > 0 ? slots : net::kMaxRaceCars);
         return std::clamp(cars - int(ns.players().size()), 0, net::kMaxCpuCars);
+    }
+    // A Gran Turismo Concept disc: CPU skills are its single-race levels.
+    static bool concept_disc() {
+        const game::GtData* gd = gt_data();
+        return gd && gd->game == GameKind::Concept;
     }
     // Host: the lineup as the lobby sends it (as many CPU cars as fit), each car's descriptor out to everyone.
     void cpu_settings(net::Settings& st) {
@@ -2191,10 +2302,16 @@ private:
             const OpponentGrid::Car& c = cpu_grid_.car(k);
             if (!cpu_car_ok(c.car)) break; // (a car not on this disc's list: none from here on)
             net::Settings::CpuCar cc;
-            cc.paint = u8(c.paint), cc.skill = u8(c.skill);
-            cc.driver = OpponentGrid::skill_driver(db_, c.skill, dirt).value_or(std::array<u8, 16>{});
-            st.cpu.push_back(cc);
             game::OnlineCar oc = car_at(c.car, c.paint);
+            cc.paint = oc.paint, cc.skill = u8(c.skill); // (a custom colour: its finish; the colour is in its descriptor)
+            // GT3: the arcade race of the skill's difficulty; a Concept disc: the car's own single race at the level.
+            const game::GtData* gd = gt_data();
+            const std::optional<std::array<u8, 16>> driver =
+                concept_disc() && gd ? game::concept_cpu_driver(*gd, oc.kind == game::OnlineCar::Kind::Arcade ? oc.arcade : std::string(),
+                                                                oc.car, c.skill, dirt)
+                                     : OpponentGrid::skill_driver(db_, c.skill, dirt);
+            cc.driver = driver.value_or(std::array<u8, 16>{});
+            st.cpu.push_back(cc);
             if (program_) oc.digest = game::online_car_digest(db_, *program_, oc);
             ns.set_cpu_car_info(k, game::encode_online_car(oc));
         }
@@ -2220,7 +2337,7 @@ private:
             if (const Bytes* info = ns.car_info(u8(net::kCpuId + k)))
                 if (std::optional<game::OnlineCar> oc = game::decode_online_car(*info))
                     c.label = oc->kind == game::OnlineCar::Kind::Arcade ? oc->arcade : oc->car;
-            c.paint = st.cpu[k].paint, c.skill = std::clamp(int(st.cpu[k].skill), 0, OpponentGrid::kSkills - 1);
+            c.paint = st.cpu[k].paint, c.skill = std::clamp(int(st.cpu[k].skill), 0, cpu_view_.skills() - 1);
             cpu_view_.set_place(int(k), c);
         }
     }
@@ -2245,7 +2362,7 @@ private:
                     if (oc->kind == game::OnlineCar::Kind::Arcade)
                         if (int cls = gd ? game::arcade_class_of(*gd, oc->arcade) : 0)
                             r.car = std::string(game::arcade_class_name(cls)) + ": " + r.car;
-                    if (app_) r.rgb = paint_rgb(*app_, oc->car, c.paint);
+                    if (app_) r.rgb = oc->color ? oc->color : paint_rgb(*app_, oc->car, c.paint);
                     r.blocked = !ns.is_host() && game::car_here_blocks(car_here(*info).h);
                 }
             out.push_back(r);
@@ -2257,7 +2374,7 @@ private:
         const std::vector<net::Settings::CpuCar>& cpu = ns.settings().cpu;
         if (cpu.empty()) return ns.is_host() && cpu_limit(ns) == 0 ? "None (the grid is full)" : "None";
         const bool same = std::all_of(cpu.begin(), cpu.end(), [&](const net::Settings::CpuCar& c) { return c.skill == cpu[0].skill; });
-        return std::to_string(cpu.size()) + " - " + (same ? OpponentGrid::skill_name(cpu[0].skill) : "mixed skills");
+        return std::to_string(cpu.size()) + " - " + (same ? OpponentGrid::skill_name(cpu[0].skill, concept_disc()) : "mixed skills");
     }
     // Host: a CPU car against the lobby's car rules ("" = all allowed).
     std::string cpu_rules_problem(const net::Session& ns) const {
@@ -2268,8 +2385,23 @@ private:
     }
 
     enum CpuFooter { kFootCpuBack };
-    static constexpr float kCpuX = 40, kCpuR = 600, kCpuY = 50;
+    static constexpr float kCpuX = 40, kCpuR = 600, kCpuY = 50, kCpuBottom = 292; // (the lineup scrolls between Y and Bottom)
     int cpu_sel_ = 0;
+    float cpu_scroll_ = 0, drag_scroll_ = -1; // the CPU cars' lineup scrolled by (UI units); where a drag began (-1 none)
+    // The CPU cars' lineup scrolled into its column (`follow`: the focused row in view).
+    void clamp_cpu_scroll(const OpponentGrid& g, bool follow) {
+        float top = 0, at = 0, h = 0;
+        for (int r = 0; r < g.rows(); ++r) {
+            if (r == cpu_sel_) at = top, h = g.row_h(r);
+            top += g.row_h(r);
+        }
+        const float view = kCpuBottom - kCpuY;
+        if (follow && h > 0) {
+            if (at < cpu_scroll_) cpu_scroll_ = at;
+            else if (at + h > cpu_scroll_ + view) cpu_scroll_ = at + h - view;
+        }
+        cpu_scroll_ = std::clamp(cpu_scroll_, 0.0f, std::max(0.0f, top - view));
+    }
 
     void update_cpu(App& app) {
         const MenuInput& m = app.menu();
@@ -2285,7 +2417,7 @@ private:
             }
             cpu_action(app, row, h, cross);
             return page_ == Page::Cpu;
-        }, rows, &back);
+        }, rows, &back, &cpu_scroll_);
         if (back || m.pressed(PadButton::Triangle) || m.pressed(PadButton::Circle)) {
             page_ = Page::Lobby;
             sel_ = kCpu;
@@ -2297,6 +2429,7 @@ private:
         if (int v = m.vertical()) {
             cpu_sel_ = (cpu_sel_ + v + rows) % rows;
             picker_sound(app, "cursor");
+            clamp_cpu_scroll(g, true);
         }
         cpu_sel_ = std::clamp(cpu_sel_, 0, rows - 1);
         int h = m.horizontal();
@@ -2336,15 +2469,21 @@ private:
         g.set_texts("CPU cars", "Players start", "The players (" + std::to_string(ns.players().size()) + ")");
         ui.fill(0, 20, Ui::kWidth, Ui::kHeight - 36, colors::kBackground);
         ui.header("CPU CARS", host ? "Cars the computer drives on the grid's empty places" : "The host chooses them");
-        float y = kCpuY;
+        clamp_cpu_scroll(g, false);
+        float y = kCpuY - cpu_scroll_;
         if (g.rows() == 0) {
-            ui.text(kCpuX, y, "No room for CPU cars: the course's grid is full.", colors::kDim);
+            ui.text(kCpuX, kCpuY, "No room for CPU cars: the course's grid is full.", colors::kDim);
         }
+        float content = 0;
         for (int r = 0; r < g.rows(); ++r) {
             const UiRect rect{kCpuX, y, kCpuR - kCpuX, g.row_h(r)};
-            g.render_row(app, ui, r, rect, r == cpu_sel_, {hits_, pointer_, kHitRow, kHitLeft, kHitRight, r});
+            if (rect.y >= kCpuY - 0.5f && rect.y + rect.h <= kCpuBottom + 0.5f) // (rows scrolled out of the column: not drawn)
+                g.render_row(app, ui, r, rect, r == cpu_sel_, {hits_, pointer_, kHitRow, kHitLeft, kHitRight, r});
             y += g.row_h(r);
+            content += g.row_h(r);
         }
+        ui.scrollbar(UiRect{kCpuX, kCpuY, kCpuR - kCpuX + 8, kCpuBottom - kCpuY}, content, cpu_scroll_);
+        y = std::min(y, kCpuBottom);
         // What the row under the cursor does.
         std::string help;
         const int rows = g.rows();
@@ -2355,10 +2494,10 @@ private:
         else if (row == OpponentGrid::kPlaceRow) help = "Where the players start among the CPU cars";
         else if (row == OpponentGrid::kSkillRow) help = "Sets every CPU car's skill at once";
         else if (row >= OpponentGrid::kLineup && g.who(row) != OpponentGrid::kPlayer)
-            help = host ? "Cross: the car and its color   Left/Right: its skill" : "";
+            help = host ? "{Cross}: the car and its color   {Left/Right}: its skill" : "";
         if (!help.empty()) ui.text(kCpuX + 6, std::max(y + 6, 300.0f), Ui::clip(help, kCpuR - kCpuX), colors::kDim);
-        footer_actions(ui, host ? "Up/Down: choose   Left/Right: change" : "Up/Down: choose",
-                       {{"Triangle: back to the lobby", kFootCpuBack}}, hits_, kHitFooter, pointer_);
+        footer_actions(ui, host ? "{Up/Down}: choose   {Left/Right}: change" : "{Up/Down}: choose",
+                       {{"{Triangle}: back to the lobby", kFootCpuBack}}, hits_, kHitFooter, pointer_);
     }
 
     // --- pickers ---
@@ -2433,7 +2572,7 @@ private:
         l.laps = e.laps;
         game::OnlineCar oc = current_car();
         l.car = oc.car;
-        l.paint = oc.paint;
+        l.paint = game::online_car_local_paint(db_, oc); // (a custom colour: its index here)
         l.car_info = game::encode_online_car(oc);
         l.manual = manual_;
         l.asm_on = asm_on_, l.tcs_on = tcs_on_;
@@ -2618,11 +2757,14 @@ private:
         u8 player = 0;
         std::string name;
         game::OnlineCar car;
+        bool livery = false; // its livery, not a mod car
     };
     std::deque<Prompt> prompts_;
     std::set<std::string> asked_; // package hashes already offered to the user
     struct Download {
         std::string name, label, from;
+        bool livery = false;
+        std::string model; // a livery's: the body it must be for
     };
     std::map<std::string, Download> downloading_; // by package hash
     game::CarRules rules_; // the host's rules (as set here; without dirt_course)

@@ -62,9 +62,14 @@ struct GameRequest {
     // 1 drift (-1 = not chosen, e.g. GT mode).
     int transmission = -1;
     int tire_mode = -1;
+    // Gran Turismo Concept (the Concept spec): the car page's driving assist choice (0..2, -1 = not chosen);
+    // a course license test run with the pace car.
+    int assist = -1;
+    bool lead_car = false;
     // 2 Player Battle: player 2's car, class, paint and choices ("" / -1 = none).
     std::string car2, car2_class;
     int car2_color = 0, transmission2 = -1, tire_mode2 = -1;
+    int assist2 = -1; // (Concept: player 2's driving assist choice, as `assist`)
     // Player 2's garage car (arcade garage classes) as car_parts / car_model / car_wheel are
     // player 1's: its fitted parts and settings, model and bought wheels.
     std::optional<std::array<std::uint64_t, 27>> car2_parts;
@@ -92,6 +97,9 @@ struct GameRequest {
     bool no_rubber_band = false;
     int laps = 0;
     int player_slot = -1;
+    // Not GT3's: a field of our own (Quick race's custom race, a mod event) of up to 32 cars, the grid places past the course's
+    // own made along its main line (race::FieldConfig::made_grid). GT3's races: off.
+    bool big_field = false;
     // Championship round (GT mode): 1-based round and round count, 0 = not a championship.
     int champ_round = 0;
     int champ_rounds = 0;
@@ -143,7 +151,7 @@ struct GameResult {
     bool abandoned = false;
     // The live race was started (START in the pre-race menu, or a run with no such menu); false
     // when the player left from the pre-race menu: GT3 counts and records only a started race
-    // (gt_mode §3.4; START).
+    // (gt_mode §3.4; START, 0x132E98).
     bool started = true;
     // License tests judged by the race: -2 = not judged (GT mode judges from
     // finished + total_time), -1 = failed / no medal, 0 gold, 1 silver, 2 bronze.

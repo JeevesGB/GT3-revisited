@@ -69,6 +69,9 @@ struct PipelineKey {
     // A modelled rim's turned copies (DrawItem::spin_turn): model.vert's and model.frag's
     // SPIN_COPIES variants.
     bool spin_copy = false;
+    // With spin_copy: the copies' mask instead of their colour (View3D::spin_resolve): each covered
+    // sample of a target cleared to white is written black, nothing else (no depth writes).
+    bool spin_mask = false;
     // A draw that samples its texture in one of the rare ways (DrawItem::wheel_blur, gs_bilinear;
     // the heat haze): model.frag's FX variant. The other draws do without that code, which slows
     // every fragment on phone GPUs even where it does not run.
@@ -87,6 +90,9 @@ struct PipelineKey {
     // Writes the depth whatever is there and no colour: View3D's depth reset after an item
     // (DrawItem::depth_reset).
     bool depth_reset = false;
+    // A small depth bias towards the eye (scene::kCoplanarOverlay): wins over the earlier face it
+    // lies on, as GT3's Z buffer lets it.
+    bool depth_bias = false;
     auto operator<=>(const PipelineKey&) const = default;
 };
 

@@ -53,9 +53,13 @@ mods/
       my_maker.ini                 <- a new maker with a dealer (see "Dealers and makers")
     events/
       my_event.ini                 <- a GT Mode event (see "Adding events")
+    liveries/
+      sunday_blue.ini              <- a new paint colour for a car (see "Paint colours")
+      sunday_cup_12/               <- a livery: livery.ini and its pictures (see "Liveries")
     files/
       menu/license_bg.img          <- replaces this file from GT3.VOL
       bgm/race_a05.ads             <- replaces a music track
+      music/dealer-01.flac         <- your own recording of a menu tune (see "Menu music")
     textures/
       tyres/tread-0123456789abcdef.png  <- replaces the texture with this key (see "Texture packs")
 ```
@@ -89,7 +93,7 @@ earlier versions kept them.
 `eu`, `jp`, or a serial of its own such as `SCEF-50294`) or serials, written
 either way (`SCES_502.94` or `SCES-50294`). A serial names one release (`PBPX-95503`
 is NTSC-U 1.10, not 1.00); `eu` means the PAL releases only, not a modified disc
-under a serial of its own. On other discs the mod stays off, and the Mods screen
+under a serial of its own. A `!` leaves a disc out: `discs = !SCES-50858` is every disc but that one. On other discs the mod stays off, and the Mods screen
 says which discs it is for. Give `files/` mods a `discs` line: a file replaced
 for one release can break another disc (a PAL car list on a modified PAL disc
 with cars of its own). Texture packs and mod cars rarely need one: a texture is
@@ -212,6 +216,43 @@ wheel and tyre nodes, can come back as a mod car's own body.
 
 From the command line: `gt3tool model <iso> <vol-path> <outdir> --gltf` (cars, wheels, prize
 models) and `gt3tool course-obj <iso> <vol-path> <outdir> glb`.
+
+## Exporting cars
+
+A car from one of your discs can be exported whole, as a mod your other discs load: a Gran
+Turismo Concept car in Gran Turismo 3, or a car one GT3 release has and another lacks. On the
+**Car database** screen, **R2** exports the selected car and **L2** every car on the disc. From
+the command line:
+
+```bash
+gt3tool car-export concept.iso r35_gtr_tmv_01 mods/
+```
+```bash
+gt3tool car-export concept.iso all mods/
+```
+
+The cars go into one mod per disc, `mods/cars_<disc>/` (`cars_sces50858` for the European Tokyo-Geneva
+disc). Its `mod.ini` says `discs = !<disc>`, so it stays off on the disc it came from and is on
+everywhere else. Each car's label gets the disc's suffix (`r35_gtr_tmv_01_sces50858`), so an exported
+car never replaces a car of the disc it is loaded on. A car brings everything it has on its disc:
+
+| File | Holds |
+|---|---|
+| `cars/<label>.ini` | name, maker, year, price, category and its paints (the model's colour list, in order); a car file like any other, so `[dealer]`, `[arcade]` and `[raw.*]` work on it |
+| `cars/<label>.records` | every database record of the car: the stock parts, the upgrade parts the shops sell, the car record, and the shared records they use (steering, driving aids, tyre sizes and compounds). A shared record the other disc holds differently comes in under a label of the car's own |
+| `files/cars/{day,eve,night}/<model>_<disc>`, `files/menu/cars/<model>_<disc>` | its models for races and the showroom, with their stock rims, lamps and camera points |
+| `sounds/engine/<id>`, `sounds/<normal0-3, turbo0-3>/<id>` | its engine sounds |
+
+The car then races on the physics of the disc it is loaded on. Gran Turismo Concept's longer chassis,
+engine and gear records are cut to GT3's sizes (their added bytes are not read). What GT3 itself does
+not have stays behind: a car with a stepless or automatic gearbox on its disc shifts as a manual one
+in GT3 (its file says so in a comment). A maker GT3 has no dealer for (LEXUS, a few racing cars
+without a maker) gets no dealer page: the car is in arcade mode and the quick race pickers, and joins
+GT Mode once a mod adds the maker (see "Dealers and makers"). A car its disc gives no price is not
+for sale.
+
+The exported files are your disc's data: keep them for your own use. Online, an exported car is never
+sent to another player.
 
 ## Adding cars
 
@@ -460,11 +501,35 @@ Pearl White = #E9E9E6
 Ultra Red = #9B1B22
 ```
 
+GT3 keeps two kinds of model for each car: the menus' (dealers, garage, arcade
+car select) with an empty cockpit, and the races' with the driver in, one for
+each time of day. A mod car can do the same:
+
+```ini
+[model]
+menu = models/my_car_menu.glb  ; dealers, garage, car select: no driver
+race = models/my_car_race.glb  ; races: with the driver in
+night = models/my_car_night.glb ; optional: a race at night (also day, eve)
+```
+
+Every key is optional and any one is enough: `file` is the model for
+everything, and the others fall back to it. A race takes its time of day's
+model (`day`, `eve` or `night`), else `race`, else `file`, else another time of
+day's, else `menu`. The menus take `menu`, else `file`, else the race's. So a
+car with only `file` (or only `menu`, or only `race`) uses that one model
+everywhere, and a `menu` + `race` pair covers both. The time of day is the
+course's, as for the disc's cars.
+
 The glTF loader is `src/formats/model/gltf.*`. Use glTF's own conventions:
 metres, +Y up, the car facing +Z. Put the origin at the wheelbase midpoint on
 the ground, like GT3's own car models. The loader handles triangle meshes,
 node transforms, normals (computed when missing), one UV set, vertex
-colours, base colour factors and embedded PNG textures. Materials are
+colours, base colour factors and embedded PNG textures. JPEG textures, and
+textures kept in separate files beside the .glb, are not read: those surfaces
+show white (tinted by their base colour); the Mods screen names each one
+under its car (`texture "plate": JPEG, shows white (use PNG)`), and so does
+the log. In Blender's glTF export, set **Images** to PNG rather than
+Automatic, which can pick JPEG. Materials are
 recognised by name:
 
 | Name contains | Treated as |
@@ -491,9 +556,10 @@ with entry rules, prize money and a prize car.
 
 - **New event**, then its **title** and **description**, a **picture** (any PNG;
   it is cropped and scaled to 640 x 448 and fills the screen behind the event),
-  the **league** GT Mode lists it in, single races or a **championship**, the
+  an **icon** (any PNG; cropped to the league page's 51 x 27 strip buttons, the
+  picture squeezed into them when there is none), the **league** GT Mode lists it in, single races or a **championship**, the
   license it needs, the **car rules**, the **prizes** (per place, the champion's
-  bonus, a prize car) and the **opponents**.
+  bonus, a prize car in a color of your choice or a random one) and the **opponents**.
 - **Car rules** are GT3's own: the car type (race and rally cars, tuned cars,
   stock road cars), the drivetrain, the engine (NA or turbo) and the cars
   allowed. The cars allowed are a list, as the disc's one-make and era series
@@ -505,9 +571,11 @@ with entry rules, prize money and a prize car.
   the league's own races' driving or the arcade's Easy, Normal, Hard or
   Professional. As in GT3, one skill drives the whole field of a race. A race
   draws its opponents from a pool of up to 32 cars, as GT3's races do: as many
-  as it sets (one to five, as the course's start grid has room), in the draw's
+  as it sets (up to 31, as the course's start grid has room), in the draw's
   order, so a bigger pool gives a different field each time; you start behind
-  them. A race uses the event's opponents (every round of a championship does)
+  them. It can draw more cars than the pool has: once every car was drawn, the
+  rest are picked from the pool at random, so a pool of one car makes a
+  one-make race. A race uses the event's opponents (every round of a championship does)
   or, in single races, cars of its own.
 - Each car of a pool is **stock**, a **version from the disc** (a tuned car as
   one of the disc's races fields it: "As in Sunday Cup"), or **your tune**:
@@ -515,7 +583,7 @@ with entry rules, prize money and a prize car.
   colour of its own, or one drawn at the start. The page shows its power and
   weight as built.
 - Every change is saved as you make it, in `mods/my_events/` (`events/<name>.ini`,
-  `pictures/<name>.png`): GT Mode lists the event the next time you go there.
+  `pictures/<name>.png`, `pictures/<name>_icon.png`): GT Mode lists the event the next time you go there.
   The pages that edit part of an event (a race, its cars, a car, the prizes,
   the car rules) have **Save** and **Cancel**: Cancel puts back what the page
   held when it opened.
@@ -532,8 +600,8 @@ disc's own races pay.
 
 ### In GT Mode
 
-An event shows on its league's page like the disc's series: its strip icon, its
-picture full screen, its title and the results so far. Behind it are its race
+An event shows on its league's page like the disc's series: its icon in the
+strip, its picture full screen, its title and the results so far. Behind it are its race
 page and entry page, copied from a disc series with room for its races, with the
 course logos, race information, preview and results of the disc's own. You enter
 with your active car, which must meet the license and car rules, checked as
@@ -556,6 +624,7 @@ game's completion.
 title = Hot Hatch Cup
 description = Three rounds for front-wheel-drive hatchbacks.
 picture = pictures/hot_hatch_cup.png   ; relative to the mod folder; 640x448 shown
+icon = pictures/hot_hatch_cup_icon.png ; the strip button, 51x27 shown (default: the picture)
 league = r/beginner/beginner           ; the league page on the race map (see below)
 championship = yes                     ; no: single races
 prizes = 5000, 3000, 2000, 1000, 500, 250 ; credits for 1st .. 6th
@@ -582,7 +651,7 @@ parts = sus_semi_racing, nat_2, wtr_1, tir_soft
 course = trialmt
 laps = 2
 skill = league         ; league, easy, normal, hard, professional
-cars = 3               ; opponents it draws from its pool (default: as many as the pool has, at most 5)
+cars = 3               ; opponents it draws, 1 to 31, repeating the pool's cars when it has fewer (default: as many as the pool has, at most 5)
 
 [race2]
 course = midfield
@@ -591,8 +660,10 @@ skill = hard
 opponents = r34_gtr_v_99   ; a lineup of its own (single races only)
 ```
 
-- Up to 10 races, `[race1]` to `[race10]`, and up to 5 opponents per lineup. A
-  course's start grid must have room for every car (the creator checks it).
+- Up to 10 races, `[race1]` to `[race10]`, and up to 31 opponents per race (32
+  cars with yours; a pool holds up to 32 cars). The original's races have 6 cars;
+  a bigger field lines up behind the course's own grid, two by two along its
+  racing line. Places past 6th win no prize money and no championship points.
 - A pool entry is a car label (`gt3tool car`, or the creator's car page; mod
   cars work too), a car variant of the disc (an opponent as its races field it,
   the labels in their pools), or `tune:<name>`. A colour is a `carcolor.db` id,
@@ -625,13 +696,163 @@ opponents = r34_gtr_v_99   ; a lineup of its own (single races only)
   `..._0501`...), so two mods can't clash. Renaming the file or the mod folder
   starts its results over.
 
+## Paint colours
+
+A mod can give any car new paint colours. A colour is a name, an RGB value and
+the finish of one of the car's own paints: no pictures at all. The game makes
+the car's paint textures in the new colour from the car's own paints when the
+car loads, so panel lines, shading and highlights stay as the disc draws them.
+
+```
+mods/
+  my_colours/
+    liveries/
+      sunday_blue.ini
+      r34_orange.ini
+```
+
+```ini
+[livery]
+name = Sunday Blue      ; shown in the paint lists (none: the colour's #RRGGBB)
+author = you
+model = am0006          ; the body it is for: every car on that body gets it
+color = #1E3A8A
+finish = 4              ; optional: the car's paint (0 = its first) whose finish it takes
+```
+
+- **model** is the car's model, the name of its body file `cars/day/<model>`.
+  The **Car viewer** (Developer options) lists every model with the name of a
+  car on it (`ni0137  SKYLINE GT-R Vspec`). Several cars share a body (a car
+  and its race versions); they all get the colour.
+- **color** reads like the colours of the disc's own paint chips: the car's
+  paints show on the body somewhat darker than their chips, and so does a new
+  colour, by the same amount for that car.
+- **finish** picks the material (gloss, metallic) and reflectivity of one of
+  the car's paints. Without it the paint nearest in colour gives its finish.
+- The colours follow the disc's paints in every list of a car's paints: Quick
+  race (your car and the opponents), the arcade car select, the online car page.
+  GT Mode's dealers keep the disc's paints.
+- Online, a car in a custom colour sends its colour along, so other players see
+  it without the file. Players on an older version see the finish paint.
+- Replays keep the colours, even after the file is removed.
+- A car whose paints are whole liveries (race cars with sponsors and stripes)
+  recolours less well: its paints differ in more than their colour.
+
+- **Sharing one**: the file holds no game data, so a zip with just
+  `liveries/<name>.ini` (no `mod.ini` needed) is the whole mod; **Install from
+  .zip** takes it. The colour goes on the player's own disc car.
+- **With a texture pack**: the pack still replaces the car's textures in the
+  disc's paints. In a custom colour the car shows its disc textures recoloured:
+  the pack's pictures are keyed on the disc's paints and don't match them.
+
+`gt3tool model <iso> cars/day/<model> <outdir> --color=#1E3A8A[,finish]` exports
+the car in a colour (OBJ and PNGs) to try one out. A file the game refuses (no
+model, a bad colour, a finish the car doesn't have, a model not on the disc)
+is skipped, and the log says why.
+
+## Liveries
+
+A livery is pictures painted over a car's paint: stripes, numbers, logos, or a
+whole new design. It goes on the player's own disc car, picked like a paint, and
+holds only what its author painted.
+
+1. **Make a template** from your disc: **New livery** on the Mods screen
+   (choose the car and the paint to paint over). It writes a livery folder into
+   the mod `my_liveries` (`liveries/<car>/`) and offers to open it. Or with the
+   tool: `gt3tool livery-template <iso> <model> my_livery --paint=0 --scale=4`.
+   The folder holds:
+   - `body-set0-13-<key>.png`: the car's textures in that paint, enlarged 4×,
+     one picture per texture. `body-` pictures are the ones the paint colours
+     (on a car of one paint, all of them); `part-` ones are the rest (lamps,
+     badges, glass).
+   - `guides/`: the same pictures with the car's triangles drawn on them,
+     filled by the side they face (blue left, orange right, green top, grey
+     bottom, red front, purple rear). GT3 packs each texture with pieces from
+     all over the car.
+   - `livery.ini` to fill in.
+2. **Paint** in any editor, at the template's size or larger (a multiple of
+   it), on a layer over the picture or straight onto it. Leave the file names
+   alone: they say which texture each picture covers. Open the Mods screen
+   again (or restart) to see your changes on the car.
+3. **Share** it by playing online (see below), or zip `liveries/<name>/` for
+   **Install from .zip**. A zip carries the pictures as they are: delete the
+   ones you didn't paint first, since they are the disc's own textures.
+
+```ini
+[livery]
+name = Sunday Cup #12
+author = you
+model = ni0137
+paint = 0              ; the paint the template was made in: keep it
+; color = #1E3A8A      ; optional: a colour of your own under the pictures
+```
+
+- **What covers the car**: a picture's transparent parts show the paint, and
+  so do the parts that still match the template. You can paint straight onto
+  the template and only what you changed goes on the car. The car keeps its
+  own reflections and cut-outs (wheel arches, grilles).
+- **One texture, two sides**: many cars use one picture for both sides,
+  mirrored (the guide shows both sides' triangles on top of each other). Text
+  painted there reads backwards on one side.
+- **Where it shows**: everywhere the car is drawn. The race car, its evening
+  and night versions and the showroom model take the pictures directly (they
+  share the textures); the simpler models the race draws at a distance get the
+  livery carried over from the detailed body, so you paint it once.
+- **Texture packs**: a livery goes over the pack's picture where there is one.
+- **Online**: other players get your livery when you race them. Only what you
+  painted is sent (the parts that still show the template are left out), each
+  player's game checks it against its own disc, and it is kept in their mod
+  `downloaded_liveries`. Settings → Online → **Other players' liveries**:
+  Download, Ask (the default: a prompt for each one), or Off (their cars show the livery's paint).
+- **Replays** keep the livery while it's installed.
+
+## Menu music
+
+The menu tunes aren't recordings: the game plays them from notes
+(`music/music.seq` with the instruments in `music/music.ins`). A mod can put a
+recording in place of any of them: a `.wav`, `.flac`, `.ogg` (Vorbis) or `.mp3` file in
+`files/music/`, named after the tune.
+
+```
+mods/
+  my_menu_music/
+    files/
+      music/
+        main-01.flac               <- the title menu
+        dealer-01.wav              <- the dealers
+```
+
+The names are the tunes' titles in the **Jukebox** (`main-01`, `tune-01`,
+`lisence`, `dealer-01`, `wash-01`, `option`, `menu-03b`, `mapmenu`, `home2`);
+the ids the game asks for (`gtmenu01`, `dealer01`...) work too. Capitals don't
+matter. The Jukebox marks a tune with a recording `MOD`.
+
+A recording loops like the tune it replaces. Without loop points the whole file
+starts over at its end. To play an intro once and then loop the rest, give the
+file loop points (in samples, counted from the start):
+
+- **WAV**: a `smpl` chunk (the first loop is used), as audio editors and sample
+  tools write it.
+- **FLAC** and **Ogg**: the tags `LOOPSTART` and `LOOPLENGTH` (or `LOOPEND`, the first sample
+  after the loop).
+
+MP3 files always loop whole; their encoder padding leaves a short gap at the
+loop, so use WAV, FLAC or Ogg for a seamless one. The recording plays at the menu
+music's level and follows the Music volume; it isn't evened out, so match the
+loudness of the tunes around it. A file that doesn't decode leaves the original
+tune playing (the log says why).
+
 ## What can be modded today
 
 | Kind | Status |
 |---|---|
 | Music (`.ads`) | Works now: replace tracks; the jukebox and the game pick them up. Titles, artists and the song markers that time the replays' Video-mode cuts still come from `bgm/ads.inf` (music §8); the Options music list previews the intro file `bgm/i_<file>` |
+| Menu music | Works now: a WAV, FLAC, Ogg or MP3 recording in place of any sequenced menu tune, with its own loop points (see "Menu music") |
 | Textures | Works now: PNG texture packs at any size (see "Texture packs"), PCSX2 packs converted; whole `.img` files through `files/` too |
 | New cars (`cars/*.ini`) | Works now: data-only cars on a disc car's shell or their own glTF body, including electric ones, sold at GT Mode dealers, new makers included (see above) |
+| Cars from your other discs | Works now: any disc car, Gran Turismo Concept's included, exported whole as a mod (see "Exporting cars") |
+| Paint colours (`liveries/*.ini`) | Works now: new colours for any car, computed from its own paints, shown online and kept in replays (see "Paint colours") |
+| Liveries (`liveries/<name>/`) | Works now: pictures painted over a car on a template from your disc (New livery on the Mods screen), any size, shown at every distance and sent to the players you race online (see "Liveries") |
 | GT Mode events (`events/*.ini`) | Works now: your own series and championships on the disc's courses, with entry rules, prizes and a prize car, listed on a league page; made with the Event creator or by hand (see "Adding events") |
 | Any other file | Overrides are loaded wherever the game reads the file (menus, models, courses, sounds, databases, movies) |
 
@@ -646,4 +867,4 @@ opponents = r34_gtr_v_99   ; a lineup of its own (single races only)
 ## Rules
 
 Mods should only contain your own work. Don't distribute files extracted
-from the game.
+from the game (an exported car, a texture dump).
