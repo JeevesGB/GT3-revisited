@@ -139,6 +139,28 @@ struct HudData {
     // A car message in WRONG WAY's place (game text; drawn red when car_message_red, else amber).
     std::string car_message;
     bool car_message_red = false;
+    // The extra HUD (the race screen's gaps panel and nameplates): 0 off, 1 compact, 2 full. The gaps are to the car
+    // ahead, the car behind, the leader and the nearest same-maker car ahead: metres and seconds, < 0 none.
+    int extra_hud = 0;
+    float gap_ahead_m = -1, gap_ahead_s = -1;
+    float gap_behind_m = -1, gap_behind_s = -1;
+    float gap_leader_m = -1, gap_leader_s = -1;
+    float gap_class_m = -1, gap_class_s = -1;
+    std::string ahead_name, class_ahead_name;
+    bool ahead_ghosted = false;
+    // Last lap against the best (s; negative = faster) and the three sectors against the session best (s), each
+    // shown only while its `on` flag is set.
+    float delta_best_s = 0;
+    bool have_delta_best = false;
+    std::array<float, 3> sector_delta_s{};
+    std::array<bool, 3> sector_delta_on{};
+    // A name over each other car in the main view (UI units; the race screen projects it).
+    struct Nameplate {
+        float x = 0, y = 0;
+        std::string text;
+        bool ghosted = false;
+    };
+    std::vector<Nameplate> nameplates;
 };
 
 class Hud {
