@@ -66,8 +66,8 @@ struct SectorOrder {
         for (auto& t : time) t.fill(kNoTime);
         lap.fill(-1);
     }
-    std::array<std::array<u32, 8>, 4> time;   // +0x3AF8 + 32 s + 4 p: in order of the times
-    std::array<s16, 4> lap;                   // +0x3B78 + 2 s: the lead lap
+    std::array<std::array<u32, 8>, 4> time{};  // +0x3AF8 + 32 s + 4 p: in order of the times
+    std::array<s16, 4> lap{};                  // +0x3B78 + 2 s: the lead lap
     std::array<s8, 4> count{}, shown{};       // +0x3B80 / +0x3B84 + s: the cars that reached it on that lap, those posted
     std::array<std::array<s8, 8>, 4> car{};   // +0x3B88 + 8 s + p (not moved on an insertion, as in GT3)
 };
