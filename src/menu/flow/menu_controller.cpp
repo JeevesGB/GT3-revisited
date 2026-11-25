@@ -1065,10 +1065,10 @@ void MenuController::add_level_draws(std::vector<ElementDraw>& out, const Level&
     // Page items the flow does not list (and that are not multi children) are
     // drawn as static parts.
     for (const Element& e : p.items) {
-        bool listed = std::any_of(lv.items.begin(), lv.items.end(), [&](const ItemState& s) {
+        bool in_list = std::any_of(lv.items.begin(), lv.items.end(), [&](const ItemState& s) {
             return s.element == &e || std::find(s.children.begin(), s.children.end(), &e) != s.children.end();
         });
-        if (!listed && !window && e.x < 640) push(scene, &e, fade_alpha(e, lv.built));
+        if (!in_list && !window && e.x < 640) push(scene, &e, fade_alpha(e, lv.built));
     }
 }
 

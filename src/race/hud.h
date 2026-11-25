@@ -68,7 +68,12 @@ struct HudData {
     bool rev_limiter = false;
     bool onboard = false;  // onboard cluster (bumper/roof cameras) instead of the remote one
     float throttle = 0, brake = 0;
-    float steer = 0;       // -1..1, positive to the right (the steering monitor)
+    float throttle_prev = 0, brake_prev = 0; // the previous frame's pedals (0..1)
+    // Hybrid system: shown when `hybrid`; level 0..1; `hybrid_charging` while energy is recovered.
+    bool hybrid = false;
+    bool hybrid_charging = false;
+    float hybrid_level = 0;
+    float steer = 0;      // -1..1, positive to the right (the steering monitor)
     int lap = 0;           // current lap number (1-based; 0 = not started)
     double lap_time = 0, last_lap = -1, best_lap = -1;
     // Total / Time (presentation §D4): the run's recorded laps and the current one (their sum
