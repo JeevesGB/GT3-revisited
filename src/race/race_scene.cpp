@@ -515,11 +515,26 @@ void CarVisual::set_brake_parts(const BrakeParts& bin) {
     }
 }
 
-std::array<float, 5> car_callback_values(const sim::VehicleState& s, const sim::VehicleSetup& setup) {
-    std::array<float, 5> v;
-    for (size_t i = 0; i < 4; ++i) v[i] = 0.5f + 0.5f * s.wheels[i].flap;
-    v[4] = setup.steer_lock > 0 ? 0.5f + 0.5f * s.steer / setup.steer_lock : 0.5f;
+gtm1::CarCallback car_callback_values(const sim::VehicleState& s, const sim::VehicleSetup& setup) {
+    gtm1::CarCallback v; // phases and branches by callback id (ids 1-10; id 0 is the brake pedal)
+    for (size_t i = 0; i < 4; ++i) v.phase[1 + i] = 0.5f + 0.5f * s.wheels[i].flap; // ids 1-4: the flaps
+    v.phase[5] = setup.steer_lock > 0 ? 0.5f + 0.5f * s.steer / setup.steer_lock : 0.5f; // id 5: the steering
+    // The later builds' special cars (GT3's cars keep the Special defaults, which are the values below at rest).
+    const sim::VehicleState::Special& sp = s.special;
+    v.phase[6] = sp.wing;                                  // id 6: the wing
+    const bool level = sp.lean == 0.5f;                    // id 7: the tail, its lean (branch 0), or at level its nod
+    v.phase[7] = level ? sp.nod : sp.lean;                 //       (branch 1)
+    v.branch[7] = level ? 1 : 0;
+    v.phase[8] = sp.lamp_weight, v.branch[8] = sp.lamp;    // id 8: the lamps' fade (phase) and class (branch)
+    v.branch[9] = v.branch[10] = sp.mood;                  // ids 9, 10: the mood
     return v;
+}
+
+CarVisual::Morph& CarVisual::morph_of(int slot, int instance) const {
+    Morph& mo = morph_[std::make_pair(slot, instance)];
+    if (!mo.gpu && ctx_ && !morph_model_.meshes.empty())
+        mo.gpu = std::make_unique<render::GpuModel>(*ctx_, morph_model_); // its own textures (per-car CLUT animations)
+    return mo;
 }
 
 render::Mat4 CarVisual::body_matrix(const sim::VehicleState& s, const sim::VehicleSetup& setup) const {
@@ -696,21 +711,18 @@ void CarVisual::add_body_items(std::vector<render::DrawItem>& items, const sim::
     };
     const render::GpuModel* body = look.brake_now && body_brake_ ? body_brake_.get() : body_.get();
     items.push_back(styled({body, world * render::translate({0, body_lift(setup), 0}), lod}));
-    if (morph_base_) {
-        Morph& mo = morph_[size_t(std::clamp(look.instance, 0, int(morph_.size()) - 1))];
-        const std::array<float, 5> v = car_callback_values(s, setup);
-        if (!mo.gpu) {
-            mo.gpu = std::make_unique<render::GpuModel>(*ctx_, *morph_base_);
-            mo.values.fill(-1);
-        }
-        if (v != mo.values) {
+    if (!morphs_.empty() && !morph_model_.meshes.empty()) {
+        Morph& mo = morph_of(look.slot, look.instance);
+        const gtm1::CarCallback v = car_callback_values(s, setup);
+        if (mo.gpu && (!mo.built || !(v == mo.values))) {
             std::vector<scene::Mesh> meshes;
             for (const gtm1::MorphDraws& md : morphs_)
                 for (scene::Mesh& m : md.meshes(v)) meshes.push_back(std::move(m));
             mo.gpu->update_geometry(meshes);
             mo.values = v;
+            mo.built = true;
         }
-        items.push_back(styled({mo.gpu.get(), world * render::translate({0, body_lift(setup), 0}), lod}));
+        if (mo.gpu) items.push_back(styled({mo.gpu.get(), world * render::translate({0, body_lift(setup), 0}), lod}));
     }
     for (int i = 0; i < 4; ++i) {
         const size_t k = size_t(i);
