@@ -136,6 +136,9 @@ struct HudData {
     std::vector<EventDisplay::Message> events;
     bool event_icon = false;
     float event_icon_dx = 0, event_icon_dy = 0;
+    // A car message in WRONG WAY's place (game text; drawn red when car_message_red, else amber).
+    std::string car_message;
+    bool car_message_red = false;
 };
 
 class Hud {
@@ -173,6 +176,8 @@ public:
     void draw_replay_pause(SDL_Renderer* r, int selected, const SDL_FRect* viewport = nullptr, bool four_three = false);
     // `viewport` (UI coordinates): draw into that rectangle instead of the whole screen (split screen).
     void draw(SDL_Renderer* r, const HudData& d, const SDL_FRect* viewport = nullptr);
+    // The logger display (HudMode::Logger's rows) for one car, `dx` frame units to the right.
+    void draw_logger(SDL_Renderer* r, const HudData& d, float dx = 0, const SDL_FRect* viewport = nullptr);
     text::GameFonts& fonts() { return fonts_; }
     const text::GameFonts& fonts() const { return fonts_; }
     // Where the last draw() / draw_split() put the event display's car picture (UI units;
@@ -217,6 +222,16 @@ public:
     };
     static constexpr float kNoNeedleAngle = 3.40282347e38f; // FLT_MAX: no last angle
     static std::array<NeedlePass, 8> needle_passes(float angle, float last);
+    // The gear display's pens (frame units, baseline): the digit, the recommended gear "> n" and
+    // the shift light. `size` / `line_height`: the gear font's.
+    struct GearPens {
+        SDL_FPoint digit, hint, shift;
+    };
+    static GearPens gear_pens(float cx, float cy, int size, int line_height, float dx, float dy);
+    // The gear digit's colour (packed GS colour as drawn): red below first gear, dimmed with the clutch out.
+    static SDL_Color gear_colour(bool reverse, bool clutch_engaged);
+    // The AT / MT label's pen on a tachometer's box centre (in-car or outside cluster).
+    static SDL_FPoint transmission_pen(float cx, float cy, bool onboard);
 
 private:
 public:
@@ -245,6 +260,12 @@ private:
     void draw_times(SDL_Renderer* r, const HudData& d, int view);
     void draw_map(SDL_Renderer* r, const HudData& d, int view);
     void draw_rank(SDL_Renderer* r, const HudData& d, int view);
+    // The steering and accel / brake monitors on their rows (`dx` frame units to the right), the
+    // Concept's pedal boxes and the hybrid store monitor (x, y, w, h in frame units).
+    void draw_steering_row(SDL_Renderer* r, const HudData& d, const HudRow& row, float dx);
+    void draw_pedals_row(SDL_Renderer* r, const HudData& d, const HudRow& row, float dx);
+    void draw_pedal_boxes(SDL_Renderer* r, const HudData& d, float x, float y, float w, float h);
+    void draw_capacity(SDL_Renderer* r, const HudData& d, float x, float y, float w, float h);
     // What `block` would cover with the current transform: a rectangle per text and picture
     // (UI units). It runs measuring only (text() and blit() draw nothing).
     std::vector<SDL_FRect> measure(const std::function<void()>& block);
@@ -276,7 +297,7 @@ private:
     std::array<Image, 4> tire_body_{};
     Image tire_outline_;
     float map_ox_ = 0, map_oz_ = 0, map_scale_ = 1, map_rot_ = 0;
-    int blink_ = 0, shift_counter_ = 0, lamp_counter_ = 0;
+    int blink_ = 0, shift_counter_ = 0, lamp_counter_ = 0, hint_counter_ = 0;
     // The angle each meter's needle was last drawn at (in-car tachometer, speedometer, outside
     // tachometer, boost meter): kNoNeedleAngle until then.
     std::array<float, 4> needle_prev_{kNoNeedleAngle, kNoNeedleAngle, kNoNeedleAngle, kNoNeedleAngle};
