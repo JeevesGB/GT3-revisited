@@ -900,6 +900,9 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
                           smoke_view(camera_, box.w / box.h * CameraRig::kPixelAspect, camera_.fovy()));
             spark_pass_ = false;
             wheel_view_ = nullptr;
+            // The car's reflection map around the box's car, every frame as in the race (without it
+            // the box showed none before a run, then the map of wherever the last run ended).
+            update_env_cube();
             render::DrawOptions bo = draw_options();
             if (!licence_box) apply_depth_of_field(bo); // (the licence box: GT3's 2P-style pass, none)
             view_->draw(ui.renderer(), box, camera_.view(), camera_.projection(box.w / box.h), eye, items_, bo);
@@ -960,15 +963,19 @@ void RaceScreen::render_drive(App& app, Ui& ui) {
     Uint64 h_e1 = SDL_GetTicksNS();
     hitch::env_ms = double(h_e1 - h_e0) / 1e6;
     render::Vec3 eye = camera_.eye();
-    // In-car view: own car not drawn; a replay's on-board car mount: the followed car not drawn.
-    // Ours: a custom camera whose car would block its view fades it out (and back in after);
-    // fully faded, it is not drawn.
+    // In-car view: own car not drawn; a replay's on-board car mount: the car it rides not drawn
+    // (the followed car, or the partner's for mode 2's on-board cut). Ours: a custom camera whose
+    // car would block its view fades it out (and back in after); fully faded, it is not drawn.
     const bool mount_in = camera_.replay_on_board();
     const float car_fade = own_car_fade(camera_.body_blocks_view());
     const bool hide_target = camera_.hides_car() || mount_in || car_fade <= 0;
     const bool followed_player = !(field_ && replay_focus_ >= 0);
-    const bool own_car = !(hide_target && followed_player);
-    const int hidden = hide_target && !followed_player ? replay_focus_ : -1;
+    // The car the camera rides: 0 the player's, i the opponent i - 1.
+    const int ridden = field_ && camera_.replay_on_partner() && replay_partner_ >= 0 ? replay_partner_
+                       : followed_player                                             ? 0
+                                                                                     : replay_focus_ + 1;
+    const bool own_car = !(hide_target && ridden == 0);
+    const int hidden = hide_target && ridden > 0 ? ridden - 1 : -1;
     hidden_opponent_ = hidden;
     // The wheels: GT3 blurs them in the 1P frame, not in the 2P halves (docs/formats/car_model.md
     // "Wheel spin blur").
