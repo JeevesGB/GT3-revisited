@@ -6,6 +6,7 @@
 
 #include "audio/motor_sound.h"
 #include "base/file.h"
+#include "disc/core_image.h"
 #include "disc/volume.h"
 #include "formats/model/car_model.h"
 #include "formats/ps_adpcm.h"

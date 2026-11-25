@@ -3,6 +3,7 @@
 // (Race screen code map: docs/dev/RACE.md.)
 
 #include "app/screen_race_impl.h"
+#include "disc/core_image.h"
 
 namespace gt3r::race_screen {
 
